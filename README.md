@@ -4,6 +4,8 @@ emoji:  💎
 colorFrom: pink
 colorTo: purple
 sdk: docker
+app_port: 7860
+base_path: /docs
 pinned: false
 ---
 # Jewellery Chat API
