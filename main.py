@@ -11,7 +11,8 @@ from schemas import ChatRequest, ChatResponse, ProductOut
 app = FastAPI(
     title="Jewellery Chat API",
     version="1.0.0",
-    description="Backend API for Flutter jewellery ecommerce chatbot"
+    description="Backend API for Flutter jewellery ecommerce chatbot",
+    debug=True
 )
 
 app.add_middleware(
@@ -127,7 +128,7 @@ async def chat(req: ChatRequest, db: Session = Depends(get_db)):
     db.commit()
 
     return ChatResponse(
-        reply=reply,
-        products=products,
-        session_id=session_id
-    )
+    reply=reply,
+    products=[ProductOut.model_validate(p) for p in products],
+    session_id=session_id
+)
