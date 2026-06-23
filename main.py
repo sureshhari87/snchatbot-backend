@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+from pwdlib import PasswordHash
 from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
@@ -27,7 +27,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
 app = FastAPI(
     title="Jewellery Chat API",
-    version="2.0.0",
+    version="2.1.0",
     description="Backend API for Flutter jewellery ecommerce chatbot",
     debug=True
 )
@@ -42,7 +42,7 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 
-pwd_context = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
+password_hash = PasswordHash.recommended()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 
@@ -106,11 +106,11 @@ def startup_event():
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return password_hash.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    return password_hash.verify(plain_password, hashed_password)
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
