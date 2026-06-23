@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List
 
@@ -16,12 +17,11 @@ from schemas import (
     ChatResponse,
     ProductOut,
     UserRegister,
-    UserLogin,
     TokenResponse,
     UserOut,
 )
 
-SECRET_KEY = "change-this-to-a-long-random-secret"
+SECRET_KEY = os.getenv("SECRET_KEY", "change-this-to-a-long-random-secret")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
@@ -42,7 +42,7 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 
@@ -59,10 +59,38 @@ def seed_products(db: Session):
         return
 
     items = [
-        Product(name="Classic Gold Ring", category="Ring", metal="Gold", price=18999, image="https://example.com/images/ring_101.jpg", in_stock=True),
-        Product(name="Rose Gold Diamond Ring", category="Ring", metal="Rose Gold", price=19999, image="https://example.com/images/ring_102.jpg", in_stock=True),
-        Product(name="Minimal Gold Necklace", category="Necklace", metal="Gold", price=24999, image="https://example.com/images/necklace_201.jpg", in_stock=True),
-        Product(name="Pearl Drop Earrings", category="Earring", metal="Silver", price=7999, image="https://example.com/images/earring_301.jpg", in_stock=True),
+        Product(
+            name="Classic Gold Ring",
+            category="Ring",
+            metal="Gold",
+            price=18999,
+            image="https://example.com/images/ring_101.jpg",
+            in_stock=True
+        ),
+        Product(
+            name="Rose Gold Diamond Ring",
+            category="Ring",
+            metal="Rose Gold",
+            price=19999,
+            image="https://example.com/images/ring_102.jpg",
+            in_stock=True
+        ),
+        Product(
+            name="Minimal Gold Necklace",
+            category="Necklace",
+            metal="Gold",
+            price=24999,
+            image="https://example.com/images/necklace_201.jpg",
+            in_stock=True
+        ),
+        Product(
+            name="Pearl Drop Earrings",
+            category="Earring",
+            metal="Silver",
+            price=7999,
+            image="https://example.com/images/earring_301.jpg",
+            in_stock=True
+        ),
     ]
     db.add_all(items)
     db.commit()
@@ -87,12 +115,17 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -110,6 +143,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         raise credentials_exception
+
     return user
 
 
@@ -182,6 +216,7 @@ async def register(user: UserRegister, db: Session = Depends(get_db)):
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+
     return new_user
 
 
@@ -212,9 +247,15 @@ async def chat(
 ):
     session_id = req.session_id or f"session_{current_user.id}"
 
-    chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+    chat_session = db.query(ChatSession).filter(
+        ChatSession.session_id == session_id
+    ).first()
+
     if not chat_session:
-        chat_session = ChatSession(session_id=session_id, user_id=str(current_user.id))
+        chat_session = ChatSession(
+            session_id=session_id,
+            user_id=str(current_user.id)
+        )
         db.add(chat_session)
         db.commit()
 
