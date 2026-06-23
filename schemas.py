@@ -12,12 +12,37 @@ class ProductOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
-    user_id: Optional[str] = None
     session_id: Optional[str] = None
+
 
 class ChatResponse(BaseModel):
     reply: str
     products: List[ProductOut] = []
     session_id: Optional[str] = None
+
+
+class UserRegister(BaseModel):
+    username: str
+    email: str
+    password: str
+
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+    email: str
+
+    model_config = ConfigDict(from_attributes=True)
