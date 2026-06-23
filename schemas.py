@@ -1,5 +1,5 @@
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 class ProductOut(BaseModel):
     id: int
@@ -10,8 +10,7 @@ class ProductOut(BaseModel):
     image: Optional[str] = None
     in_stock: bool
 
-    class Config:
-        from_attribute = True
+    model_config = ConfigDict(from_attributes=True)
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
