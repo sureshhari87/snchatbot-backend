@@ -1,16 +1,33 @@
+from datetime import datetime, timedelta, timezone
 from typing import List
-from fastapi import FastAPI, Depends
+
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
-from models import Product, ChatSession, ChatMessage
-from schemas import ChatRequest, ChatResponse, ProductOut
+from models import User, Product, ChatSession, ChatMessage
+from schemas import (
+    ChatRequest,
+    ChatResponse,
+    ProductOut,
+    UserRegister,
+    UserLogin,
+    TokenResponse,
+    UserOut,
+)
+
+SECRET_KEY = "change-this-to-a-long-random-secret"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
 app = FastAPI(
     title="Jewellery Chat API",
-    version="1.0.0",
+    version="2.0.0",
     description="Backend API for Flutter jewellery ecommerce chatbot",
     debug=True
 )
@@ -25,12 +42,17 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
+
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
 
 def seed_products(db: Session):
     if db.query(Product).count() > 0:
@@ -45,6 +67,7 @@ def seed_products(db: Session):
     db.add_all(items)
     db.commit()
 
+
 @app.on_event("startup")
 def startup_event():
     db = SessionLocal()
@@ -53,13 +76,42 @@ def startup_event():
     finally:
         db.close()
 
-@app.get("/", include_in_schema=False)
-async def root():
-    return RedirectResponse(url="/docs")
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
 
 def filter_products(db: Session, message: str) -> List[Product]:
     msg = message.lower()
@@ -84,8 +136,10 @@ def filter_products(db: Session, message: str) -> List[Product]:
 
     return query.limit(5).all()
 
+
 def build_reply(message: str, count: int) -> str:
     msg = message.lower()
+
     if count == 0:
         return "I could not find matching jewellery right now, but I can help with rings, earrings, necklaces, gifts, and budget-based suggestions."
     if "gift" in msg:
@@ -96,21 +150,73 @@ def build_reply(message: str, count: int) -> str:
         return f"I found {count} necklace options for you."
     if "earring" in msg or "earrings" in msg:
         return f"I found {count} earring options for you."
+
     return f"I found {count} jewellery options for you."
 
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/register", response_model=UserOut)
+async def register(user: UserRegister, db: Session = Depends(get_db)):
+    existing_email = db.query(User).filter(User.email == user.email).first()
+    if existing_email:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    existing_username = db.query(User).filter(User.username == user.username).first()
+    if existing_username:
+        raise HTTPException(status_code=400, detail="Username already taken")
+
+    new_user = User(
+        username=user.username,
+        email=user.email,
+        hashed_password=hash_password(user.password)
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+@app.post("/login", response_model=TokenResponse)
+async def login(payload: UserLogin, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email).first()
+    if not user or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    access_token = create_access_token(data={"sub": user.email})
+    return TokenResponse(access_token=access_token)
+
+
+@app.get("/me", response_model=UserOut)
+async def me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, db: Session = Depends(get_db)):
-    session_id = req.session_id or "session_demo_001"
+async def chat(
+    req: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    session_id = req.session_id or f"session_{current_user.id}"
 
     chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
     if not chat_session:
-        chat_session = ChatSession(session_id=session_id, user_id=req.user_id)
+        chat_session = ChatSession(session_id=session_id, user_id=str(current_user.id))
         db.add(chat_session)
         db.commit()
 
     db.add(ChatMessage(
         session_id=session_id,
-        user_id=req.user_id,
+        user_id=str(current_user.id),
         role="user",
         content=req.message
     ))
@@ -121,14 +227,14 @@ async def chat(req: ChatRequest, db: Session = Depends(get_db)):
 
     db.add(ChatMessage(
         session_id=session_id,
-        user_id=req.user_id,
+        user_id=str(current_user.id),
         role="assistant",
         content=reply
     ))
     db.commit()
 
     return ChatResponse(
-    reply=reply,
-    products=[ProductOut.model_validate(p) for p in products],
-    session_id=session_id
-)
+        reply=reply,
+        products=[ProductOut.model_validate(p) for p in products],
+        session_id=session_id
+    )
