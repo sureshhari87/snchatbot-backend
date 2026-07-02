@@ -6,3 +6,4 @@ python-jose[cryptography]
 python-multipart
 pwdlib[argon2]
 httpx2
+pytest-cov
