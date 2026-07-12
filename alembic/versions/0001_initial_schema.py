@@ -7,9 +7,9 @@ Create Date: 2026-07-09
 
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision: str = "0001_initial_schema"
 down_revision: Union[str, None] = None
@@ -37,7 +37,9 @@ def _has_index(table_name: str, index_name: str) -> bool:
     return any(index["name"] == index_name for index in _inspector().get_indexes(table_name))
 
 
-def _create_index(index_name: str, table_name: str, columns: list[str], unique: bool = False) -> None:
+def _create_index(
+    index_name: str, table_name: str, columns: list[str], unique: bool = False
+) -> None:
     if _has_table(table_name) and not _has_index(table_name, index_name):
         op.create_index(index_name, table_name, columns, unique=unique)
 
@@ -86,7 +88,12 @@ def upgrade() -> None:
             sa.Column("id", sa.Integer(), nullable=False),
             sa.Column("session_id", sa.String(), nullable=False),
             sa.Column("user_id", sa.String(), nullable=True),
-            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.func.now(),
+                nullable=True,
+            ),
             sa.PrimaryKeyConstraint("id"),
         )
     _create_index("ix_chat_sessions_id", "chat_sessions", ["id"])
@@ -101,7 +108,12 @@ def upgrade() -> None:
             sa.Column("user_id", sa.String(), nullable=True),
             sa.Column("role", sa.String(), nullable=False),
             sa.Column("content", sa.Text(), nullable=False),
-            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.func.now(),
+                nullable=True,
+            ),
             sa.ForeignKeyConstraint(["session_id"], ["chat_sessions.session_id"]),
             sa.PrimaryKeyConstraint("id"),
         )
@@ -117,7 +129,12 @@ def upgrade() -> None:
             sa.Column("token", sa.String(), nullable=False),
             sa.Column("is_revoked", sa.Boolean(), nullable=False),
             sa.Column("expires_at", sa.DateTime(), nullable=False),
-            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.func.now(),
+                nullable=True,
+            ),
             sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
             sa.PrimaryKeyConstraint("id"),
         )
@@ -139,7 +156,9 @@ def upgrade() -> None:
         )
     _create_index("ix_password_reset_tokens_id", "password_reset_tokens", ["id"])
     _create_index("ix_password_reset_tokens_user_id", "password_reset_tokens", ["user_id"])
-    _create_index("ix_password_reset_tokens_token_hash", "password_reset_tokens", ["token_hash"], unique=True)
+    _create_index(
+        "ix_password_reset_tokens_token_hash", "password_reset_tokens", ["token_hash"], unique=True
+    )
 
     if not _has_table("email_verification_tokens"):
         op.create_table(

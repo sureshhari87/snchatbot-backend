@@ -31,7 +31,7 @@ class FakeSMTP:
 
 def test_send_email_uses_configured_smtp(monkeypatch):
     FakeSMTP.instances = []
-    monkeypatch.setenv("TESTING", "0")
+    monkeypatch.setattr(main, "is_testing", lambda: False)
     monkeypatch.setattr(main, "EMAIL_HOST", "smtp.example.com")
     monkeypatch.setattr(main, "EMAIL_PORT", 587)
     monkeypatch.setattr(main, "EMAIL_USERNAME", "mailer@example.com")

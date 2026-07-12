@@ -1,16 +1,12 @@
 from datetime import timedelta
 
-from models import User, EmailVerificationToken, PasswordResetToken, utc_now
+from models import EmailVerificationToken, PasswordResetToken, User, utc_now
 
 
 def test_register_creates_unverified_user(client, db):
     response = client.post(
         "/register",
-        json={
-            "username": "verifyuser",
-            "email": "verify@example.com",
-            "password": "secret123"
-        },
+        json={"username": "verifyuser", "email": "verify@example.com", "password": "secret123"},
     )
 
     assert response.status_code == 200
@@ -21,9 +17,9 @@ def test_register_creates_unverified_user(client, db):
     assert user is not None
     assert user.is_verified is False
 
-    token_row = db.query(EmailVerificationToken).filter(
-        EmailVerificationToken.user_id == user.id
-    ).first()
+    token_row = (
+        db.query(EmailVerificationToken).filter(EmailVerificationToken.user_id == user.id).first()
+    )
     assert token_row is not None
     assert token_row.is_used is False
 
@@ -31,19 +27,12 @@ def test_register_creates_unverified_user(client, db):
 def test_unverified_user_cannot_login(client):
     client.post(
         "/register",
-        json={
-            "username": "nologinuser",
-            "email": "nologin@example.com",
-            "password": "secret123"
-        },
+        json={"username": "nologinuser", "email": "nologin@example.com", "password": "secret123"},
     )
 
     response = client.post(
         "/login",
-        data={
-            "username": "nologin@example.com",
-            "password": "secret123"
-        },
+        data={"username": "nologin@example.com", "password": "secret123"},
     )
 
     assert response.status_code == 403
@@ -68,7 +57,7 @@ def test_verify_email_marks_user_verified(client, db):
         user_id=user.id,
         token_hash=hash_opaque_token(raw_token),
         is_used=False,
-        expires_at=utc_now() + timedelta(minutes=30)
+        expires_at=utc_now() + timedelta(minutes=30),
     )
     db.add(token_row)
     db.commit()
@@ -98,12 +87,14 @@ def test_verify_email_rejects_used_token(client, db):
     db.refresh(user)
 
     raw_token = generate_opaque_token()
-    db.add(EmailVerificationToken(
-        user_id=user.id,
-        token_hash=hash_opaque_token(raw_token),
-        is_used=True,
-        expires_at=utc_now() + timedelta(minutes=30)
-    ))
+    db.add(
+        EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_opaque_token(raw_token),
+            is_used=True,
+            expires_at=utc_now() + timedelta(minutes=30),
+        )
+    )
     db.commit()
 
     response = client.post("/verify-email", json={"token": raw_token})
@@ -126,12 +117,14 @@ def test_verify_email_rejects_expired_token(client, db):
     db.refresh(user)
 
     raw_token = generate_opaque_token()
-    db.add(EmailVerificationToken(
-        user_id=user.id,
-        token_hash=hash_opaque_token(raw_token),
-        is_used=False,
-        expires_at=utc_now() - timedelta(minutes=1)
-    ))
+    db.add(
+        EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_opaque_token(raw_token),
+            is_used=False,
+            expires_at=utc_now() - timedelta(minutes=1),
+        )
+    )
     db.commit()
 
     response = client.post("/verify-email", json={"token": raw_token})
@@ -168,9 +161,9 @@ def test_resend_verification_returns_generic_response_for_unverified_user(client
     assert response.status_code == 200
     assert "If the email exists" in response.json()["message"]
 
-    token_rows = db.query(EmailVerificationToken).filter(
-        EmailVerificationToken.user_id == user.id
-    ).all()
+    token_rows = (
+        db.query(EmailVerificationToken).filter(EmailVerificationToken.user_id == user.id).all()
+    )
     assert len(token_rows) >= 1
 
 
@@ -190,9 +183,7 @@ def test_forgot_password_returns_generic_response_for_existing_email(client, db)
     assert response.status_code == 200
     assert "If that email is registered" in response.json()["message"]
 
-    token_row = db.query(PasswordResetToken).filter(
-        PasswordResetToken.user_id == user.id
-    ).first()
+    token_row = db.query(PasswordResetToken).filter(PasswordResetToken.user_id == user.id).first()
     assert token_row is not None
     assert token_row.is_used is False
 
@@ -206,10 +197,10 @@ def test_forgot_password_returns_generic_response_for_unknown_email(client):
 
 def test_reset_password_updates_password(client, db):
     from main import (
-        hash_password,
-        verify_password,
         generate_opaque_token,
         hash_opaque_token,
+        hash_password,
+        verify_password,
     )
 
     user = User(
@@ -227,17 +218,14 @@ def test_reset_password_updates_password(client, db):
         user_id=user.id,
         token_hash=hash_opaque_token(raw_token),
         is_used=False,
-        expires_at=utc_now() + timedelta(minutes=15)
+        expires_at=utc_now() + timedelta(minutes=15),
     )
     db.add(token_row)
     db.commit()
 
     response = client.post(
         "/reset-password",
-        json={
-            "token": raw_token,
-            "new_password": "newpass123"
-        },
+        json={"token": raw_token, "new_password": "newpass123"},
     )
 
     assert response.status_code == 200
@@ -250,7 +238,7 @@ def test_reset_password_updates_password(client, db):
 
 
 def test_reset_password_rejects_expired_token(client, db):
-    from main import hash_password, generate_opaque_token, hash_opaque_token
+    from main import generate_opaque_token, hash_opaque_token, hash_password
 
     user = User(
         username="expireduser",
@@ -263,12 +251,14 @@ def test_reset_password_rejects_expired_token(client, db):
     db.refresh(user)
 
     raw_token = generate_opaque_token()
-    db.add(PasswordResetToken(
-        user_id=user.id,
-        token_hash=hash_opaque_token(raw_token),
-        is_used=False,
-        expires_at=utc_now() - timedelta(minutes=1)
-    ))
+    db.add(
+        PasswordResetToken(
+            user_id=user.id,
+            token_hash=hash_opaque_token(raw_token),
+            is_used=False,
+            expires_at=utc_now() - timedelta(minutes=1),
+        )
+    )
     db.commit()
 
     response = client.post(
@@ -281,7 +271,7 @@ def test_reset_password_rejects_expired_token(client, db):
 
 
 def test_reset_password_rejects_used_token(client, db):
-    from main import hash_password, generate_opaque_token, hash_opaque_token
+    from main import generate_opaque_token, hash_opaque_token, hash_password
 
     user = User(
         username="useduser",
@@ -294,12 +284,14 @@ def test_reset_password_rejects_used_token(client, db):
     db.refresh(user)
 
     raw_token = generate_opaque_token()
-    db.add(PasswordResetToken(
-        user_id=user.id,
-        token_hash=hash_opaque_token(raw_token),
-        is_used=True,
-        expires_at=utc_now() + timedelta(minutes=15)
-    ))
+    db.add(
+        PasswordResetToken(
+            user_id=user.id,
+            token_hash=hash_opaque_token(raw_token),
+            is_used=True,
+            expires_at=utc_now() + timedelta(minutes=15),
+        )
+    )
     db.commit()
 
     response = client.post(
@@ -312,7 +304,7 @@ def test_reset_password_rejects_used_token(client, db):
 
 
 def test_login_works_after_email_verification(client, db):
-    from main import hash_password, generate_opaque_token, hash_opaque_token
+    from main import generate_opaque_token, hash_opaque_token, hash_password
 
     user = User(
         username="loginverified",
@@ -325,12 +317,14 @@ def test_login_works_after_email_verification(client, db):
     db.refresh(user)
 
     raw_token = generate_opaque_token()
-    db.add(EmailVerificationToken(
-        user_id=user.id,
-        token_hash=hash_opaque_token(raw_token),
-        is_used=False,
-        expires_at=utc_now() + timedelta(minutes=30)
-    ))
+    db.add(
+        EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_opaque_token(raw_token),
+            is_used=False,
+            expires_at=utc_now() + timedelta(minutes=30),
+        )
+    )
     db.commit()
 
     verify_response = client.post("/verify-email", json={"token": raw_token})
@@ -338,10 +332,7 @@ def test_login_works_after_email_verification(client, db):
 
     login_response = client.post(
         "/login",
-        data={
-            "username": "loginverified@example.com",
-            "password": "secret123"
-        },
+        data={"username": "loginverified@example.com", "password": "secret123"},
     )
 
     assert login_response.status_code == 200

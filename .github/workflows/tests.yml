@@ -4,22 +4,67 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  APP_ENV: "test"
+  TESTING: "1"
+  APP_DEBUG: "0"
+  SECRET_KEY: "ci-test-secret-key"
+  DATABASE_URL: "sqlite://"
+  RUN_MIGRATIONS_ON_STARTUP: "0"
+  FRONTEND_VERIFY_URL: "http://localhost:3000/verify-email"
+  FRONTEND_RESET_URL: "http://localhost:3000/reset-password"
+  MAX_REQUEST_BODY_BYTES: "1048576"
+  HTTPS_REDIRECT: "0"
+  TRUSTED_HOSTS: "*"
+  PROXY_HEADERS: "1"
+  FORWARDED_ALLOW_IPS: "*"
+  HOST: "0.0.0.0"
+  PORT: "7860"
+  WEB_CONCURRENCY: "1"
+  UVICORN_LOG_LEVEL: "warning"
+
 jobs:
+  quality:
+    name: Format And Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install quality tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Check formatting
+        run: ruff format --check .
+
+      - name: Run lint checks
+        run: ruff check .
+
+      - name: Secret hygiene scan
+        run: python scripts/secret_hygiene_check.py
+
   tests:
+    name: Tests And Coverage
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
-
-    env:
-      TESTING: "1"
-      APP_DEBUG: "0"
-      SECRET_KEY: "ci-test-secret-key"
-      DATABASE_URL: "sqlite:///./test_jewellery.db"
-      RUN_MIGRATIONS_ON_STARTUP: "0"
-      FRONTEND_VERIFY_URL: "http://localhost:3000/verify-email"
-      FRONTEND_RESET_URL: "http://localhost:3000/reset-password"
 
     steps:
       - name: Checkout repository
@@ -37,13 +82,132 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Run tests
+      - name: Run tests with coverage threshold
         run: |
           python -m pytest \
             --cov=main \
             --cov=models \
             --cov=schemas \
             --cov=database \
+            --cov=config \
+            --cov-fail-under=80 \
             --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-report=html \
             --cov-report=markdown-append:${GITHUB_STEP_SUMMARY} \
             -q
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: error
+
+  security:
+    name: Security Scans
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Bandit static security scan
+        run: bandit -c pyproject.toml -r .
+
+      - name: Dependency vulnerability audit
+        run: pip-audit --progress-spinner off -r requirements.txt
+
+  docker-build:
+    name: Docker Build Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build --pull=false -t snchatbot-backend:ci .
+
+  deploy-staging:
+    name: Staging Deploy
+    runs-on: ubuntu-latest
+    needs: [quality, tests, security, docker-build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+      - name: Trigger staging deploy when configured
+        env:
+          STAGING_DEPLOY_WEBHOOK: ${{ secrets.STAGING_DEPLOY_WEBHOOK }}
+        run: |
+          if [ -z "$STAGING_DEPLOY_WEBHOOK" ]; then
+            echo "STAGING_DEPLOY_WEBHOOK is not configured; skipping staging deploy."
+            exit 0
+          fi
+
+          curl -fsS -X POST "$STAGING_DEPLOY_WEBHOOK"
+
+  staging-smoke-tests:
+    name: Staging Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run staging smoke tests when configured
+        env:
+          STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
+        run: |
+          if [ -z "$STAGING_BASE_URL" ]; then
+            echo "STAGING_BASE_URL is not configured; production deployment is blocked until staging smoke tests can run."
+            exit 1
+          fi
+
+          SMOKE_BASE_URL="$STAGING_BASE_URL" \
+          SMOKE_EXPECT_LATEST_CHAT_CONTRACT=1 \
+          python scripts/smoke_test.py
+
+  deploy-production:
+    name: Production Deploy
+    runs-on: ubuntu-latest
+    needs: staging-smoke-tests
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Trigger production deploy when configured
+        env:
+          PRODUCTION_DEPLOY_WEBHOOK: ${{ secrets.PRODUCTION_DEPLOY_WEBHOOK }}
+        run: |
+          if [ -z "$PRODUCTION_DEPLOY_WEBHOOK" ]; then
+            echo "PRODUCTION_DEPLOY_WEBHOOK is not configured; skipping production deploy."
+            exit 0
+          fi
+
+          curl -fsS -X POST "$PRODUCTION_DEPLOY_WEBHOOK"

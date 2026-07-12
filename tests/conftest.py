@@ -1,38 +1,52 @@
 import os
+
+os.environ.setdefault("APP_ENV", "test")
 os.environ["TESTING"] = "1"
+os.environ.setdefault("RUN_MIGRATIONS_ON_STARTUP", "0")
 
 import uuid
-import pytest
 
+import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
 
 from database import Base
-from main import app, get_db, seed_products
+from main import (
+    LOGIN_FAILURES,
+    app,
+    get_db,
+    hash_password,
+    reset_observability_metrics,
+    seed_products,
+)
 from models import User
-from main import hash_password
-
-SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///./test_jewellery.db"
-
-engine = create_engine(
-    SQLALCHEMY_TEST_DATABASE_URL,
-    connect_args={"check_same_thread": False},
-)
-
-TestingSessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-)
 
 
 @pytest.fixture(scope="function")
-def db():
-    Base.metadata.drop_all(bind=engine)
+def test_engine():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(bind=engine)
+    try:
+        yield engine
+    finally:
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
 
-    db = TestingSessionLocal()
+
+@pytest.fixture(scope="function")
+def db(test_engine):
+    testing_session_local = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=test_engine,
+    )
+    db = testing_session_local()
     seed_products(db)
     try:
         yield db
@@ -42,6 +56,9 @@ def db():
 
 @pytest.fixture(scope="function")
 def client(db):
+    LOGIN_FAILURES.clear()
+    reset_observability_metrics()
+
     def override_get_db():
         yield db
 
@@ -49,6 +66,8 @@ def client(db):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+    LOGIN_FAILURES.clear()
+    reset_observability_metrics()
 
 
 @pytest.fixture
@@ -75,10 +94,7 @@ def registered_user(client, db, user_data):
 def login_response(client, verified_user):
     response = client.post(
         "/login",
-        data={
-            "username": verified_user.email,
-            "password": "testpass123"
-        },
+        data={"username": verified_user.email, "password": "testpass123"},
     )
     assert response.status_code == 200
     return response
@@ -106,6 +122,35 @@ def refresh_token(token_pair):
 @pytest.fixture
 def auth_headers(access_token):
     return {"Authorization": f"Bearer {access_token}"}
+
+
+@pytest.fixture
+def admin_user(db):
+    unique = uuid.uuid4().hex[:8]
+    user = User(
+        username=f"admin_{unique}",
+        email=f"admin_{unique}@example.com",
+        hashed_password=hash_password("adminpass123"),
+        is_verified=True,
+        is_admin=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@pytest.fixture
+def admin_headers(client, admin_user):
+    response = client.post(
+        "/login",
+        data={
+            "username": admin_user.email,
+            "password": "adminpass123",
+        },
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
 @pytest.fixture
