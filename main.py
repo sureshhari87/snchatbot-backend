@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, List
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -63,14 +63,19 @@ from config import (
 )
 from database import Base, SessionLocal, engine
 from models import (
+    AppConfigEntry,
     AppointmentBooking,
     CallbackRequest,
     ChatMessage,
     ChatResponseAnalytics,
     ChatSession,
+    ComplaintTicket,
+    CustomOrderRequest,
     EmailVerificationToken,
     FeaturedItem,
+    KnowledgeBaseItem,
     LeadCapture,
+    OrderSupportRequest,
     PasswordResetToken,
     Product,
     ProductCategory,
@@ -83,6 +88,9 @@ from models import (
     utc_now,
 )
 from schemas import (
+    AppConfigCreate,
+    AppConfigOut,
+    AppConfigUpdate,
     AppointmentCreate,
     AppointmentOut,
     CallbackRequestCreate,
@@ -92,6 +100,10 @@ from schemas import (
     CategoryUpdate,
     ChatRequest,
     ChatResponse,
+    ComplaintCreate,
+    ComplaintOut,
+    CustomOrderCreate,
+    CustomOrderOut,
     FeaturedItemCreate,
     FeaturedItemOut,
     FeaturedItemUpdate,
@@ -99,9 +111,14 @@ from schemas import (
     ForgotPasswordRequest,
     HandoffInfo,
     InventoryUpdate,
+    KnowledgeBaseCreate,
+    KnowledgeBaseOut,
+    KnowledgeBaseUpdate,
     LeadCaptureOut,
     LeadStatusUpdate,
     MessageResponse,
+    OrderSupportCreate,
+    OrderSupportOut,
     ProductCreate,
     ProductOut,
     ProductUpdate,
@@ -731,6 +748,9 @@ ADMIN_PERMISSIONS = {
     "catalog:manage",
     "leads:manage",
     "metrics:read",
+    "support:manage",
+    "knowledge:manage",
+    "config:manage",
 }
 
 
@@ -799,6 +819,27 @@ def get_collection_or_404(db: Session, collection_id: int) -> SeasonalCollection
     return collection
 
 
+def get_knowledge_item_or_404(db: Session, item_id: int) -> KnowledgeBaseItem:
+    item = db.query(KnowledgeBaseItem).filter(KnowledgeBaseItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Knowledge-base item not found")
+    return item
+
+
+def get_config_entry_or_404(db: Session, entry_id: int) -> AppConfigEntry:
+    entry = db.query(AppConfigEntry).filter(AppConfigEntry.id == entry_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Config entry not found")
+    return entry
+
+
+def get_record_or_404(db: Session, model, record_id: int, detail: str):
+    record = db.query(model).filter(model.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail=detail)
+    return record
+
+
 def ensure_unique_slug(
     db: Session,
     model,
@@ -812,9 +853,86 @@ def ensure_unique_slug(
         raise HTTPException(status_code=400, detail="Slug already exists")
 
 
+def ensure_unique_key(
+    db: Session,
+    model,
+    key: str,
+    current_id: int | None = None,
+) -> None:
+    query = db.query(model).filter(model.key == key)
+    if current_id is not None:
+        query = query.filter(model.id != current_id)
+    if query.first():
+        raise HTTPException(status_code=400, detail="Key already exists")
+
+
 def apply_model_updates(target, updates: dict[str, Any]) -> None:
     for field, value in updates.items():
         setattr(target, field, value)
+
+
+def knowledge_item_response(item: KnowledgeBaseItem) -> KnowledgeBaseOut:
+    return KnowledgeBaseOut(
+        id=item.id,
+        kind=item.kind,
+        slug=item.slug,
+        title=item.title,
+        content=item.content,
+        tags=load_json_list(item.tags),
+        is_active=item.is_active,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def clamp_limit(limit: int, maximum: int = 50) -> int:
+    return max(1, min(limit, maximum))
+
+
+def product_search_query(
+    db: Session,
+    q: str | None = None,
+    category: str | None = None,
+    metal: str | None = None,
+    min_price: float | None = None,
+    max_price: float | None = None,
+    in_stock_only: bool = False,
+):
+    query = db.query(Product)
+
+    if q:
+        search = f"%{q.strip()}%"
+        query = query.filter(
+            or_(
+                Product.name.ilike(search),
+                Product.description.ilike(search),
+                Product.sku.ilike(search),
+                Product.category.ilike(search),
+                Product.metal.ilike(search),
+            )
+        )
+    if category:
+        query = query.filter(Product.category.ilike(category))
+    if metal:
+        query = query.filter(Product.metal.ilike(metal))
+    if min_price is not None:
+        query = query.filter(Product.price >= min_price)
+    if max_price is not None:
+        query = query.filter(Product.price <= max_price)
+    if in_stock_only:
+        query = query.filter(Product.in_stock == True)
+
+    return query
+
+
+def public_config_values(db: Session) -> dict[str, str]:
+    entries = (
+        db.query(AppConfigEntry)
+        .filter(AppConfigEntry.is_public == True)
+        .order_by(AppConfigEntry.key.asc())
+        .all()
+    )
+    return {entry.key: entry.value for entry in entries}
 
 
 def saved_product_response(item, product: Product) -> SavedProductOut:
@@ -892,6 +1010,9 @@ LEAD_INTENT_KEYWORDS = {
     "gift": GIFT_KEYWORDS,
     "store_visit": ["store visit", "visit store", "appointment", "book visit"],
     "callback": ["call me", "callback", "phone call", "talk to support", "human support"],
+    "order_status": ["order status", "track order", "delivery status", "where is my order"],
+    "return_refund": ["return", "refund", "cancel", "cancellation"],
+    "complaint": ["complaint", "problem", "issue", "damaged", "wrong item"],
 }
 HANDOFF_KEYWORDS = [
     "call me",
@@ -904,6 +1025,11 @@ HANDOFF_KEYWORDS = [
     "book visit",
     "buy now",
     "place order",
+    "order status",
+    "track order",
+    "return",
+    "refund",
+    "complaint",
 ]
 METAL_KEYWORDS = {
     "Rose Gold": ["rose gold"],
@@ -970,6 +1096,29 @@ def create_chat_lead(
         user_id=user.id,
         session_id=session_id,
         source="chat",
+        intent=intent,
+        message=message,
+        contact_name=user.username,
+        contact_email=user.email,
+        status="new",
+    )
+    db.add(lead)
+    db.flush()
+    return lead
+
+
+def create_customer_action_lead(
+    db: Session,
+    user: User,
+    source: str,
+    intent: str,
+    message: str,
+    session_id: str | None = None,
+) -> LeadCapture:
+    lead = LeadCapture(
+        user_id=user.id,
+        session_id=session_id,
+        source=source,
         intent=intent,
         message=message,
         contact_name=user.username,
@@ -1185,6 +1334,51 @@ def is_unmatched_query(intent: str, result_count: int, filters: dict[str, Any]) 
 
 def is_low_conversion_search(result_count: int, filters: dict[str, Any], lead_captured: bool) -> bool:
     return has_product_search_signal(filters) and not lead_captured and 0 < result_count <= 2
+
+
+def chat_confidence(intent: str, result_count: int, filters: dict[str, Any], unmatched: bool) -> float:
+    if unmatched:
+        return 0.35
+    if result_count > 0 and has_product_search_signal(filters):
+        return 0.92
+    if intent in {
+        "gift",
+        "availability",
+        "discount",
+        "custom_order",
+        "store_visit",
+        "callback",
+        "order_status",
+        "return_refund",
+        "complaint",
+    }:
+        return 0.84
+    if intent == "buying_advice":
+        return 0.78
+    if result_count == 0:
+        return 0.55
+    return 0.7
+
+
+def answer_source_for_chat(intent: str, result_count: int, lead_captured: bool) -> str:
+    if lead_captured:
+        return "handoff_flow"
+    if result_count > 0:
+        return "catalog_search"
+    if intent == "buying_advice":
+        return "reply_template"
+    return "catalog_fallback"
+
+
+def guardrails_for_chat(message: str, intent: str, unmatched: bool) -> list[str]:
+    guardrails = ["jewellery-domain", "catalog-grounded", "no-payment-or-order-creation"]
+    if unmatched:
+        guardrails.append("fallback-used")
+    if intent in {"order_status", "return_refund", "complaint"}:
+        guardrails.append("oms-not-connected-capture-only")
+    if message_has_any(message.lower(), ["investment guarantee", "medical", "allergy cure"]):
+        guardrails.append("no-medical-or-financial-guarantee")
+    return guardrails
 
 
 def feedback_type_from_payload(payload: FeedbackCreate) -> str:
@@ -2123,6 +2317,176 @@ async def me(current_user: User = Depends(get_current_user)):
     return current_user
 
 
+@app.get("/products", response_model=list[ProductOut])
+async def list_products(
+    q: str | None = None,
+    category: str | None = None,
+    metal: str | None = None,
+    min_price: float | None = Query(default=None, ge=0),
+    max_price: float | None = Query(default=None, ge=0),
+    in_stock_only: bool = False,
+    limit: int = Query(default=20, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    query = product_search_query(
+        db,
+        q=q,
+        category=category,
+        metal=metal,
+        min_price=min_price,
+        max_price=max_price,
+        in_stock_only=in_stock_only,
+    )
+    return query.order_by(Product.price.asc(), Product.id.asc()).limit(clamp_limit(limit)).all()
+
+
+@app.get("/products/{product_id}/similar", response_model=list[ProductOut])
+async def similar_products(
+    product_id: int,
+    limit: int = Query(default=6, ge=1, le=20),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    filters = []
+    if product.category:
+        filters.append(Product.category.ilike(product.category))
+    if product.metal:
+        filters.append(Product.metal.ilike(product.metal))
+
+    query = db.query(Product).filter(Product.id != product.id)
+    if filters:
+        query = query.filter(or_(*filters))
+
+    return (
+        query.order_by(Product.in_stock.desc(), Product.price.asc(), Product.id.asc())
+        .limit(clamp_limit(limit, 20))
+        .all()
+    )
+
+
+@app.get("/products/{product_id}", response_model=ProductOut)
+async def get_product(product_id: int, db: Session = Depends(get_db)):
+    return get_product_or_404(db, product_id)
+
+
+@app.get("/featured-products", response_model=list[ProductOut])
+async def featured_products(
+    limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    featured_items = (
+        db.query(FeaturedItem)
+        .filter(FeaturedItem.is_active == True)
+        .order_by(FeaturedItem.display_order.asc(), FeaturedItem.id.asc())
+        .limit(clamp_limit(limit))
+        .all()
+    )
+    products: list[Product] = []
+    for item in featured_items:
+        product = db.query(Product).filter(Product.id == item.product_id).first()
+        if product:
+            products.append(product)
+
+    if len(products) < limit:
+        seen_ids = {product.id for product in products}
+        fallback_products = (
+            db.query(Product)
+            .filter(Product.is_featured == True, Product.id.notin_(seen_ids))
+            .order_by(Product.id.asc())
+            .limit(clamp_limit(limit) - len(products))
+            .all()
+        )
+        products.extend(fallback_products)
+
+    return products[: clamp_limit(limit)]
+
+
+@app.get("/seasonal-collections", response_model=list[SeasonalCollectionOut])
+async def seasonal_collections(db: Session = Depends(get_db)):
+    now = utc_now()
+    return (
+        db.query(SeasonalCollection)
+        .filter(
+            SeasonalCollection.is_active == True,
+            or_(SeasonalCollection.starts_at == None, SeasonalCollection.starts_at <= now),
+            or_(SeasonalCollection.ends_at == None, SeasonalCollection.ends_at >= now),
+        )
+        .order_by(SeasonalCollection.starts_at.asc(), SeasonalCollection.id.asc())
+        .all()
+    )
+
+
+@app.get("/categories", response_model=list[CategoryOut])
+async def list_categories(db: Session = Depends(get_db)):
+    return (
+        db.query(ProductCategory)
+        .filter(ProductCategory.is_active == True)
+        .order_by(ProductCategory.name.asc())
+        .all()
+    )
+
+
+def list_public_knowledge(db: Session, kind: str) -> list[KnowledgeBaseOut]:
+    items = (
+        db.query(KnowledgeBaseItem)
+        .filter(KnowledgeBaseItem.kind == kind, KnowledgeBaseItem.is_active == True)
+        .order_by(KnowledgeBaseItem.title.asc(), KnowledgeBaseItem.id.asc())
+        .all()
+    )
+    return [knowledge_item_response(item) for item in items]
+
+
+@app.get("/faqs", response_model=list[KnowledgeBaseOut])
+async def list_faqs(db: Session = Depends(get_db)):
+    return list_public_knowledge(db, "faq")
+
+
+@app.get("/policies", response_model=list[KnowledgeBaseOut])
+async def list_policies(db: Session = Depends(get_db)):
+    return list_public_knowledge(db, "policy")
+
+
+@app.get("/mobile/config")
+async def mobile_config(db: Session = Depends(get_db)):
+    return {
+        "api_version": "v1",
+        "oms_connected": False,
+        "capabilities": {
+            "auth": True,
+            "refresh_token_rotation": True,
+            "chat": True,
+            "chat_session_memory": True,
+            "product_search": True,
+            "wishlist": True,
+            "save_for_later": True,
+            "feedback": True,
+            "customer_actions": True,
+            "order_support_capture": True,
+            "human_handoff": True,
+            "admin": False,
+        },
+        "chat_contract": {
+            "response_fields": [
+                "response_id",
+                "reply",
+                "products",
+                "applied_filters",
+                "result_count",
+                "suggested_next_questions",
+                "intent",
+                "confidence",
+                "answer_source",
+                "tool_calls",
+                "guardrails",
+                "lead_captured",
+                "handoff",
+            ],
+            "guardrail_mode": "catalog-grounded",
+        },
+        "public_config": public_config_values(db),
+    }
+
+
 @app.get("/admin/products", response_model=list[ProductOut])
 async def admin_list_products(
     admin_user: User = Depends(require_permission("products:manage")),
@@ -2403,6 +2767,137 @@ async def admin_delete_seasonal_collection(
     return MessageResponse(message="Seasonal collection deleted")
 
 
+@app.get("/admin/knowledge-base", response_model=list[KnowledgeBaseOut])
+async def admin_list_knowledge_base(
+    kind: str | None = None,
+    admin_user: User = Depends(require_permission("knowledge:manage")),
+    db: Session = Depends(get_db),
+):
+    query = db.query(KnowledgeBaseItem)
+    if kind:
+        query = query.filter(KnowledgeBaseItem.kind == kind)
+    items = query.order_by(KnowledgeBaseItem.kind.asc(), KnowledgeBaseItem.title.asc()).all()
+    return [knowledge_item_response(item) for item in items]
+
+
+@app.post("/admin/knowledge-base", response_model=KnowledgeBaseOut)
+async def admin_create_knowledge_base_item(
+    request: Request,
+    item_in: KnowledgeBaseCreate,
+    admin_user: User = Depends(require_permission("knowledge:manage")),
+    db: Session = Depends(get_db),
+):
+    slug = item_in.slug or slugify(item_in.title)
+    ensure_unique_slug(db, KnowledgeBaseItem, slug)
+    item = KnowledgeBaseItem(
+        kind=item_in.kind,
+        slug=slug,
+        title=item_in.title,
+        content=item_in.content,
+        tags=dump_json_list(item_in.tags or []),
+        is_active=item_in.is_active,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    log_admin_action(request, admin_user, "create", "knowledge_base", item.id)
+    return knowledge_item_response(item)
+
+
+@app.patch("/admin/knowledge-base/{item_id}", response_model=KnowledgeBaseOut)
+async def admin_update_knowledge_base_item(
+    item_id: int,
+    request: Request,
+    item_in: KnowledgeBaseUpdate,
+    admin_user: User = Depends(require_permission("knowledge:manage")),
+    db: Session = Depends(get_db),
+):
+    item = get_knowledge_item_or_404(db, item_id)
+    updates = item_in.model_dump(exclude_unset=True)
+    if "title" in updates and "slug" not in updates:
+        updates["slug"] = slugify(updates["title"])
+    if "slug" in updates:
+        ensure_unique_slug(db, KnowledgeBaseItem, updates["slug"], item.id)
+    if "tags" in updates:
+        updates["tags"] = dump_json_list(updates["tags"] or [])
+    apply_model_updates(item, updates)
+    item.updated_at = utc_now()
+    db.commit()
+    db.refresh(item)
+    log_admin_action(request, admin_user, "update", "knowledge_base", item.id)
+    return knowledge_item_response(item)
+
+
+@app.delete("/admin/knowledge-base/{item_id}", response_model=MessageResponse)
+async def admin_delete_knowledge_base_item(
+    item_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("knowledge:manage")),
+    db: Session = Depends(get_db),
+):
+    item = get_knowledge_item_or_404(db, item_id)
+    db.delete(item)
+    db.commit()
+    log_admin_action(request, admin_user, "delete", "knowledge_base", item_id)
+    return MessageResponse(message="Knowledge-base item deleted")
+
+
+@app.get("/admin/config", response_model=list[AppConfigOut])
+async def admin_list_config(
+    admin_user: User = Depends(require_permission("config:manage")),
+    db: Session = Depends(get_db),
+):
+    return db.query(AppConfigEntry).order_by(AppConfigEntry.key.asc()).all()
+
+
+@app.post("/admin/config", response_model=AppConfigOut)
+async def admin_create_config_entry(
+    request: Request,
+    entry_in: AppConfigCreate,
+    admin_user: User = Depends(require_permission("config:manage")),
+    db: Session = Depends(get_db),
+):
+    ensure_unique_key(db, AppConfigEntry, entry_in.key)
+    entry = AppConfigEntry(**entry_in.model_dump())
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    log_admin_action(request, admin_user, "create", "config", entry.id)
+    return entry
+
+
+@app.patch("/admin/config/{entry_id}", response_model=AppConfigOut)
+async def admin_update_config_entry(
+    entry_id: int,
+    request: Request,
+    entry_in: AppConfigUpdate,
+    admin_user: User = Depends(require_permission("config:manage")),
+    db: Session = Depends(get_db),
+):
+    entry = get_config_entry_or_404(db, entry_id)
+    updates = entry_in.model_dump(exclude_unset=True)
+    apply_model_updates(entry, updates)
+    entry.updated_at = utc_now()
+    db.commit()
+    db.refresh(entry)
+    log_admin_action(request, admin_user, "update", "config", entry.id)
+    return entry
+
+
+@app.delete("/admin/config/{entry_id}", response_model=MessageResponse)
+async def admin_delete_config_entry(
+    entry_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("config:manage")),
+    db: Session = Depends(get_db),
+):
+    entry = get_config_entry_or_404(db, entry_id)
+    db.delete(entry)
+    db.commit()
+    log_admin_action(request, admin_user, "delete", "config", entry_id)
+    return MessageResponse(message="Config entry deleted")
+
+
 @app.get("/admin/leads", response_model=list[LeadCaptureOut])
 async def admin_list_leads(
     admin_user: User = Depends(require_permission("leads:manage")),
@@ -2480,6 +2975,162 @@ async def admin_update_lead_status(
     db.refresh(lead)
     log_admin_action(request, admin_user, "update_status", "lead", lead.id)
     return lead
+
+
+@app.get("/admin/request-callbacks", response_model=list[CallbackRequestOut])
+async def admin_list_callback_requests(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(CallbackRequest)
+        .order_by(CallbackRequest.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.patch("/admin/request-callbacks/{callback_id}", response_model=CallbackRequestOut)
+async def admin_update_callback_request(
+    callback_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    callback = get_record_or_404(db, CallbackRequest, callback_id, "Callback request not found")
+    callback.status = status_in.status
+    db.commit()
+    db.refresh(callback)
+    log_admin_action(request, admin_user, "update_status", "callback_request", callback.id)
+    return callback
+
+
+@app.get("/admin/appointments", response_model=list[AppointmentOut])
+async def admin_list_appointments(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(AppointmentBooking)
+        .order_by(AppointmentBooking.appointment_time.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.patch("/admin/appointments/{appointment_id}", response_model=AppointmentOut)
+async def admin_update_appointment(
+    appointment_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    appointment = get_record_or_404(
+        db, AppointmentBooking, appointment_id, "Appointment not found"
+    )
+    appointment.status = status_in.status
+    db.commit()
+    db.refresh(appointment)
+    log_admin_action(request, admin_user, "update_status", "appointment", appointment.id)
+    return appointment
+
+
+@app.get("/admin/custom-orders", response_model=list[CustomOrderOut])
+async def admin_list_custom_orders(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(CustomOrderRequest)
+        .order_by(CustomOrderRequest.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.patch("/admin/custom-orders/{request_id}", response_model=CustomOrderOut)
+async def admin_update_custom_order(
+    request_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    custom_order = get_record_or_404(
+        db, CustomOrderRequest, request_id, "Custom order request not found"
+    )
+    custom_order.status = status_in.status
+    db.commit()
+    db.refresh(custom_order)
+    log_admin_action(request, admin_user, "update_status", "custom_order", custom_order.id)
+    return custom_order
+
+
+@app.get("/admin/complaints", response_model=list[ComplaintOut])
+async def admin_list_complaints(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(ComplaintTicket)
+        .order_by(ComplaintTicket.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.patch("/admin/complaints/{ticket_id}", response_model=ComplaintOut)
+async def admin_update_complaint(
+    ticket_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    complaint = get_record_or_404(db, ComplaintTicket, ticket_id, "Complaint ticket not found")
+    complaint.status = status_in.status
+    db.commit()
+    db.refresh(complaint)
+    log_admin_action(request, admin_user, "update_status", "complaint", complaint.id)
+    return complaint
+
+
+@app.get("/admin/orders/support", response_model=list[OrderSupportOut])
+async def admin_list_order_support_requests(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(OrderSupportRequest)
+        .order_by(OrderSupportRequest.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.patch("/admin/orders/support/{request_id}", response_model=OrderSupportOut)
+async def admin_update_order_support_request(
+    request_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    order_request = get_record_or_404(
+        db, OrderSupportRequest, request_id, "Order support request not found"
+    )
+    order_request.status = status_in.status
+    db.commit()
+    db.refresh(order_request)
+    log_admin_action(request, admin_user, "update_status", "order_support", order_request.id)
+    return order_request
 
 
 def create_or_update_saved_item(
@@ -2659,6 +3310,135 @@ async def list_my_appointments(
     )
 
 
+@app.post("/custom-orders", response_model=CustomOrderOut)
+async def create_custom_order_request(
+    payload: CustomOrderCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if payload.product_id is not None:
+        get_product_or_404(db, payload.product_id)
+
+    custom_order = CustomOrderRequest(
+        user_id=current_user.id,
+        product_id=payload.product_id,
+        session_id=payload.session_id,
+        description=payload.description,
+        budget=payload.budget,
+        metal=payload.metal,
+        category=payload.category,
+        status="requested",
+    )
+    db.add(custom_order)
+    create_customer_action_lead(
+        db,
+        current_user,
+        source="custom_order",
+        intent="custom_order",
+        message=payload.description,
+        session_id=payload.session_id,
+    )
+    db.commit()
+    db.refresh(custom_order)
+    return custom_order
+
+
+@app.get("/custom-orders/my", response_model=list[CustomOrderOut])
+async def list_my_custom_orders(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(CustomOrderRequest)
+        .filter(CustomOrderRequest.user_id == current_user.id)
+        .order_by(CustomOrderRequest.created_at.desc())
+        .all()
+    )
+
+
+@app.post("/complaints", response_model=ComplaintOut)
+async def create_complaint_ticket(
+    payload: ComplaintCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    complaint = ComplaintTicket(
+        user_id=current_user.id,
+        order_reference=payload.order_reference,
+        category=payload.category,
+        message=payload.message,
+        priority=payload.priority,
+        status="open",
+    )
+    db.add(complaint)
+    create_customer_action_lead(
+        db,
+        current_user,
+        source="complaint",
+        intent="complaint",
+        message=payload.message,
+    )
+    db.commit()
+    db.refresh(complaint)
+    return complaint
+
+
+@app.get("/complaints/my", response_model=list[ComplaintOut])
+async def list_my_complaints(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(ComplaintTicket)
+        .filter(ComplaintTicket.user_id == current_user.id)
+        .order_by(ComplaintTicket.created_at.desc())
+        .all()
+    )
+
+
+@app.post("/orders/support", response_model=OrderSupportOut)
+async def create_order_support_request(
+    payload: OrderSupportCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    order_request = OrderSupportRequest(
+        user_id=current_user.id,
+        order_reference=payload.order_reference,
+        request_type=payload.request_type,
+        message=payload.message,
+        status="received",
+    )
+    db.add(order_request)
+    create_customer_action_lead(
+        db,
+        current_user,
+        source="order_support",
+        intent=(
+            "return_refund"
+            if payload.request_type in {"cancel", "return", "refund"}
+            else "order_status"
+        ),
+        message=payload.message or payload.request_type,
+    )
+    db.commit()
+    db.refresh(order_request)
+    return order_request
+
+
+@app.get("/orders/support/my", response_model=list[OrderSupportOut])
+async def list_my_order_support_requests(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(OrderSupportRequest)
+        .filter(OrderSupportRequest.user_id == current_user.id)
+        .order_by(OrderSupportRequest.created_at.desc())
+        .all()
+    )
+
+
 @app.post("/feedback", response_model=MessageResponse)
 async def submit_feedback(
     request: Request,
@@ -2814,6 +3594,12 @@ async def chat(
     )
     db.commit()
 
+    tool_calls = []
+    if has_product_search_signal(filters) or result_count > 0:
+        tool_calls.append("catalog_search")
+    if lead_captured:
+        tool_calls.append("lead_capture")
+
     return ChatResponse(
         response_id=response_id,
         reply=reply,
@@ -2823,6 +3609,11 @@ async def chat(
         applied_filters=applied_filters,
         result_count=result_count,
         suggested_next_questions=suggested_next_questions,
+        intent=chat_intent,
+        confidence=chat_confidence(chat_intent, result_count, filters, unmatched),
+        answer_source=answer_source_for_chat(chat_intent, result_count, lead_captured),
+        tool_calls=tool_calls,
+        guardrails=guardrails_for_chat(req.message, chat_intent, unmatched),
         lead_captured=lead_captured,
         handoff=handoff,
     )

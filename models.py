@@ -74,6 +74,32 @@ class FeaturedItem(Base):
     created_at = Column(DateTime, default=utc_now, nullable=False)
 
 
+class KnowledgeBaseItem(Base):
+    __tablename__ = "knowledge_base_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String, nullable=False, index=True)
+    slug = Column(String, unique=True, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    tags = Column(Text, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class AppConfigEntry(Base):
+    __tablename__ = "app_config_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, unique=True, nullable=False, index=True)
+    value = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    is_public = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
@@ -179,6 +205,46 @@ class AppointmentBooking(Base):
     appointment_time = Column(DateTime, nullable=False)
     purpose = Column(Text, nullable=True)
     status = Column(String, nullable=False, default="requested")
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class CustomOrderRequest(Base):
+    __tablename__ = "custom_order_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
+    session_id = Column(String, nullable=True, index=True)
+    description = Column(Text, nullable=False)
+    budget = Column(Float, nullable=True)
+    metal = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="requested")
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class ComplaintTicket(Base):
+    __tablename__ = "complaint_tickets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    order_reference = Column(String, nullable=True, index=True)
+    category = Column(String, nullable=False, default="general")
+    message = Column(Text, nullable=False)
+    priority = Column(String, nullable=False, default="normal")
+    status = Column(String, nullable=False, default="open")
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class OrderSupportRequest(Base):
+    __tablename__ = "order_support_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    order_reference = Column(String, nullable=True, index=True)
+    request_type = Column(String, nullable=False, index=True)
+    message = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="received")
     created_at = Column(DateTime, default=utc_now, nullable=False)
 
 

@@ -138,6 +138,61 @@ class SeasonalCollectionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class KnowledgeBaseCreate(BaseModel):
+    kind: Literal["faq", "policy"] = "faq"
+    title: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    slug: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_active: bool = True
+
+
+class KnowledgeBaseUpdate(BaseModel):
+    kind: Optional[Literal["faq", "policy"]] = None
+    title: Optional[str] = Field(default=None, min_length=1)
+    content: Optional[str] = Field(default=None, min_length=1)
+    slug: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+
+
+class KnowledgeBaseOut(BaseModel):
+    id: int
+    kind: str
+    slug: str
+    title: str
+    content: str
+    tags: List[str] = Field(default_factory=list)
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AppConfigCreate(BaseModel):
+    key: str = Field(..., min_length=1)
+    value: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    is_public: bool = False
+
+
+class AppConfigUpdate(BaseModel):
+    value: Optional[str] = Field(default=None, min_length=1)
+    description: Optional[str] = None
+    is_public: Optional[bool] = None
+
+
+class AppConfigOut(BaseModel):
+    id: int
+    key: str
+    value: str
+    description: Optional[str] = None
+    is_public: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class SavedItemCreate(BaseModel):
     product_id: int
     note: Optional[str] = None
@@ -190,6 +245,68 @@ class AppointmentOut(BaseModel):
     store_location: str
     appointment_time: datetime
     purpose: Optional[str] = None
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CustomOrderCreate(BaseModel):
+    product_id: Optional[int] = None
+    session_id: Optional[str] = None
+    description: str = Field(..., min_length=1)
+    budget: Optional[float] = Field(default=None, ge=0)
+    metal: Optional[str] = None
+    category: Optional[str] = None
+
+
+class CustomOrderOut(BaseModel):
+    id: int
+    user_id: int
+    product_id: Optional[int] = None
+    session_id: Optional[str] = None
+    description: str
+    budget: Optional[float] = None
+    metal: Optional[str] = None
+    category: Optional[str] = None
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ComplaintCreate(BaseModel):
+    order_reference: Optional[str] = None
+    category: str = "general"
+    message: str = Field(..., min_length=1)
+    priority: str = "normal"
+
+
+class ComplaintOut(BaseModel):
+    id: int
+    user_id: int
+    order_reference: Optional[str] = None
+    category: str
+    message: str
+    priority: str
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrderSupportCreate(BaseModel):
+    order_reference: Optional[str] = None
+    request_type: Literal["status", "cancel", "return", "refund", "delivery", "other"] = "status"
+    message: Optional[str] = None
+
+
+class OrderSupportOut(BaseModel):
+    id: int
+    user_id: int
+    order_reference: Optional[str] = None
+    request_type: str
+    message: Optional[str] = None
     status: str
     created_at: datetime
 
@@ -250,6 +367,11 @@ class ChatResponse(BaseModel):
     applied_filters: dict[str, Any] = Field(default_factory=dict)
     result_count: int = 0
     suggested_next_questions: List[str] = Field(default_factory=list)
+    intent: Optional[str] = None
+    confidence: float = 0.0
+    answer_source: str = "rules"
+    tool_calls: List[str] = Field(default_factory=list)
+    guardrails: List[str] = Field(default_factory=list)
     lead_captured: bool = False
     handoff: Optional[HandoffInfo] = None
 

@@ -16,12 +16,35 @@ Backend API for a Flutter jewellery ecommerce assistant.
 
 - `GET /`
 - `GET /health`
+- `GET /ready`
+- `GET /mobile/config`
+- `GET /products`
+- `GET /products/{product_id}`
+- `GET /products/{product_id}/similar`
+- `GET /featured-products`
+- `GET /seasonal-collections`
+- `GET /categories`
+- `GET /faqs`
+- `GET /policies`
 - `POST /chat`
 - `POST /register`
 - `POST /login`
+- `POST /refresh`
+- `POST /logout`
+- `POST /logout-all-devices`
 - `POST /forgot-password`
 - `POST /verify-email`
 - `POST /resend-verification`
+- `POST /wishlist`
+- `POST /save-for-later`
+- `POST /request-callback`
+- `POST /appointments`
+- `POST /custom-orders`
+- `POST /complaints`
+- `POST /orders/support`
+- `POST /feedback`
+
+Admin endpoints are protected with admin RBAC and cover product CRUD, inventory, categories, featured items, seasonal collections, FAQ/policy content, public app config, leads, support queues, chat analytics, and transcript review.
 
 ## Environment variables
 
@@ -174,6 +197,20 @@ set LIVE_API_BASE_URL=https://sureshhari-snchatbot-backend.hf.space
 set LIVE_API_EXPECT_LATEST_CHAT_CONTRACT=1
 python -m pytest tests\test_live_api.py -q
 ```
+
+## Android integration contract
+
+Use `GET /mobile/config` first when the Android app starts. It exposes backend capabilities, the chat response fields the app should expect, and public non-secret config values.
+
+Important mobile flows:
+
+- Browse catalogue: `GET /products`, `GET /products/{product_id}`, `GET /products/{product_id}/similar`, `GET /featured-products`, `GET /seasonal-collections`, `GET /categories`
+- Auth session: `POST /login`, `POST /refresh`, `POST /logout`, `POST /logout-all-devices`, `GET /me`
+- Chat: `POST /chat` returns `intent`, `confidence`, `answer_source`, `tool_calls`, `guardrails`, `applied_filters`, `result_count`, `suggested_next_questions`, `lead_captured`, and optional `handoff`
+- Customer actions: wishlist, save-for-later, callback requests, appointments, custom-order requests, complaints, and order-support capture
+- Feedback: `POST /feedback` stores thumbs-up, thumbs-down, not-helpful, rating, and comments against a `response_id`
+
+Order support is currently capture-only. The API records delivery/status/cancel/return/refund requests and marks chat answers with the `oms-not-connected-capture-only` guardrail until your OMS is connected.
 
 ## Chat buying suggestions
 
