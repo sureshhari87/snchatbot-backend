@@ -6,6 +6,8 @@ import secrets
 import smtplib
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -49,15 +51,29 @@ from config import (
     FRONTEND_RESET_URL,
     FRONTEND_VERIFY_URL,
     HTTPS_REDIRECT,
+    ALERT_ERROR_THRESHOLD,
     LOGIN_FAILURE_LIMIT,
     LOGIN_LOCKOUT_MINUTES,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_ENABLED,
+    LLM_MAX_TOKENS,
+    LLM_MODEL,
+    LLM_TIMEOUT_SECONDS,
     MAX_REQUEST_BODY_BYTES,
+    MONITORING_WEBHOOK_TIMEOUT_SECONDS,
+    MONITORING_WEBHOOK_URL,
+    OMS_API_KEY,
+    OMS_BASE_URL,
+    OMS_ENABLED,
+    OMS_TIMEOUT_SECONDS,
     PASSWORD_MIN_LENGTH,
     PASSWORD_RESET_EXPIRE_MINUTES,
     REFRESH_TOKEN_EXPIRE_DAYS,
     RESEND_VERIFICATION_COOLDOWN_SECONDS,
     RUN_MIGRATIONS_ON_STARTUP,
     SECRET_KEY,
+    SENTRY_DSN,
     TRUSTED_HOSTS,
     is_testing,
 )
@@ -72,8 +88,10 @@ from models import (
     ComplaintTicket,
     CustomOrderRequest,
     EmailVerificationToken,
+    ExternalIntegrationEvent,
     FeaturedItem,
     KnowledgeBaseItem,
+    NotificationSettings,
     LeadCapture,
     OrderSupportRequest,
     PasswordResetToken,
@@ -84,6 +102,7 @@ from models import (
     SaveForLaterItem,
     SeasonalCollection,
     User,
+    UserAddress,
     WishlistItem,
     utc_now,
 )
@@ -100,10 +119,14 @@ from schemas import (
     CategoryUpdate,
     ChatRequest,
     ChatResponse,
+    ChatMessageOut,
+    ChatSessionDetailOut,
+    ChatSessionOut,
     ComplaintCreate,
     ComplaintOut,
     CustomOrderCreate,
     CustomOrderOut,
+    ExternalIntegrationEventOut,
     FeaturedItemCreate,
     FeaturedItemOut,
     FeaturedItemUpdate,
@@ -117,6 +140,10 @@ from schemas import (
     LeadCaptureOut,
     LeadStatusUpdate,
     MessageResponse,
+    NotificationSettingsOut,
+    NotificationSettingsUpdate,
+    OrderActionRequest,
+    OrderLookupOut,
     OrderSupportCreate,
     OrderSupportOut,
     ProductCreate,
@@ -132,6 +159,9 @@ from schemas import (
     SeasonalCollectionUpdate,
     TokenResponse,
     TranscriptReviewUpdate,
+    UserAddressCreate,
+    UserAddressOut,
+    UserAddressUpdate,
     UserOut,
     UserRegister,
     VerifyEmailRequest,
@@ -152,6 +182,18 @@ def configure_json_logger() -> logging.Logger:
 logger = configure_json_logger()
 
 
+def configure_error_monitoring() -> None:
+    if not SENTRY_DSN or is_testing():
+        return
+    try:
+        import sentry_sdk
+    except ImportError:
+        log_event("monitoring.sentry_unavailable", dsn_configured=True)
+        return
+    sentry_sdk.init(dsn=SENTRY_DSN, environment=APP_ENV)
+    log_event("monitoring.sentry_configured")
+
+
 METRICS: dict[str, int] = {
     "total_chats": 0,
     "failed_logins": 0,
@@ -163,6 +205,11 @@ METRICS: dict[str, int] = {
     "feedback_not_helpful": 0,
     "errors_total": 0,
     "admin_actions": 0,
+    "external_alerts_sent": 0,
+    "oms_requests": 0,
+    "oms_failures": 0,
+    "llm_requests": 0,
+    "llm_failures": 0,
 }
 FEEDBACK_COUNTS: dict[str, int] = {
     "positive": 0,
@@ -218,6 +265,102 @@ def metrics_snapshot() -> dict[str, Any]:
         "counters": dict(METRICS),
         "feedback_counts": dict(FEEDBACK_COUNTS),
     }
+
+
+configure_error_monitoring()
+
+
+def json_http_request(
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 10,
+) -> tuple[int, dict[str, Any]]:
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=request_headers,
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw_body = response.read().decode("utf-8")
+        if not raw_body:
+            return response.status, {}
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError:
+            body = {"raw": raw_body}
+        return response.status, body if isinstance(body, dict) else {"data": body}
+
+
+def send_monitoring_alert(
+    event: str,
+    severity: str = "error",
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    if not MONITORING_WEBHOOK_URL or is_testing():
+        return False
+
+    alert_payload = {
+        "event": event,
+        "severity": severity,
+        "environment": APP_ENV,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": payload or {},
+    }
+    try:
+        json_http_request(
+            "POST",
+            MONITORING_WEBHOOK_URL,
+            alert_payload,
+            timeout=MONITORING_WEBHOOK_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        log_event(
+            "monitoring.alert_failed",
+            level=logging.ERROR,
+            error_type=exc.__class__.__name__,
+            event=event,
+        )
+        return False
+
+    increment_metric("external_alerts_sent")
+    log_event("monitoring.alert_sent", event=event, severity=severity)
+    return True
+
+
+def record_integration_event(
+    db: Session,
+    service: str,
+    action: str,
+    status_value: str,
+    user_id: int | None = None,
+    reference: str | None = None,
+    request_payload: dict[str, Any] | None = None,
+    response_payload: dict[str, Any] | None = None,
+    status_code: int | None = None,
+    error: str | None = None,
+) -> ExternalIntegrationEvent:
+    event = ExternalIntegrationEvent(
+        user_id=user_id,
+        service=service,
+        action=action,
+        reference=reference,
+        request_payload=dump_json_object(request_payload or {}) if request_payload else None,
+        response_payload=dump_json_object(response_payload or {}) if response_payload else None,
+        status=status_value,
+        status_code=status_code,
+        error=error,
+    )
+    db.add(event)
+    return event
 
 
 @asynccontextmanager
@@ -360,6 +503,15 @@ async def request_id_middleware(request: Request, call_next):
             level=logging.ERROR,
             error_type=exc.__class__.__name__,
             duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        send_monitoring_alert(
+            "error.unhandled",
+            payload={
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "error_type": exc.__class__.__name__,
+            },
         )
         return error_response(request, 500, "Internal server error")
 
@@ -840,6 +992,39 @@ def get_record_or_404(db: Session, model, record_id: int, detail: str):
     return record
 
 
+def get_user_address_or_404(db: Session, user_id: int, address_id: int) -> UserAddress:
+    address = (
+        db.query(UserAddress)
+        .filter(UserAddress.id == address_id, UserAddress.user_id == user_id)
+        .first()
+    )
+    if not address:
+        raise HTTPException(status_code=404, detail="Address not found")
+    return address
+
+
+def clear_default_addresses(db: Session, user_id: int) -> None:
+    for address in db.query(UserAddress).filter(UserAddress.user_id == user_id).all():
+        address.is_default = False
+        address.updated_at = utc_now()
+
+
+def notification_settings_for_user(db: Session, user_id: int) -> NotificationSettings:
+    settings_row = (
+        db.query(NotificationSettings)
+        .filter(NotificationSettings.user_id == user_id)
+        .first()
+    )
+    if settings_row:
+        return settings_row
+
+    settings_row = NotificationSettings(user_id=user_id)
+    db.add(settings_row)
+    db.commit()
+    db.refresh(settings_row)
+    return settings_row
+
+
 def ensure_unique_slug(
     db: Session,
     model,
@@ -1291,6 +1476,201 @@ def load_json_list(raw_value: str | None) -> list[Any]:
 
 def dump_json_list(value: list[Any]) -> str:
     return json.dumps(value)
+
+
+def integration_status() -> dict[str, Any]:
+    return {
+        "oms": {
+            "enabled": OMS_ENABLED and bool(OMS_BASE_URL),
+            "base_url_configured": bool(OMS_BASE_URL),
+            "api_key_configured": bool(OMS_API_KEY),
+        },
+        "llm": {
+            "enabled": LLM_ENABLED and bool(LLM_BASE_URL and LLM_API_KEY),
+            "base_url_configured": bool(LLM_BASE_URL),
+            "api_key_configured": bool(LLM_API_KEY),
+            "model": LLM_MODEL,
+        },
+        "monitoring": {
+            "webhook_configured": bool(MONITORING_WEBHOOK_URL),
+            "sentry_configured": bool(SENTRY_DSN),
+            "alert_error_threshold": ALERT_ERROR_THRESHOLD,
+        },
+    }
+
+
+def oms_headers() -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if OMS_API_KEY:
+        headers["Authorization"] = f"Bearer {OMS_API_KEY}"
+    return headers
+
+
+def call_oms(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if not OMS_ENABLED or not OMS_BASE_URL:
+        raise RuntimeError("OMS integration is not configured")
+    url = f"{OMS_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    increment_metric("oms_requests")
+    return json_http_request(method, url, payload, oms_headers(), OMS_TIMEOUT_SECONDS)
+
+
+def lookup_oms_order(order_reference: str) -> tuple[str, dict[str, Any], str | None, int | None]:
+    if not OMS_ENABLED or not OMS_BASE_URL:
+        return "disabled", {}, "OMS integration is not configured", None
+
+    try:
+        status_code, body = call_oms("GET", f"/orders/{order_reference}")
+    except urllib.error.HTTPError as exc:
+        increment_metric("oms_failures")
+        return "failed", {}, f"OMS returned {exc.code}", exc.code
+    except Exception as exc:
+        increment_metric("oms_failures")
+        return "failed", {}, exc.__class__.__name__, None
+
+    return "synced", body, None, status_code
+
+
+def submit_oms_order_action(
+    order_reference: str | None,
+    action: str,
+    payload: dict[str, Any],
+) -> tuple[str, dict[str, Any], str | None, int | None]:
+    if not order_reference:
+        return "capture_only", {}, "Missing order reference", None
+    if not OMS_ENABLED or not OMS_BASE_URL:
+        return "capture_only", {}, "OMS integration is not configured", None
+
+    try:
+        status_code, body = call_oms("POST", f"/orders/{order_reference}/{action}", payload)
+    except urllib.error.HTTPError as exc:
+        increment_metric("oms_failures")
+        return "failed", {}, f"OMS returned {exc.code}", exc.code
+    except Exception as exc:
+        increment_metric("oms_failures")
+        return "failed", {}, exc.__class__.__name__, None
+
+    return "synced", body, None, status_code
+
+
+def llm_is_configured() -> bool:
+    return LLM_ENABLED and bool(LLM_BASE_URL and LLM_API_KEY)
+
+
+def llm_endpoint_url() -> str:
+    base_url = LLM_BASE_URL.rstrip("/") if LLM_BASE_URL else ""
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
+def build_llm_prompt(
+    message: str,
+    products: list[Product],
+    filters: dict[str, Any],
+    fallback_reply: str,
+) -> dict[str, Any]:
+    product_context = [
+        {
+            "id": product.id,
+            "name": product.name,
+            "category": product.category,
+            "metal": product.metal,
+            "price": product.price,
+            "in_stock": product.in_stock,
+        }
+        for product in products[:5]
+    ]
+    return {
+        "model": LLM_MODEL,
+        "temperature": 0.2,
+        "max_tokens": LLM_MAX_TOKENS,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a jewellery ecommerce assistant. Answer only from the supplied "
+                    "catalog context, do not invent stock, pricing, discounts, medical claims, "
+                    "investment guarantees, or order actions. If the catalog is insufficient, "
+                    "ask a short follow-up or offer support handoff."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "customer_message": message,
+                        "applied_filters": compact_filters(filters),
+                        "catalog_products": product_context,
+                        "fallback_reply": fallback_reply,
+                    },
+                    default=str,
+                ),
+            },
+        ],
+    }
+
+
+def try_llm_reply(
+    db: Session,
+    user: User,
+    message: str,
+    products: list[Product],
+    filters: dict[str, Any],
+    fallback_reply: str,
+) -> tuple[str, str, list[str]]:
+    if not llm_is_configured():
+        return fallback_reply, "rules", []
+
+    payload = build_llm_prompt(message, products, filters, fallback_reply)
+    increment_metric("llm_requests")
+    try:
+        status_code, body = json_http_request(
+            "POST",
+            llm_endpoint_url(),
+            payload,
+            {"Authorization": f"Bearer {LLM_API_KEY}"},
+            LLM_TIMEOUT_SECONDS,
+        )
+        choices = body.get("choices", [])
+        generated = ""
+        if choices:
+            message_body = choices[0].get("message", {})
+            generated = str(message_body.get("content") or "").strip()
+        if not generated:
+            raise ValueError("LLM returned an empty response")
+        record_integration_event(
+            db,
+            service="llm",
+            action="chat_completion",
+            status_value="synced",
+            user_id=user.id,
+            request_payload={"message": message, "model": LLM_MODEL},
+            response_payload={"reply": generated},
+            status_code=status_code,
+        )
+        return generated, "llm_grounded_catalog", ["llm_completion"]
+    except Exception as exc:
+        increment_metric("llm_failures")
+        record_integration_event(
+            db,
+            service="llm",
+            action="chat_completion",
+            status_value="failed",
+            user_id=user.id,
+            request_payload={"message": message, "model": LLM_MODEL},
+            error=exc.__class__.__name__,
+        )
+        log_event(
+            "llm.request_failed",
+            level=logging.WARNING,
+            user_id=user.id,
+            error_type=exc.__class__.__name__,
+        )
+        return fallback_reply, "rules_fallback", []
 
 
 def has_product_search_signal(filters: dict[str, Any]) -> bool:
@@ -1992,10 +2372,25 @@ def email_dependency_status() -> dict[str, Any]:
     return {"status": "disabled", "critical": False}
 
 
+def optional_service_status(enabled: bool, configured: bool, name: str) -> dict[str, Any]:
+    if enabled and configured:
+        return {"status": "configured", "critical": False, "service": name}
+    if enabled and not configured:
+        return {"status": "misconfigured", "critical": False, "service": name}
+    return {"status": "disabled", "critical": False, "service": name}
+
+
 def dependency_snapshot(db: Session) -> dict[str, Any]:
     dependencies = {
         "database": database_dependency_status(db),
         "email": email_dependency_status(),
+        "oms": optional_service_status(OMS_ENABLED, bool(OMS_BASE_URL), "oms"),
+        "llm": optional_service_status(LLM_ENABLED, bool(LLM_BASE_URL and LLM_API_KEY), "llm"),
+        "monitoring": optional_service_status(
+            bool(MONITORING_WEBHOOK_URL or SENTRY_DSN),
+            bool(MONITORING_WEBHOOK_URL or SENTRY_DSN),
+            "monitoring",
+        ),
     }
     status_value = "ok"
     for dependency in dependencies.values():
@@ -2317,6 +2712,169 @@ async def me(current_user: User = Depends(get_current_user)):
     return current_user
 
 
+@app.get("/users/me/addresses", response_model=list[UserAddressOut])
+async def list_my_addresses(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(UserAddress)
+        .filter(UserAddress.user_id == current_user.id)
+        .order_by(UserAddress.is_default.desc(), UserAddress.created_at.desc())
+        .all()
+    )
+
+
+@app.post("/users/me/addresses", response_model=UserAddressOut)
+async def create_my_address(
+    payload: UserAddressCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    existing_count = db.query(UserAddress).filter(UserAddress.user_id == current_user.id).count()
+    make_default = payload.is_default or existing_count == 0
+    if make_default:
+        clear_default_addresses(db, current_user.id)
+
+    address = UserAddress(
+        user_id=current_user.id,
+        **payload.model_dump(exclude={"is_default"}),
+        is_default=make_default,
+    )
+    db.add(address)
+    db.commit()
+    db.refresh(address)
+    return address
+
+
+@app.patch("/users/me/addresses/{address_id}", response_model=UserAddressOut)
+async def update_my_address(
+    address_id: int,
+    payload: UserAddressUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    address = get_user_address_or_404(db, current_user.id, address_id)
+    updates = payload.model_dump(exclude_unset=True)
+    if updates.get("is_default") is True:
+        clear_default_addresses(db, current_user.id)
+    apply_model_updates(address, updates)
+    address.updated_at = utc_now()
+    db.commit()
+    db.refresh(address)
+    return address
+
+
+@app.delete("/users/me/addresses/{address_id}", response_model=MessageResponse)
+async def delete_my_address(
+    address_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    address = get_user_address_or_404(db, current_user.id, address_id)
+    was_default = address.is_default
+    db.delete(address)
+    db.commit()
+
+    if was_default:
+        replacement = (
+            db.query(UserAddress)
+            .filter(UserAddress.user_id == current_user.id)
+            .order_by(UserAddress.created_at.desc())
+            .first()
+        )
+        if replacement:
+            replacement.is_default = True
+            replacement.updated_at = utc_now()
+            db.commit()
+
+    return MessageResponse(message="Address deleted")
+
+
+@app.get("/users/me/notification-settings", response_model=NotificationSettingsOut)
+async def get_my_notification_settings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return notification_settings_for_user(db, current_user.id)
+
+
+@app.patch("/users/me/notification-settings", response_model=NotificationSettingsOut)
+async def update_my_notification_settings(
+    payload: NotificationSettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    settings_row = notification_settings_for_user(db, current_user.id)
+    apply_model_updates(settings_row, payload.model_dump(exclude_unset=True))
+    settings_row.updated_at = utc_now()
+    db.commit()
+    db.refresh(settings_row)
+    return settings_row
+
+
+def chat_session_summary(db: Session, session: ChatSession) -> ChatSessionOut:
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session.session_id)
+        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .all()
+    )
+    last_message = messages[-1] if messages else None
+    return ChatSessionOut(
+        session_id=session.session_id,
+        last_filters=load_json_object(session.last_filters),
+        preferences=load_json_object(session.preferences),
+        created_at=session.created_at,
+        message_count=len(messages),
+        last_message_at=last_message.created_at if last_message else None,
+    )
+
+
+@app.get("/chat/sessions", response_model=list[ChatSessionOut])
+async def list_chat_sessions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    sessions = (
+        db.query(ChatSession)
+        .filter(ChatSession.user_id == str(current_user.id))
+        .order_by(ChatSession.created_at.desc())
+        .all()
+    )
+    return [chat_session_summary(db, session) for session in sessions]
+
+
+@app.get("/chat/sessions/{session_id}", response_model=ChatSessionDetailOut)
+async def get_chat_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.session_id == session_id,
+            ChatSession.user_id == str(current_user.id),
+        )
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    summary = chat_session_summary(db, session)
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session.session_id)
+        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .all()
+    )
+    return ChatSessionDetailOut(
+        **summary.model_dump(),
+        messages=[ChatMessageOut.model_validate(message) for message in messages],
+    )
+
+
 @app.get("/products", response_model=list[ProductOut])
 async def list_products(
     q: str | None = None,
@@ -2462,6 +3020,11 @@ async def mobile_config(db: Session = Depends(get_db)):
             "feedback": True,
             "customer_actions": True,
             "order_support_capture": True,
+            "oms_order_lookup": OMS_ENABLED and bool(OMS_BASE_URL),
+            "llm_grounded_answers": llm_is_configured(),
+            "addresses": True,
+            "notification_settings": True,
+            "saved_chat_history": True,
             "human_handoff": True,
             "admin": False,
         },
@@ -2484,6 +3047,7 @@ async def mobile_config(db: Session = Depends(get_db)):
             "guardrail_mode": "catalog-grounded",
         },
         "public_config": public_config_values(db),
+        "integrations": integration_status(),
     }
 
 
@@ -2911,6 +3475,45 @@ async def admin_metrics(
     admin_user: User = Depends(require_permission("metrics:read")),
 ):
     return metrics_snapshot()
+
+
+@app.get("/admin/integrations/status")
+async def admin_integrations_status(
+    admin_user: User = Depends(require_permission("metrics:read")),
+):
+    return integration_status()
+
+
+@app.get("/admin/integrations/events", response_model=list[ExternalIntegrationEventOut])
+async def admin_integration_events(
+    service: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("metrics:read")),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ExternalIntegrationEvent)
+    if service:
+        query = query.filter(ExternalIntegrationEvent.service == service)
+    return query.order_by(ExternalIntegrationEvent.created_at.desc()).limit(limit).all()
+
+
+@app.post("/admin/alerts/test", response_model=MessageResponse)
+async def admin_test_alert(
+    request: Request,
+    admin_user: User = Depends(require_permission("metrics:read")),
+):
+    sent = send_monitoring_alert(
+        "monitoring.test_alert",
+        severity="info",
+        payload={
+            "admin_user_id": admin_user.id,
+            "request_id": request_id_from_request(request),
+        },
+    )
+    if sent:
+        log_admin_action(request, admin_user, "test_alert", "monitoring")
+        return MessageResponse(message="Monitoring alert sent")
+    return MessageResponse(message="Monitoring alert webhook is not configured")
 
 
 @app.get("/admin/analytics/chat")
@@ -3402,14 +4005,52 @@ async def create_order_support_request(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    integration_state = "capture_only"
+    oms_response: dict[str, Any] = {}
+    integration_error = None
+    status_code = None
+    oms_payload = {
+        "request_type": payload.request_type,
+        "message": payload.message,
+        "source": "chatbot_api",
+    }
+    if payload.request_type in {"cancel", "return", "refund"}:
+        integration_state, oms_response, integration_error, status_code = submit_oms_order_action(
+            payload.order_reference,
+            payload.request_type,
+            oms_payload,
+        )
+    elif payload.request_type in {"status", "delivery"} and payload.order_reference:
+        integration_state, oms_response, integration_error, status_code = lookup_oms_order(
+            payload.order_reference
+        )
+
     order_request = OrderSupportRequest(
         user_id=current_user.id,
         order_reference=payload.order_reference,
         request_type=payload.request_type,
         message=payload.message,
-        status="received",
+        status=(
+            "synced_to_oms"
+            if integration_state == "synced"
+            else "oms_failed"
+            if integration_state == "failed"
+            else "received"
+        ),
     )
     db.add(order_request)
+    record_integration_event(
+        db,
+        service="oms",
+        action=payload.request_type,
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=payload.order_reference,
+        request_payload=oms_payload,
+        response_payload=oms_response,
+        status_code=status_code,
+        error=integration_error,
+    )
     create_customer_action_lead(
         db,
         current_user,
@@ -3423,7 +4064,18 @@ async def create_order_support_request(
     )
     db.commit()
     db.refresh(order_request)
-    return order_request
+    if integration_state == "failed":
+        send_monitoring_alert(
+            "oms.request_failed",
+            payload={
+                "order_reference": payload.order_reference,
+                "request_type": payload.request_type,
+                "error": integration_error,
+            },
+        )
+    return OrderSupportOut.model_validate(order_request).model_copy(
+        update={"integration_status": integration_state, "oms_response": oms_response}
+    )
 
 
 @app.get("/orders/support/my", response_model=list[OrderSupportOut])
@@ -3437,6 +4089,137 @@ async def list_my_order_support_requests(
         .order_by(OrderSupportRequest.created_at.desc())
         .all()
     )
+
+
+@app.get("/orders/{order_reference}", response_model=OrderLookupOut)
+async def get_order_status(
+    order_reference: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    integration_state, data, error, status_code = lookup_oms_order(order_reference)
+    record_integration_event(
+        db,
+        service="oms",
+        action="lookup",
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=order_reference,
+        response_payload=data,
+        status_code=status_code,
+        error=error,
+    )
+    db.commit()
+    if integration_state == "failed":
+        send_monitoring_alert(
+            "oms.lookup_failed",
+            payload={"order_reference": order_reference, "error": error},
+        )
+    return OrderLookupOut(
+        order_reference=order_reference,
+        integration_status=integration_state,
+        data=data,
+        message=error,
+    )
+
+
+@app.post("/orders/{order_reference}/cancel")
+async def cancel_order(
+    order_reference: str,
+    payload: OrderActionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    request_payload = payload.model_dump()
+    integration_state, data, error, status_code = submit_oms_order_action(
+        order_reference, "cancel", request_payload
+    )
+    record_integration_event(
+        db,
+        service="oms",
+        action="cancel",
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=order_reference,
+        request_payload=request_payload,
+        response_payload=data,
+        status_code=status_code,
+        error=error,
+    )
+    db.commit()
+    return {
+        "order_reference": order_reference,
+        "action": "cancel",
+        "integration_status": integration_state,
+        "data": data,
+        "message": error,
+    }
+
+
+@app.post("/orders/{order_reference}/return")
+async def request_order_return(
+    order_reference: str,
+    payload: OrderActionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    request_payload = payload.model_dump()
+    integration_state, data, error, status_code = submit_oms_order_action(
+        order_reference, "return", request_payload
+    )
+    record_integration_event(
+        db,
+        service="oms",
+        action="return",
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=order_reference,
+        request_payload=request_payload,
+        response_payload=data,
+        status_code=status_code,
+        error=error,
+    )
+    db.commit()
+    return {
+        "order_reference": order_reference,
+        "action": "return",
+        "integration_status": integration_state,
+        "data": data,
+        "message": error,
+    }
+
+
+@app.post("/orders/{order_reference}/refund")
+async def request_order_refund(
+    order_reference: str,
+    payload: OrderActionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    request_payload = payload.model_dump()
+    integration_state, data, error, status_code = submit_oms_order_action(
+        order_reference, "refund", request_payload
+    )
+    record_integration_event(
+        db,
+        service="oms",
+        action="refund",
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=order_reference,
+        request_payload=request_payload,
+        response_payload=data,
+        status_code=status_code,
+        error=error,
+    )
+    db.commit()
+    return {
+        "order_reference": order_reference,
+        "action": "refund",
+        "integration_status": integration_state,
+        "data": data,
+        "message": error,
+    }
 
 
 @app.post("/feedback", response_model=MessageResponse)
@@ -3526,7 +4309,10 @@ async def chat(
     filters = merge_filter_state(previous_filters, req.message)
     applied_filters = compact_filters(filters)
     products, result_count = filter_products(db, filters)
-    reply = build_reply(req.message, result_count, filters)
+    fallback_reply = build_reply(req.message, result_count, filters)
+    reply = fallback_reply
+    llm_source = "rules"
+    llm_tool_calls: list[str] = []
     suggestions = get_buying_suggestions(req.message)
     suggested_next_questions = build_suggested_next_questions(filters, result_count)
     chat_session.last_filters = dump_json_object(applied_filters)
@@ -3550,6 +4336,15 @@ async def chat(
 
     response_id = str(uuid4())
     chat_intent = detect_chat_intent(req.message, filters, lead_intent)
+    if chat_intent not in {"order_status", "return_refund", "complaint"} and not lead_captured:
+        reply, llm_source, llm_tool_calls = try_llm_reply(
+            db,
+            current_user,
+            req.message,
+            products,
+            filters,
+            fallback_reply,
+        )
     unmatched = is_unmatched_query(chat_intent, result_count, filters)
     low_conversion = is_low_conversion_search(result_count, filters, lead_captured)
     if unmatched:
@@ -3599,6 +4394,13 @@ async def chat(
         tool_calls.append("catalog_search")
     if lead_captured:
         tool_calls.append("lead_capture")
+    tool_calls.extend(llm_tool_calls)
+    answer_source = answer_source_for_chat(chat_intent, result_count, lead_captured)
+    if not lead_captured and llm_source != "rules":
+        answer_source = llm_source
+    guardrails = guardrails_for_chat(req.message, chat_intent, unmatched)
+    if llm_tool_calls:
+        guardrails.append("llm-grounded-catalog")
 
     return ChatResponse(
         response_id=response_id,
@@ -3611,9 +4413,9 @@ async def chat(
         suggested_next_questions=suggested_next_questions,
         intent=chat_intent,
         confidence=chat_confidence(chat_intent, result_count, filters, unmatched),
-        answer_source=answer_source_for_chat(chat_intent, result_count, lead_captured),
+        answer_source=answer_source,
         tool_calls=tool_calls,
-        guardrails=guardrails_for_chat(req.message, chat_intent, unmatched),
+        guardrails=guardrails,
         lead_captured=lead_captured,
         handoff=handoff,
     )

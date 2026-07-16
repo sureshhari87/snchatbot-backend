@@ -193,6 +193,83 @@ class AppConfigOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class UserAddressCreate(BaseModel):
+    label: str = "home"
+    full_name: str = Field(..., min_length=1)
+    phone: Optional[str] = None
+    line1: str = Field(..., min_length=1)
+    line2: Optional[str] = None
+    city: str = Field(..., min_length=1)
+    state: str = Field(..., min_length=1)
+    postal_code: str = Field(..., min_length=1)
+    country: str = "India"
+    is_default: bool = False
+
+
+class UserAddressUpdate(BaseModel):
+    label: Optional[str] = None
+    full_name: Optional[str] = Field(default=None, min_length=1)
+    phone: Optional[str] = None
+    line1: Optional[str] = Field(default=None, min_length=1)
+    line2: Optional[str] = None
+    city: Optional[str] = Field(default=None, min_length=1)
+    state: Optional[str] = Field(default=None, min_length=1)
+    postal_code: Optional[str] = Field(default=None, min_length=1)
+    country: Optional[str] = None
+    is_default: Optional[bool] = None
+
+
+class UserAddressOut(BaseModel):
+    id: int
+    user_id: int
+    label: str
+    full_name: str
+    phone: Optional[str] = None
+    line1: str
+    line2: Optional[str] = None
+    city: str
+    state: str
+    postal_code: str
+    country: str
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationSettingsUpdate(BaseModel):
+    email_enabled: Optional[bool] = None
+    sms_enabled: Optional[bool] = None
+    push_enabled: Optional[bool] = None
+    marketing_enabled: Optional[bool] = None
+    order_updates_enabled: Optional[bool] = None
+    chat_updates_enabled: Optional[bool] = None
+    appointment_reminders_enabled: Optional[bool] = None
+    quiet_hours_start: Optional[str] = None
+    quiet_hours_end: Optional[str] = None
+    push_token: Optional[str] = None
+
+
+class NotificationSettingsOut(BaseModel):
+    id: int
+    user_id: int
+    email_enabled: bool
+    sms_enabled: bool
+    push_enabled: bool
+    marketing_enabled: bool
+    order_updates_enabled: bool
+    chat_updates_enabled: bool
+    appointment_reminders_enabled: bool
+    quiet_hours_start: Optional[str] = None
+    quiet_hours_end: Optional[str] = None
+    push_token: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class SavedItemCreate(BaseModel):
     product_id: int
     note: Optional[str] = None
@@ -309,8 +386,22 @@ class OrderSupportOut(BaseModel):
     message: Optional[str] = None
     status: str
     created_at: datetime
+    integration_status: Optional[str] = None
+    oms_response: Optional[dict[str, Any]] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class OrderActionRequest(BaseModel):
+    reason: Optional[str] = None
+    message: Optional[str] = None
+
+
+class OrderLookupOut(BaseModel):
+    order_reference: str
+    integration_status: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    message: Optional[str] = None
 
 
 class FeedbackCreate(BaseModel):
@@ -374,6 +465,43 @@ class ChatResponse(BaseModel):
     guardrails: List[str] = Field(default_factory=list)
     lead_captured: bool = False
     handoff: Optional[HandoffInfo] = None
+
+
+class ChatMessageOut(BaseModel):
+    id: int
+    session_id: str
+    role: str
+    content: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ChatSessionOut(BaseModel):
+    session_id: str
+    last_filters: dict[str, Any] = Field(default_factory=dict)
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    message_count: int = 0
+    last_message_at: Optional[datetime] = None
+
+
+class ChatSessionDetailOut(ChatSessionOut):
+    messages: List[ChatMessageOut] = Field(default_factory=list)
+
+
+class ExternalIntegrationEventOut(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    service: str
+    action: str
+    reference: Optional[str] = None
+    status: str
+    status_code: Optional[int] = None
+    error: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserRegister(BaseModel):

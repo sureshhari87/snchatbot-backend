@@ -24,8 +24,20 @@ Backend API for a Flutter jewellery ecommerce assistant.
 - `GET /featured-products`
 - `GET /seasonal-collections`
 - `GET /categories`
+- `GET /users/me/addresses`
+- `POST /users/me/addresses`
+- `PATCH /users/me/addresses/{address_id}`
+- `DELETE /users/me/addresses/{address_id}`
+- `GET /users/me/notification-settings`
+- `PATCH /users/me/notification-settings`
+- `GET /chat/sessions`
+- `GET /chat/sessions/{session_id}`
 - `GET /faqs`
 - `GET /policies`
+- `GET /orders/{order_reference}`
+- `POST /orders/{order_reference}/cancel`
+- `POST /orders/{order_reference}/return`
+- `POST /orders/{order_reference}/refund`
 - `POST /chat`
 - `POST /register`
 - `POST /login`
@@ -85,6 +97,23 @@ Email secrets for registration verification and password reset:
 - `EMAIL_USE_TLS` default: `1`
 - `EMAIL_USE_SSL` default: `0`
 - `EMAIL_TIMEOUT_SECONDS` default: `10`
+
+Production integration secrets:
+
+- `OMS_ENABLED` enables real OMS calls when `1`
+- `OMS_BASE_URL` base URL for your order-management API
+- `OMS_API_KEY` bearer token for the OMS API
+- `OMS_TIMEOUT_SECONDS` default: `10`
+- `LLM_ENABLED` enables grounded LLM replies when `1`
+- `LLM_BASE_URL` OpenAI-compatible base URL, for example `https://api.openai.com/v1`
+- `LLM_API_KEY`
+- `LLM_MODEL` default: `gpt-4o-mini`
+- `LLM_TIMEOUT_SECONDS` default: `20`
+- `LLM_MAX_TOKENS` default: `350`
+- `MONITORING_WEBHOOK_URL` alert webhook for external monitoring
+- `MONITORING_WEBHOOK_TIMEOUT_SECONDS` default: `5`
+- `SENTRY_DSN` optional Sentry error monitoring DSN
+- `ALERT_ERROR_THRESHOLD` default: `5`
 
 For Gmail, use an app password, not your normal account password. If SMTP is not configured, the app still creates the token and prints the email body in logs for local development.
 
@@ -206,11 +235,21 @@ Important mobile flows:
 
 - Browse catalogue: `GET /products`, `GET /products/{product_id}`, `GET /products/{product_id}/similar`, `GET /featured-products`, `GET /seasonal-collections`, `GET /categories`
 - Auth session: `POST /login`, `POST /refresh`, `POST /logout`, `POST /logout-all-devices`, `GET /me`
+- User account: address book, notification settings, wishlist, save-for-later, and saved chat sessions
 - Chat: `POST /chat` returns `intent`, `confidence`, `answer_source`, `tool_calls`, `guardrails`, `applied_filters`, `result_count`, `suggested_next_questions`, `lead_captured`, and optional `handoff`
 - Customer actions: wishlist, save-for-later, callback requests, appointments, custom-order requests, complaints, and order-support capture
+- Orders: `GET /orders/{order_reference}` and cancel/return/refund endpoints call the configured OMS when enabled
 - Feedback: `POST /feedback` stores thumbs-up, thumbs-down, not-helpful, rating, and comments against a `response_id`
 
-Order support is currently capture-only. The API records delivery/status/cancel/return/refund requests and marks chat answers with the `oms-not-connected-capture-only` guardrail until your OMS is connected.
+Order support is capture-only until `OMS_ENABLED=1` and `OMS_BASE_URL` are configured. After that, lookup, cancel, return, refund, and `/orders/support` requests are sent to your OMS and audited in `external_integration_events`.
+
+The LLM layer is optional and disabled by default. When `LLM_ENABLED=1`, `LLM_BASE_URL`, and `LLM_API_KEY` are configured, `/chat` sends a grounded catalog prompt to an OpenAI-compatible chat-completions endpoint. If the LLM fails, the backend falls back to the existing deterministic catalog reply.
+
+Admin production operations:
+
+- `GET /admin/integrations/status`
+- `GET /admin/integrations/events`
+- `POST /admin/alerts/test`
 
 ## Chat buying suggestions
 

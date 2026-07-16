@@ -21,6 +21,44 @@ class User(Base):
     is_admin = Column(Boolean, nullable=False, default=False)
 
 
+class UserAddress(Base):
+    __tablename__ = "user_addresses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    label = Column(String, nullable=False, default="home")
+    full_name = Column(String, nullable=False)
+    phone = Column(String, nullable=True)
+    line1 = Column(String, nullable=False)
+    line2 = Column(String, nullable=True)
+    city = Column(String, nullable=False)
+    state = Column(String, nullable=False)
+    postal_code = Column(String, nullable=False)
+    country = Column(String, nullable=False, default="India")
+    is_default = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class NotificationSettings(Base):
+    __tablename__ = "notification_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    email_enabled = Column(Boolean, nullable=False, default=True)
+    sms_enabled = Column(Boolean, nullable=False, default=False)
+    push_enabled = Column(Boolean, nullable=False, default=True)
+    marketing_enabled = Column(Boolean, nullable=False, default=False)
+    order_updates_enabled = Column(Boolean, nullable=False, default=True)
+    chat_updates_enabled = Column(Boolean, nullable=False, default=True)
+    appointment_reminders_enabled = Column(Boolean, nullable=False, default=True)
+    quiet_hours_start = Column(String, nullable=True)
+    quiet_hours_end = Column(String, nullable=True)
+    push_token = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
 class Product(Base):
     __tablename__ = "products"
 
@@ -156,6 +194,22 @@ class ResponseFeedback(Base):
     rating = Column(Integer, nullable=True)
     context = Column(String, nullable=True)
     comment = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class ExternalIntegrationEvent(Base):
+    __tablename__ = "external_integration_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    service = Column(String, nullable=False, index=True)
+    action = Column(String, nullable=False, index=True)
+    reference = Column(String, nullable=True, index=True)
+    request_payload = Column(Text, nullable=True)
+    response_payload = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="received", index=True)
+    status_code = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utc_now, nullable=False)
 
 

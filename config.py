@@ -123,6 +123,20 @@ class Settings:
     login_lockout_minutes: int
     resend_verification_cooldown_seconds: int
     max_request_body_bytes: int
+    oms_base_url: str | None
+    oms_api_key: str | None
+    oms_timeout_seconds: int
+    oms_enabled: bool
+    llm_enabled: bool
+    llm_base_url: str | None
+    llm_api_key: str | None
+    llm_model: str
+    llm_timeout_seconds: int
+    llm_max_tokens: int
+    monitoring_webhook_url: str | None
+    monitoring_webhook_timeout_seconds: int
+    sentry_dsn: str | None
+    alert_error_threshold: int
 
     @property
     def is_testing(self) -> bool:
@@ -226,6 +240,20 @@ def build_settings() -> Settings:
         login_lockout_minutes=get_int("LOGIN_LOCKOUT_MINUTES", 15),
         resend_verification_cooldown_seconds=get_int("RESEND_VERIFICATION_COOLDOWN_SECONDS", 60),
         max_request_body_bytes=get_int("MAX_REQUEST_BODY_BYTES", 1_048_576),
+        oms_base_url=get_str("OMS_BASE_URL"),
+        oms_api_key=get_str("OMS_API_KEY"),
+        oms_timeout_seconds=get_int("OMS_TIMEOUT_SECONDS", 10),
+        oms_enabled=get_bool("OMS_ENABLED", False),
+        llm_enabled=get_bool("LLM_ENABLED", False),
+        llm_base_url=get_str("LLM_BASE_URL"),
+        llm_api_key=get_str("LLM_API_KEY"),
+        llm_model=get_str("LLM_MODEL", "gpt-4o-mini"),
+        llm_timeout_seconds=get_int("LLM_TIMEOUT_SECONDS", 20),
+        llm_max_tokens=get_int("LLM_MAX_TOKENS", 350),
+        monitoring_webhook_url=get_str("MONITORING_WEBHOOK_URL"),
+        monitoring_webhook_timeout_seconds=get_int("MONITORING_WEBHOOK_TIMEOUT_SECONDS", 5),
+        sentry_dsn=get_str("SENTRY_DSN"),
+        alert_error_threshold=get_int("ALERT_ERROR_THRESHOLD", 5),
     )
 
 
@@ -271,6 +299,20 @@ LOGIN_FAILURE_LIMIT = settings.login_failure_limit
 LOGIN_LOCKOUT_MINUTES = settings.login_lockout_minutes
 RESEND_VERIFICATION_COOLDOWN_SECONDS = settings.resend_verification_cooldown_seconds
 MAX_REQUEST_BODY_BYTES = settings.max_request_body_bytes
+OMS_BASE_URL = settings.oms_base_url
+OMS_API_KEY = settings.oms_api_key
+OMS_TIMEOUT_SECONDS = settings.oms_timeout_seconds
+OMS_ENABLED = settings.oms_enabled
+LLM_ENABLED = settings.llm_enabled
+LLM_BASE_URL = settings.llm_base_url
+LLM_API_KEY = settings.llm_api_key
+LLM_MODEL = settings.llm_model
+LLM_TIMEOUT_SECONDS = settings.llm_timeout_seconds
+LLM_MAX_TOKENS = settings.llm_max_tokens
+MONITORING_WEBHOOK_URL = settings.monitoring_webhook_url
+MONITORING_WEBHOOK_TIMEOUT_SECONDS = settings.monitoring_webhook_timeout_seconds
+SENTRY_DSN = settings.sentry_dsn
+ALERT_ERROR_THRESHOLD = settings.alert_error_threshold
 
 
 def is_testing() -> bool:
