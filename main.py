@@ -736,6 +736,9 @@ def bootstrap_admin_user(db: Session) -> None:
 
     if existing_user:
         changed = False
+        if not verify_password(ADMIN_BOOTSTRAP_PASSWORD, existing_user.hashed_password):
+            existing_user.hashed_password = hash_password(ADMIN_BOOTSTRAP_PASSWORD)
+            changed = True
         if not existing_user.is_admin:
             existing_user.is_admin = True
             changed = True

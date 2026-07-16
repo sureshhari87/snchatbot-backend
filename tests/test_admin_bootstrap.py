@@ -40,6 +40,7 @@ def test_bootstrap_admin_user_promotes_existing_user(db, monkeypatch):
 
     assert user.is_admin is True
     assert user.is_verified is True
+    assert main.verify_password("adminpass123", user.hashed_password)
 
 
 def test_customer_token_cannot_access_admin_routes(client, auth_headers):
