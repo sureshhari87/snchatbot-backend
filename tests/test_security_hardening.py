@@ -12,6 +12,18 @@ def test_production_cors_does_not_keep_wildcard():
     assert origins == ["https://shop.example.com"]
 
 
+def test_database_url_normalizes_postgres_driver():
+    assert (
+        config.normalize_database_url("postgresql://user:pass@db.example.com:5432/app")
+        == "postgresql+psycopg://user:pass@db.example.com:5432/app"
+    )
+    assert (
+        config.normalize_database_url("postgres://user:pass@db.example.com:5432/app")
+        == "postgresql+psycopg://user:pass@db.example.com:5432/app"
+    )
+    assert config.normalize_database_url("sqlite:///./jewellery.db") == "sqlite:///./jewellery.db"
+
+
 def test_staging_proxy_defaults_are_secure(monkeypatch):
     monkeypatch.setenv("APP_ENV", "staging")
     monkeypatch.setenv("TESTING", "0")

@@ -34,6 +34,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     ALGORITHM,
+    ADMIN_BOOTSTRAP_EMAIL,
+    ADMIN_BOOTSTRAP_ENABLED,
+    ADMIN_BOOTSTRAP_PASSWORD,
+    ADMIN_BOOTSTRAP_USERNAME,
     APP_DEBUG,
     CORS_ALLOW_CREDENTIALS,
     CORS_ORIGINS,
@@ -652,6 +656,7 @@ def init_database():
 
     db = SessionLocal()
     try:
+        bootstrap_admin_user(db)
         seed_products(db)
     finally:
         db.close()
@@ -686,19 +691,75 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return password_hash.verify(plain_password, hashed_password)
 
 
-def validate_password_strength(password: str) -> None:
+def password_strength_error(password: str) -> str | None:
     if (
         len(password) < PASSWORD_MIN_LENGTH
         or not re.search(r"[A-Za-z]", password)
         or not re.search(r"\d", password)
     ):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Password must be at least {PASSWORD_MIN_LENGTH} characters "
-                "and include at least one letter and one number"
-            ),
+        return (
+            f"Password must be at least {PASSWORD_MIN_LENGTH} characters "
+            "and include at least one letter and one number"
         )
+    return None
+
+
+def validate_password_strength(password: str) -> None:
+    error_message = password_strength_error(password)
+    if error_message:
+        raise HTTPException(status_code=422, detail=error_message)
+
+
+def default_admin_username(email: str) -> str:
+    return slugify(email.split("@", 1)[0]).replace("-", "_") or "admin"
+
+
+def bootstrap_admin_user(db: Session) -> None:
+    if not ADMIN_BOOTSTRAP_ENABLED:
+        return
+    if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
+        raise RuntimeError(
+            "ADMIN_BOOTSTRAP_ENABLED=1 requires ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD"
+        )
+
+    password_error = password_strength_error(ADMIN_BOOTSTRAP_PASSWORD)
+    if password_error:
+        raise RuntimeError(f"Admin bootstrap password is invalid: {password_error}")
+
+    email = ADMIN_BOOTSTRAP_EMAIL.lower().strip()
+    username = (ADMIN_BOOTSTRAP_USERNAME or default_admin_username(email)).strip()
+    existing_user = db.query(User).filter(User.email == email).first()
+    username_owner = db.query(User).filter(User.username == username).first()
+
+    if username_owner and (not existing_user or username_owner.id != existing_user.id):
+        raise RuntimeError("ADMIN_BOOTSTRAP_USERNAME is already used by another account")
+
+    if existing_user:
+        changed = False
+        if not existing_user.is_admin:
+            existing_user.is_admin = True
+            changed = True
+        if not existing_user.is_verified:
+            existing_user.is_verified = True
+            changed = True
+        if changed:
+            db.commit()
+            log_event("admin.bootstrap_promoted", user_id=existing_user.id, email=email)
+        else:
+            log_event("admin.bootstrap_already_exists", user_id=existing_user.id, email=email)
+        return
+
+    admin_user = User(
+        username=username,
+        email=email,
+        hashed_password=hash_password(ADMIN_BOOTSTRAP_PASSWORD),
+        is_verified=True,
+        is_admin=True,
+    )
+    db.add(admin_user)
+    db.commit()
+    db.refresh(admin_user)
+    log_event("admin.bootstrap_created", user_id=admin_user.id, email=email)
 
 
 def client_ip(request: Request) -> str | None:

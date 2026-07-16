@@ -2,6 +2,8 @@
 
 This backend is ready to support the core Android MVP screens. The Android app should call `GET /mobile/config` on launch to read enabled capabilities before showing OMS or LLM-dependent features.
 
+For Retrofit, token refresh, model examples, and screen wiring code, see [android-retrofit-integration.md](android-retrofit-integration.md).
+
 ## Splash and Auth
 
 Purpose: login, signup, verify-email reminder, forgot password, token refresh, logout.

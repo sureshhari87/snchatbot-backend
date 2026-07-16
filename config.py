@@ -79,6 +79,14 @@ def normalize_cors_origins(
     return list(dict.fromkeys(derived_origins))
 
 
+def normalize_database_url(database_url: str) -> str:
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return database_url
+
+
 def current_environment() -> str:
     if get_bool("TESTING", False):
         return "test"
@@ -137,6 +145,10 @@ class Settings:
     monitoring_webhook_timeout_seconds: int
     sentry_dsn: str | None
     alert_error_threshold: int
+    admin_bootstrap_enabled: bool
+    admin_bootstrap_email: str | None
+    admin_bootstrap_username: str | None
+    admin_bootstrap_password: str | None
 
     @property
     def is_testing(self) -> bool:
@@ -187,7 +199,7 @@ def build_settings() -> Settings:
     env = current_environment()
     defaults = ENVIRONMENT_DEFAULTS.get(env, ENVIRONMENT_DEFAULTS["local"])
 
-    database_url = get_str("DATABASE_URL", defaults["DATABASE_URL"])
+    database_url = normalize_database_url(get_str("DATABASE_URL", defaults["DATABASE_URL"]))
     email_username = get_str("EMAIL_USERNAME")
     frontend_reset_url = get_str("FRONTEND_RESET_URL", "http://localhost:3000/reset-password")
     frontend_verify_url = get_str("FRONTEND_VERIFY_URL", "http://localhost:3000/verify-email")
@@ -254,6 +266,10 @@ def build_settings() -> Settings:
         monitoring_webhook_timeout_seconds=get_int("MONITORING_WEBHOOK_TIMEOUT_SECONDS", 5),
         sentry_dsn=get_str("SENTRY_DSN"),
         alert_error_threshold=get_int("ALERT_ERROR_THRESHOLD", 5),
+        admin_bootstrap_enabled=get_bool("ADMIN_BOOTSTRAP_ENABLED", False),
+        admin_bootstrap_email=get_str("ADMIN_BOOTSTRAP_EMAIL"),
+        admin_bootstrap_username=get_str("ADMIN_BOOTSTRAP_USERNAME"),
+        admin_bootstrap_password=get_str("ADMIN_BOOTSTRAP_PASSWORD"),
     )
 
 
@@ -313,6 +329,10 @@ MONITORING_WEBHOOK_URL = settings.monitoring_webhook_url
 MONITORING_WEBHOOK_TIMEOUT_SECONDS = settings.monitoring_webhook_timeout_seconds
 SENTRY_DSN = settings.sentry_dsn
 ALERT_ERROR_THRESHOLD = settings.alert_error_threshold
+ADMIN_BOOTSTRAP_ENABLED = settings.admin_bootstrap_enabled
+ADMIN_BOOTSTRAP_EMAIL = settings.admin_bootstrap_email
+ADMIN_BOOTSTRAP_USERNAME = settings.admin_bootstrap_username
+ADMIN_BOOTSTRAP_PASSWORD = settings.admin_bootstrap_password
 
 
 def is_testing() -> bool:

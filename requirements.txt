@@ -3,6 +3,7 @@ uvicorn[standard]
 pydantic
 sqlalchemy
 alembic
+psycopg[binary]
 python-jose[cryptography]
 python-multipart
 pwdlib[argon2]

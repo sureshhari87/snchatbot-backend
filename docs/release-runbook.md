@@ -29,6 +29,37 @@ PORT=7860
 WEB_CONCURRENCY=2
 ```
 
+## 1a. Admin Account And RBAC Gate
+
+Create a real admin user before public launch. Do not use customer accounts for admin work.
+
+One-time Hugging Face bootstrap:
+
+```text
+ADMIN_BOOTSTRAP_ENABLED=1
+ADMIN_BOOTSTRAP_EMAIL=<admin-email>
+ADMIN_BOOTSTRAP_USERNAME=<admin-username>
+ADMIN_BOOTSTRAP_PASSWORD=replace-with-strong-temporary-password
+```
+
+After the Space restarts and the admin can log in:
+
+- set `ADMIN_BOOTSTRAP_ENABLED=0`
+- remove `ADMIN_BOOTSTRAP_PASSWORD`
+- keep the admin credentials in your password manager
+- use a separate customer test account for customer journeys
+
+For Postgres-backed production creation from a trusted machine:
+
+```bash
+python scripts/create_admin_user.py --email <admin-email> --username <admin-username>
+```
+
+Confirm admin protection:
+
+- a normal customer token receives `403` on `/admin/products`
+- the admin token can access `/admin/metrics`
+
 ## 2. Reverse Proxy And HTTPS
 
 Terminate HTTPS at the platform load balancer or reverse proxy. Forward traffic to the app container over the internal network.
@@ -81,21 +112,21 @@ alembic upgrade head
 
 Create a backup before applying production migrations.
 
+See the full backup, export, retention, and restore-drill plan in [database-backup-plan.md](database-backup-plan.md).
+
 SQLite:
 
 ```bash
-mkdir -p backups
-cp jewellery.db backups/jewellery-$(date +%Y%m%d-%H%M%S).db
+python scripts/backup_database.py --label pre-migration
 ```
 
 PostgreSQL:
 
 ```bash
-mkdir -p backups
-pg_dump --format=custom --file backups/snchatbot-$(date +%Y%m%d-%H%M%S).dump "$DATABASE_URL"
+python scripts/backup_database.py --label pre-migration
 ```
 
-Keep at least the latest successful pre-release backup and verify that the file is non-empty.
+Keep at least the latest successful pre-release backup, verify the file is non-empty, and run a restore drill before the first customer launch.
 
 ## 5. Staging Smoke Tests
 

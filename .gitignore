@@ -20,6 +20,8 @@ htmlcov/
 *.db
 *.sqlite
 *.sqlite3
+backups/
+exports/
 
 # Local environment and secrets
 .env

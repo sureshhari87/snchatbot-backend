@@ -114,8 +114,38 @@ Production integration secrets:
 - `MONITORING_WEBHOOK_TIMEOUT_SECONDS` default: `5`
 - `SENTRY_DSN` optional Sentry error monitoring DSN
 - `ALERT_ERROR_THRESHOLD` default: `5`
+- `ADMIN_BOOTSTRAP_ENABLED` set to `1` only for a one-time admin account bootstrap
+- `ADMIN_BOOTSTRAP_EMAIL` real admin email address
+- `ADMIN_BOOTSTRAP_USERNAME` real admin username
+- `ADMIN_BOOTSTRAP_PASSWORD` temporary bootstrap password, remove after first successful startup
 
 For Gmail, use an app password, not your normal account password. If SMTP is not configured, the app still creates the token and prints the email body in logs for local development.
+
+## Admin Account Bootstrap
+
+Admin routes are protected by RBAC and require a user with `is_admin=True`. Do not use a customer account for admin work.
+
+For Hugging Face, add these as temporary secrets/variables, restart the Space once, confirm admin login works, then remove `ADMIN_BOOTSTRAP_PASSWORD` and set `ADMIN_BOOTSTRAP_ENABLED=0`.
+
+```env
+ADMIN_BOOTSTRAP_ENABLED=1
+ADMIN_BOOTSTRAP_EMAIL=admin@example.com
+ADMIN_BOOTSTRAP_USERNAME=admin
+ADMIN_BOOTSTRAP_PASSWORD=replace-with-strong-temporary-password
+```
+
+For local or Postgres-backed production creation from Windows CMD:
+
+```cmd
+set DATABASE_URL=postgresql+psycopg://db_user:db_password@db-host.example.com:5432/snchatbot?sslmode=require
+python scripts\create_admin_user.py --email admin@example.com --username admin
+```
+
+The script prompts for the password without printing it. To promote an existing verified customer account only when necessary:
+
+```cmd
+python scripts\create_admin_user.py --email admin@example.com --username admin --promote-existing
+```
 
 ## Settings profiles
 
@@ -139,7 +169,33 @@ alembic upgrade head
 alembic revision --autogenerate -m "describe your change"
 ```
 
+## Production Postgres
+
+Use a managed Postgres database for production. Add the provider connection string as the Hugging Face secret `DATABASE_URL`.
+
+Recommended URL format:
+
+```env
+DATABASE_URL=postgresql+psycopg://db_user:db_password@db-host.example.com:5432/snchatbot?sslmode=require
+```
+
+The app also accepts provider URLs beginning with `postgres://` or `postgresql://` and normalizes them to the `psycopg` SQLAlchemy driver at startup.
+
+Run migrations locally against the production database only when you intentionally want to update that database:
+
+```cmd
+set APP_ENV=production
+set DATABASE_URL=postgresql+psycopg://db_user:db_password@db-host.example.com:5432/snchatbot?sslmode=require
+alembic upgrade head
+```
+
+On Hugging Face, keep `RUN_MIGRATIONS_ON_STARTUP=1` so each deployment runs `alembic upgrade head` before serving traffic.
+
 For live releases, review the full backup, migration, staging smoke-test, and rollback checklist in [docs/release-runbook.md](docs/release-runbook.md).
+
+Before real customers use the app, follow [docs/database-backup-plan.md](docs/database-backup-plan.md): create a baseline backup, restore it into a separate test database, and confirm smoke tests pass.
+
+For Android app wiring, use [docs/android-screen-api-map.md](docs/android-screen-api-map.md) and [docs/android-retrofit-integration.md](docs/android-retrofit-integration.md).
 
 ## Production container
 
