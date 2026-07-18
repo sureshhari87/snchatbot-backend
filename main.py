@@ -677,11 +677,13 @@ def init_database():
 
     if RUN_MIGRATIONS_ON_STARTUP:
         run_database_migrations()
+        log_event("startup.database_migrations_complete")
 
     db = SessionLocal()
     try:
         bootstrap_admin_user(db)
         seed_products(db)
+        log_event("startup.database_initialized")
     finally:
         db.close()
 
