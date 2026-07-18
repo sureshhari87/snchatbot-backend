@@ -3,6 +3,23 @@ from models import User
 from scripts import create_admin_user
 
 
+def test_startup_configuration_log_uses_safe_admin_flags(caplog, monkeypatch):
+    monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_ENABLED", True)
+    monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_EMAIL", "owner@example.com")
+    monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_USERNAME", "owner_admin")
+    monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_PASSWORD", "adminpass123")
+
+    main.log_startup_configuration()
+
+    captured = caplog.text
+    assert '"event": "startup.configuration"' in captured
+    assert '"admin_bootstrap_enabled": true' in captured
+    assert '"admin_bootstrap_email_configured": true' in captured
+    assert '"admin_bootstrap_password_configured": true' in captured
+    assert "owner@example.com" not in captured
+    assert "adminpass123" not in captured
+
+
 def test_bootstrap_admin_user_creates_verified_admin(db, monkeypatch):
     monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_ENABLED", True)
     monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_EMAIL", "owner@example.com")

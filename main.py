@@ -39,6 +39,7 @@ from config import (
     ADMIN_BOOTSTRAP_PASSWORD,
     ADMIN_BOOTSTRAP_USERNAME,
     APP_DEBUG,
+    APP_ENV,
     CORS_ALLOW_CREDENTIALS,
     CORS_ORIGINS,
     DATABASE_URL,
@@ -269,6 +270,27 @@ def metrics_snapshot() -> dict[str, Any]:
         "counters": dict(METRICS),
         "feedback_counts": dict(FEEDBACK_COUNTS),
     }
+
+
+def database_backend_name() -> str:
+    if DATABASE_URL.startswith("sqlite"):
+        return "sqlite"
+    if DATABASE_URL.startswith("postgresql"):
+        return "postgresql"
+    return DATABASE_URL.split(":", 1)[0] or "unknown"
+
+
+def log_startup_configuration() -> None:
+    log_event(
+        "startup.configuration",
+        app_env=APP_ENV,
+        run_migrations_on_startup=RUN_MIGRATIONS_ON_STARTUP,
+        database_backend=database_backend_name(),
+        admin_bootstrap_enabled=ADMIN_BOOTSTRAP_ENABLED,
+        admin_bootstrap_email_configured=bool(ADMIN_BOOTSTRAP_EMAIL),
+        admin_bootstrap_username_configured=bool(ADMIN_BOOTSTRAP_USERNAME),
+        admin_bootstrap_password_configured=bool(ADMIN_BOOTSTRAP_PASSWORD),
+    )
 
 
 configure_error_monitoring()
@@ -651,6 +673,8 @@ def seed_products(db: Session):
 
 
 def init_database():
+    log_startup_configuration()
+
     if RUN_MIGRATIONS_ON_STARTUP:
         run_database_migrations()
 
