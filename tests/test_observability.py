@@ -94,6 +94,36 @@ def test_sentry_scrubber_filters_sensitive_fields():
     assert scrubbed["request"]["data"]["message"] == "hello"
 
 
+def test_monitoring_helpers_log_monitored_event_without_type_error(monkeypatch):
+    captured_logs = []
+    captured_messages = []
+
+    fake_sentry = SimpleNamespace(
+        capture_message=lambda event, level=None: captured_messages.append((event, level))
+    )
+    monkeypatch.setitem(sys.modules, "sentry_sdk", fake_sentry)
+    monkeypatch.setattr(main, "is_testing", lambda: False)
+    monkeypatch.setattr(main, "SENTRY_DSN", "https://public@example.ingest.sentry.io/1")
+    monkeypatch.setattr(main, "MONITORING_WEBHOOK_URL", "https://monitoring.example.test/hook")
+    monkeypatch.setattr(main, "json_http_request", lambda *args, **kwargs: (200, {}))
+    monkeypatch.setattr(main.logger, "log", lambda level, message: captured_logs.append(message))
+
+    webhook_sent = main.send_monitoring_alert("monitoring.test_alert", severity="info")
+    sentry_sent = main.capture_message_for_monitoring("monitoring.test_alert", severity="info")
+
+    assert webhook_sent is True
+    assert sentry_sent is True
+    assert captured_messages == [("monitoring.test_alert", "info")]
+    log_payloads = [json.loads(message) for message in captured_logs]
+    assert {
+        (payload["event"], payload.get("monitored_event"))
+        for payload in log_payloads
+    } >= {
+        ("monitoring.alert_sent", "monitoring.test_alert"),
+        ("monitoring.sentry_message_sent", "monitoring.test_alert"),
+    }
+
+
 def test_admin_alert_test_reports_webhook_and_sentry(client, admin_headers, monkeypatch):
     monkeypatch.setattr(main, "send_monitoring_alert", lambda *args, **kwargs: True)
     monkeypatch.setattr(main, "capture_message_for_monitoring", lambda *args, **kwargs: True)

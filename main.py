@@ -426,12 +426,12 @@ def send_monitoring_alert(
             "monitoring.alert_failed",
             level=logging.ERROR,
             error_type=exc.__class__.__name__,
-            event=event,
+            monitored_event=event,
         )
         return False
 
     increment_metric("external_alerts_sent")
-    log_event("monitoring.alert_sent", event=event, severity=severity)
+    log_event("monitoring.alert_sent", monitored_event=event, severity=severity)
     return True
 
 
@@ -511,11 +511,11 @@ def capture_message_for_monitoring(
             "monitoring.sentry_capture_failed",
             level=logging.ERROR,
             error_type=sentry_exc.__class__.__name__,
-            event=event,
+            monitored_event=event,
         )
         return False
 
-    log_event("monitoring.sentry_message_sent", event=event, severity=severity)
+    log_event("monitoring.sentry_message_sent", monitored_event=event, severity=severity)
     return True
 
 
