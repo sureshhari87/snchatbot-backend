@@ -1,7 +1,7 @@
 """Add user profile integrations, OMS audit, and monitoring tables.
 
 Revision ID: 0007_user_oms_llm_monitoring
-Revises: 0006_mobile_support_knowledge_ops
+Revises: 0006_mobile_ops
 Create Date: 2026-07-14
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0007_user_oms_llm_monitoring"
-down_revision: Union[str, None] = "0006_mobile_support_knowledge_ops"
+down_revision: Union[str, None] = "0006_mobile_ops"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

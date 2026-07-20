@@ -1,6 +1,6 @@
 """Add mobile support, knowledge base, and order support tables.
 
-Revision ID: 0006_mobile_support_knowledge_ops
+Revision ID: 0006_mobile_ops
 Revises: 0005_chat_feedback_analytics
 Create Date: 2026-07-14
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0006_mobile_support_knowledge_ops"
+revision: str = "0006_mobile_ops"
 down_revision: Union[str, None] = "0005_chat_feedback_analytics"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
