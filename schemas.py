@@ -397,6 +397,14 @@ class OrderActionRequest(BaseModel):
     message: Optional[str] = None
 
 
+class OrderActionOut(BaseModel):
+    order_reference: str
+    action: str
+    integration_status: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    message: Optional[str] = None
+
+
 class OrderLookupOut(BaseModel):
     order_reference: str
     integration_status: str

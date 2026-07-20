@@ -152,19 +152,19 @@ interface JewelleryApi {
     suspend fun cancelOrder(
         @Path("orderReference") orderReference: String,
         @Body body: OrderActionRequest
-    ): Map<String, Any?>
+    ): OrderActionOut
 
     @POST("orders/{orderReference}/return")
     suspend fun returnOrder(
         @Path("orderReference") orderReference: String,
         @Body body: OrderActionRequest
-    ): Map<String, Any?>
+    ): OrderActionOut
 
     @POST("orders/{orderReference}/refund")
     suspend fun refundOrder(
         @Path("orderReference") orderReference: String,
         @Body body: OrderActionRequest
-    ): Map<String, Any?>
+    ): OrderActionOut
 
     @GET("users/me/addresses")
     suspend fun addresses(): List<UserAddressOut>
@@ -273,6 +273,26 @@ data class SavedProductOut(
     val product: ProductOut,
     val note: String?,
     @Json(name = "created_at") val createdAt: String
+)
+
+data class OrderActionRequest(
+    val reason: String? = null,
+    val message: String? = null
+)
+
+data class OrderActionOut(
+    @Json(name = "order_reference") val orderReference: String,
+    val action: String,
+    @Json(name = "integration_status") val integrationStatus: String,
+    val data: Map<String, Any?> = emptyMap(),
+    val message: String? = null
+)
+
+data class OrderLookupOut(
+    @Json(name = "order_reference") val orderReference: String,
+    @Json(name = "integration_status") val integrationStatus: String,
+    val data: Map<String, Any?> = emptyMap(),
+    val message: String? = null
 )
 
 data class MessageResponse(val message: String)

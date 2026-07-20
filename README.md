@@ -297,7 +297,7 @@ Important mobile flows:
 - Orders: `GET /orders/{order_reference}` and cancel/return/refund endpoints call the configured OMS when enabled
 - Feedback: `POST /feedback` stores thumbs-up, thumbs-down, not-helpful, rating, and comments against a `response_id`
 
-Order support is capture-only until `OMS_ENABLED=1` and `OMS_BASE_URL` are configured. After that, lookup, cancel, return, refund, and `/orders/support` requests are sent to your OMS and audited in `external_integration_events`.
+Order support is capture-only until `OMS_ENABLED=1` and `OMS_BASE_URL` are configured. After that, lookup, cancel, return, refund, and `/orders/support` requests are sent to your OMS and audited in `external_integration_events`. See [docs/oms-integration.md](docs/oms-integration.md) for the required OMS API contract and Android handling notes.
 
 The LLM layer is optional and disabled by default. When `LLM_ENABLED=1`, `LLM_BASE_URL`, and `LLM_API_KEY` are configured, `/chat` sends a grounded catalog prompt to an OpenAI-compatible chat-completions endpoint. If the LLM fails, the backend falls back to the existing deterministic catalog reply.
 

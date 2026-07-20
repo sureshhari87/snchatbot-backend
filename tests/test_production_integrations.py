@@ -90,6 +90,21 @@ def test_saved_chat_history_list_and_detail(auth_client):
     assert [message["role"] for message in body["messages"]] == ["user", "assistant"]
 
 
+def test_mobile_config_reflects_oms_connection(client, monkeypatch):
+    monkeypatch.setattr(main, "OMS_ENABLED", True)
+    monkeypatch.setattr(main, "OMS_BASE_URL", "https://oms.example/api")
+    monkeypatch.setattr(main, "OMS_API_KEY", "oms-token")
+
+    response = client.get("/mobile/config")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["oms_connected"] is True
+    assert body["capabilities"]["oms_order_lookup"] is True
+    assert body["integrations"]["oms"]["enabled"] is True
+    assert body["integrations"]["oms"]["api_key_configured"] is True
+
+
 def test_oms_order_lookup_and_action_sync(client, auth_headers, admin_headers, db, monkeypatch):
     calls = []
 
@@ -115,6 +130,20 @@ def test_oms_order_lookup_and_action_sync(client, auth_headers, admin_headers, d
     assert lookup.json()["integration_status"] == "synced"
     assert lookup.json()["data"]["status"] == "packed"
 
+    cancel = client.post(
+        "/orders/ORD-500/cancel",
+        headers=auth_headers,
+        json={"reason": "Changed my mind", "message": "Please cancel before shipping"},
+    )
+    assert cancel.status_code == 200
+    assert cancel.json() == {
+        "order_reference": "ORD-500",
+        "action": "cancel",
+        "integration_status": "synced",
+        "data": {"order_reference": "ORD-500", "status": "packed"},
+        "message": None,
+    }
+
     refund = client.post(
         "/orders/support",
         headers=auth_headers,
@@ -129,9 +158,10 @@ def test_oms_order_lookup_and_action_sync(client, auth_headers, admin_headers, d
     assert refund.json()["status"] == "synced_to_oms"
 
     events = db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "oms").all()
-    assert {event.action for event in events} >= {"lookup", "refund"}
+    assert {event.action for event in events} >= {"lookup", "cancel", "refund"}
     assert calls[0]["headers"]["Authorization"] == "Bearer oms-token"
     assert calls[1]["method"] == "POST"
+    assert calls[1]["url"] == "https://oms.example/api/orders/ORD-500/cancel"
 
     admin_events = client.get("/admin/integrations/events?service=oms", headers=admin_headers)
     assert admin_events.status_code == 200

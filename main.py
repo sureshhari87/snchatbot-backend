@@ -147,6 +147,7 @@ from schemas import (
     MessageResponse,
     NotificationSettingsOut,
     NotificationSettingsUpdate,
+    OrderActionOut,
     OrderActionRequest,
     OrderLookupOut,
     OrderSupportCreate,
@@ -1571,7 +1572,7 @@ def dump_json_list(value: list[Any]) -> str:
 def integration_status() -> dict[str, Any]:
     return {
         "oms": {
-            "enabled": OMS_ENABLED and bool(OMS_BASE_URL),
+            "enabled": oms_is_configured(),
             "base_url_configured": bool(OMS_BASE_URL),
             "api_key_configured": bool(OMS_API_KEY),
         },
@@ -1589,6 +1590,10 @@ def integration_status() -> dict[str, Any]:
     }
 
 
+def oms_is_configured() -> bool:
+    return OMS_ENABLED and bool(OMS_BASE_URL)
+
+
 def oms_headers() -> dict[str, str]:
     headers: dict[str, str] = {}
     if OMS_API_KEY:
@@ -1601,7 +1606,7 @@ def call_oms(
     path: str,
     payload: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    if not OMS_ENABLED or not OMS_BASE_URL:
+    if not oms_is_configured():
         raise RuntimeError("OMS integration is not configured")
     url = f"{OMS_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
     increment_metric("oms_requests")
@@ -1609,7 +1614,7 @@ def call_oms(
 
 
 def lookup_oms_order(order_reference: str) -> tuple[str, dict[str, Any], str | None, int | None]:
-    if not OMS_ENABLED or not OMS_BASE_URL:
+    if not oms_is_configured():
         return "disabled", {}, "OMS integration is not configured", None
 
     try:
@@ -1631,7 +1636,7 @@ def submit_oms_order_action(
 ) -> tuple[str, dict[str, Any], str | None, int | None]:
     if not order_reference:
         return "capture_only", {}, "Missing order reference", None
-    if not OMS_ENABLED or not OMS_BASE_URL:
+    if not oms_is_configured():
         return "capture_only", {}, "OMS integration is not configured", None
 
     try:
@@ -3098,7 +3103,7 @@ async def list_policies(db: Session = Depends(get_db)):
 async def mobile_config(db: Session = Depends(get_db)):
     return {
         "api_version": "v1",
-        "oms_connected": False,
+        "oms_connected": oms_is_configured(),
         "capabilities": {
             "auth": True,
             "refresh_token_rotation": True,
@@ -3110,7 +3115,7 @@ async def mobile_config(db: Session = Depends(get_db)):
             "feedback": True,
             "customer_actions": True,
             "order_support_capture": True,
-            "oms_order_lookup": OMS_ENABLED and bool(OMS_BASE_URL),
+            "oms_order_lookup": oms_is_configured(),
             "llm_grounded_answers": llm_is_configured(),
             "addresses": True,
             "notification_settings": True,
@@ -4213,7 +4218,7 @@ async def get_order_status(
     )
 
 
-@app.post("/orders/{order_reference}/cancel")
+@app.post("/orders/{order_reference}/cancel", response_model=OrderActionOut)
 async def cancel_order(
     order_reference: str,
     payload: OrderActionRequest,
@@ -4246,7 +4251,7 @@ async def cancel_order(
     }
 
 
-@app.post("/orders/{order_reference}/return")
+@app.post("/orders/{order_reference}/return", response_model=OrderActionOut)
 async def request_order_return(
     order_reference: str,
     payload: OrderActionRequest,
@@ -4279,7 +4284,7 @@ async def request_order_return(
     }
 
 
-@app.post("/orders/{order_reference}/refund")
+@app.post("/orders/{order_reference}/refund", response_model=OrderActionOut)
 async def request_order_refund(
     order_reference: str,
     payload: OrderActionRequest,
