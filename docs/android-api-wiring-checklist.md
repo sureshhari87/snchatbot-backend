@@ -64,6 +64,11 @@ Wire:
 
 Use `/mobile/config` on app launch to decide whether to show OMS/order actions or LLM-dependent labels.
 
+For LLM-backed replies, Android does not call the LLM provider directly. Always call `POST /chat`;
+the backend decides whether to use rules, catalogue grounding, FAQ/policy grounding, or the optional
+LLM provider. Read `answer_source`, `tool_calls`, and `guardrails` from the chat response for
+debugging and support QA.
+
 Product filters supported by `/products`:
 
 - `q`
@@ -166,4 +171,3 @@ Before Play Store release, verify:
 - Callback, appointment, and custom order forms save successfully.
 - Profile address and notification settings update successfully.
 - App handles offline, timeout, `401`, `403`, `422`, and `500` states gracefully.
-

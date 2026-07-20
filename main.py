@@ -1857,13 +1857,70 @@ def llm_endpoint_url() -> str:
     return f"{base_url}/chat/completions"
 
 
-def build_llm_prompt(
+LLM_CONTEXT_PRODUCT_LIMIT = 5
+LLM_CONTEXT_KNOWLEDGE_LIMIT = 4
+LLM_REPLY_MAX_CHARS = 900
+LLM_UNSAFE_REPLY_PATTERNS = [
+    r"\bguaranteed\s+(?:return|profit|investment)\b",
+    r"\binvestment\s+guarantee\b",
+    r"\bmedical\s+(?:advice|claim|cure|treatment)\b",
+    r"\b(?:password|otp|one[-\s]?time password)\b",
+    r"\b(?:upi|bank account|credit card|debit card)\b",
+    r"https?://",
+]
+
+
+def tokenize_for_relevance(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {token for token in re.findall(r"[a-z0-9]+", value.lower()) if len(token) >= 3}
+
+
+def knowledge_item_tags(item: KnowledgeBaseItem) -> list[Any]:
+    return load_json_list(item.tags)
+
+
+def relevant_knowledge_items(
+    db: Session,
     message: str,
-    products: list[Product],
     filters: dict[str, Any],
-    fallback_reply: str,
-) -> dict[str, Any]:
-    product_context = [
+    limit: int = LLM_CONTEXT_KNOWLEDGE_LIMIT,
+) -> list[KnowledgeBaseItem]:
+    search_parts = []
+    for value in [message, *compact_filters(filters).values()]:
+        if value is None or value is False or value == "":
+            continue
+        search_parts.append(str(value))
+    search_text = " ".join(search_parts)
+    search_tokens = tokenize_for_relevance(search_text)
+    if not search_tokens:
+        return []
+
+    candidates = (
+        db.query(KnowledgeBaseItem)
+        .filter(KnowledgeBaseItem.is_active == True)
+        .order_by(KnowledgeBaseItem.kind.asc(), KnowledgeBaseItem.title.asc(), KnowledgeBaseItem.id.asc())
+        .all()
+    )
+    scored_items: list[tuple[int, KnowledgeBaseItem]] = []
+    for item in candidates:
+        title_tokens = tokenize_for_relevance(item.title)
+        tag_tokens = tokenize_for_relevance(" ".join(str(tag) for tag in knowledge_item_tags(item)))
+        content_tokens = tokenize_for_relevance(item.content)
+        score = (
+            len(search_tokens & title_tokens) * 4
+            + len(search_tokens & tag_tokens) * 3
+            + len(search_tokens & content_tokens)
+        )
+        if score > 0:
+            scored_items.append((score, item))
+
+    scored_items.sort(key=lambda row: (-row[0], row[1].kind, row[1].title, row[1].id))
+    return [item for _, item in scored_items[:limit]]
+
+
+def llm_product_context(products: list[Product]) -> list[dict[str, Any]]:
+    return [
         {
             "id": product.id,
             "name": product.name,
@@ -1871,9 +1928,48 @@ def build_llm_prompt(
             "metal": product.metal,
             "price": product.price,
             "in_stock": product.in_stock,
+            "stock_quantity": product.stock_quantity,
         }
-        for product in products[:5]
+        for product in products[:LLM_CONTEXT_PRODUCT_LIMIT]
     ]
+
+
+def llm_knowledge_context(knowledge_items: list[KnowledgeBaseItem]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": item.id,
+            "kind": item.kind,
+            "title": item.title,
+            "content": item.content[:700],
+            "tags": knowledge_item_tags(item)[:8],
+        }
+        for item in knowledge_items[:LLM_CONTEXT_KNOWLEDGE_LIMIT]
+    ]
+
+
+def validate_llm_reply(generated: str, fallback_reply: str) -> str:
+    reply = re.sub(r"\s+", " ", generated).strip()
+    if not reply:
+        raise ValueError("LLM returned an empty response")
+    if len(reply) > LLM_REPLY_MAX_CHARS:
+        raise ValueError("LLM response exceeded safe length")
+    for pattern in LLM_UNSAFE_REPLY_PATTERNS:
+        if re.search(pattern, reply, flags=re.IGNORECASE):
+            raise ValueError("LLM response failed safety checks")
+    if fallback_reply and reply.lower() == fallback_reply.lower():
+        return fallback_reply
+    return reply
+
+
+def build_llm_prompt(
+    message: str,
+    products: list[Product],
+    knowledge_items: list[KnowledgeBaseItem],
+    filters: dict[str, Any],
+    fallback_reply: str,
+) -> dict[str, Any]:
+    product_context = llm_product_context(products)
+    knowledge_context = llm_knowledge_context(knowledge_items)
     return {
         "model": LLM_MODEL,
         "temperature": 0.2,
@@ -1883,9 +1979,10 @@ def build_llm_prompt(
                 "role": "system",
                 "content": (
                     "You are a jewellery ecommerce assistant. Answer only from the supplied "
-                    "catalog context, do not invent stock, pricing, discounts, medical claims, "
-                    "investment guarantees, or order actions. If the catalog is insufficient, "
-                    "ask a short follow-up or offer support handoff."
+                    "catalog, FAQ, and policy context. Do not invent stock, pricing, discounts, "
+                    "certification, warranty, medical claims, investment guarantees, payment links, "
+                    "or order actions. Keep the answer under 120 words. If the context is "
+                    "insufficient, ask one short follow-up or suggest human support."
                 ),
             },
             {
@@ -1895,6 +1992,7 @@ def build_llm_prompt(
                         "customer_message": message,
                         "applied_filters": compact_filters(filters),
                         "catalog_products": product_context,
+                        "knowledge_context": knowledge_context,
                         "fallback_reply": fallback_reply,
                     },
                     default=str,
@@ -1915,7 +2013,8 @@ def try_llm_reply(
     if not llm_is_configured():
         return fallback_reply, "rules", []
 
-    payload = build_llm_prompt(message, products, filters, fallback_reply)
+    knowledge_items = relevant_knowledge_items(db, message, filters)
+    payload = build_llm_prompt(message, products, knowledge_items, filters, fallback_reply)
     increment_metric("llm_requests")
     try:
         status_code, body = json_http_request(
@@ -1930,19 +2029,26 @@ def try_llm_reply(
         if choices:
             message_body = choices[0].get("message", {})
             generated = str(message_body.get("content") or "").strip()
-        if not generated:
-            raise ValueError("LLM returned an empty response")
+        generated = validate_llm_reply(generated, fallback_reply)
         record_integration_event(
             db,
             service="llm",
             action="chat_completion",
             status_value="synced",
             user_id=user.id,
-            request_payload={"message": message, "model": LLM_MODEL},
+            request_payload={
+                "message": message,
+                "model": LLM_MODEL,
+                "product_ids": [product.id for product in products[:LLM_CONTEXT_PRODUCT_LIMIT]],
+                "knowledge_ids": [item.id for item in knowledge_items],
+            },
             response_payload={"reply": generated},
             status_code=status_code,
         )
-        return generated, "llm_grounded_catalog", ["llm_completion"]
+        tool_calls = ["llm_completion"]
+        if knowledge_items:
+            tool_calls.insert(0, "knowledge_lookup")
+        return generated, "llm_grounded_catalog", tool_calls
     except Exception as exc:
         increment_metric("llm_failures")
         record_integration_event(
@@ -1951,7 +2057,12 @@ def try_llm_reply(
             action="chat_completion",
             status_value="failed",
             user_id=user.id,
-            request_payload={"message": message, "model": LLM_MODEL},
+            request_payload={
+                "message": message,
+                "model": LLM_MODEL,
+                "product_ids": [product.id for product in products[:LLM_CONTEXT_PRODUCT_LIMIT]],
+                "knowledge_ids": [item.id for item in knowledge_items],
+            },
             error=exc.__class__.__name__,
         )
         log_event(

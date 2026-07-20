@@ -1,5 +1,7 @@
+import json
+
 import main
-from models import ExternalIntegrationEvent
+from models import ExternalIntegrationEvent, KnowledgeBaseItem
 
 
 def test_user_addresses_and_notification_settings(client, auth_headers):
@@ -204,3 +206,109 @@ def test_llm_grounded_chat_layer_uses_configured_provider(auth_client, db, monke
     event = db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "llm").first()
     assert event is not None
     assert event.status == "synced"
+
+
+def test_llm_grounded_chat_layer_includes_relevant_knowledge(auth_client, db, monkeypatch):
+    db.add(
+        KnowledgeBaseItem(
+            kind="policy",
+            slug="gold-hallmark-guidance",
+            title="Gold Hallmark Guidance",
+            content="Gold jewellery should include hallmark details and a clear invoice.",
+            tags=json.dumps(["gold", "hallmark", "invoice"]),
+            is_active=True,
+        )
+    )
+    db.add(
+        KnowledgeBaseItem(
+            kind="faq",
+            slug="silver-care",
+            title="Silver Care",
+            content="Store silver pieces in a dry pouch after use.",
+            tags=json.dumps(["silver", "care"]),
+            is_active=True,
+        )
+    )
+    db.commit()
+    captured_context = {}
+
+    def fake_json_http_request(method, url, payload=None, headers=None, timeout=10):
+        captured_context.update(json.loads(payload["messages"][1]["content"]))
+        return 200, {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "For gold rings, check hallmark details and keep the invoice "
+                            "with the purchase."
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(main, "LLM_ENABLED", True)
+    monkeypatch.setattr(main, "LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setattr(main, "LLM_API_KEY", "llm-key")
+    monkeypatch.setattr(main, "json_http_request", fake_json_http_request)
+
+    response = auth_client.post(
+        "/chat",
+        json={
+            "message": "tell me about hallmark gold rings under 30000",
+            "session_id": "llm-knowledge-session",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "knowledge_lookup" in body["tool_calls"]
+    assert captured_context["knowledge_context"][0]["title"] == "Gold Hallmark Guidance"
+    assert all(item["title"] != "Silver Care" for item in captured_context["knowledge_context"])
+
+    event = (
+        db.query(ExternalIntegrationEvent)
+        .filter(ExternalIntegrationEvent.service == "llm")
+        .order_by(ExternalIntegrationEvent.id.desc())
+        .first()
+    )
+    assert event is not None
+    assert json.loads(event.request_payload)["knowledge_ids"]
+
+
+def test_llm_reply_falls_back_when_provider_returns_unsafe_text(auth_client, db, monkeypatch):
+    def fake_json_http_request(method, url, payload=None, headers=None, timeout=10):
+        return 200, {
+            "choices": [
+                {
+                    "message": {
+                        "content": "This jewellery has a guaranteed investment return. Buy now."
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(main, "LLM_ENABLED", True)
+    monkeypatch.setattr(main, "LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setattr(main, "LLM_API_KEY", "llm-key")
+    monkeypatch.setattr(main, "json_http_request", fake_json_http_request)
+
+    response = auth_client.post(
+        "/chat",
+        json={"message": "show gold rings under 20000", "session_id": "llm-unsafe-session"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer_source"] == "rules_fallback"
+    assert "guaranteed investment" not in body["reply"].lower()
+    assert "llm_completion" not in body["tool_calls"]
+
+    event = (
+        db.query(ExternalIntegrationEvent)
+        .filter(ExternalIntegrationEvent.service == "llm")
+        .order_by(ExternalIntegrationEvent.id.desc())
+        .first()
+    )
+    assert event is not None
+    assert event.status == "failed"

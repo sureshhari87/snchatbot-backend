@@ -199,6 +199,15 @@ For live releases, review the full backup, migration, staging smoke-test, and ro
 
 Before real customers use the app, follow [docs/database-backup-plan.md](docs/database-backup-plan.md): create a baseline backup, restore it into a separate test database, and confirm smoke tests pass.
 
+## Optional LLM Layer
+
+The chatbot works with catalogue/rule-based answers by default. A guarded OpenAI-compatible LLM
+layer can be enabled later with `LLM_ENABLED=1`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
+It sends only filtered catalogue and FAQ/policy context to the provider, validates the reply, and
+falls back to rules if the provider fails or returns unsafe text.
+
+See [docs/llm-layer.md](docs/llm-layer.md) before enabling it in Hugging Face.
+
 For Android app wiring, use [docs/android-screen-api-map.md](docs/android-screen-api-map.md) and [docs/android-retrofit-integration.md](docs/android-retrofit-integration.md).
 
 ## Production container
