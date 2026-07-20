@@ -26,7 +26,7 @@ from jose import JWTError, jwt
 from pwdlib import PasswordHash
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import or_, text
+from sqlalchemy import inspect, or_, text
 from sqlalchemy.orm import Session
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -2447,6 +2447,18 @@ async def health():
 def database_dependency_status(db: Session) -> dict[str, Any]:
     try:
         db.execute(text("SELECT 1"))
+        inspector = inspect(db.get_bind())
+        required_tables = set(Base.metadata.tables.keys())
+        existing_tables = set(inspector.get_table_names())
+        missing_tables = sorted(required_tables - existing_tables)
+        if missing_tables:
+            return {
+                "status": "error",
+                "critical": True,
+                "error_type": "MissingDatabaseTables",
+                "missing_table_count": len(missing_tables),
+                "missing_tables": missing_tables[:10],
+            }
         return {"status": "ok", "critical": True}
     except Exception as exc:
         return {

@@ -1,6 +1,8 @@
 import json
 
 import main
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 
 
 def test_request_id_header_is_returned(client):
@@ -21,6 +23,22 @@ def test_readiness_and_dependency_checks(client):
     assert dependencies_response.status_code == 200
     assert dependencies_response.json()["dependencies"]["database"]["critical"] is True
     assert "email" in dependencies_response.json()["dependencies"]
+
+
+def test_database_dependency_reports_missing_schema_tables():
+    engine = create_engine("sqlite://")
+    session_local = sessionmaker(bind=engine)
+    db = session_local()
+    try:
+        db.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
+        status = main.database_dependency_status(db)
+    finally:
+        db.close()
+        engine.dispose()
+
+    assert status["status"] == "error"
+    assert status["error_type"] == "MissingDatabaseTables"
+    assert status["missing_table_count"] > 0
 
 
 def test_structured_auth_log_contains_request_id(client, monkeypatch):
