@@ -43,6 +43,13 @@ def get_int(name: str, default: int) -> int:
     return int(value)
 
 
+def get_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
 def get_list(name: str, default: list[str]) -> list[str]:
     value = os.getenv(name)
     if value is None or value.strip() == "":
@@ -144,6 +151,10 @@ class Settings:
     monitoring_webhook_url: str | None
     monitoring_webhook_timeout_seconds: int
     sentry_dsn: str | None
+    sentry_release: str | None
+    sentry_traces_sample_rate: float
+    sentry_profiles_sample_rate: float
+    sentry_send_default_pii: bool
     alert_error_threshold: int
     admin_bootstrap_enabled: bool
     admin_bootstrap_email: str | None
@@ -265,6 +276,10 @@ def build_settings() -> Settings:
         monitoring_webhook_url=get_str("MONITORING_WEBHOOK_URL"),
         monitoring_webhook_timeout_seconds=get_int("MONITORING_WEBHOOK_TIMEOUT_SECONDS", 5),
         sentry_dsn=get_str("SENTRY_DSN"),
+        sentry_release=get_str("SENTRY_RELEASE"),
+        sentry_traces_sample_rate=get_float("SENTRY_TRACES_SAMPLE_RATE", 0.05),
+        sentry_profiles_sample_rate=get_float("SENTRY_PROFILES_SAMPLE_RATE", 0.0),
+        sentry_send_default_pii=get_bool("SENTRY_SEND_DEFAULT_PII", False),
         alert_error_threshold=get_int("ALERT_ERROR_THRESHOLD", 5),
         admin_bootstrap_enabled=get_bool("ADMIN_BOOTSTRAP_ENABLED", False),
         admin_bootstrap_email=get_str("ADMIN_BOOTSTRAP_EMAIL"),
@@ -328,6 +343,10 @@ LLM_MAX_TOKENS = settings.llm_max_tokens
 MONITORING_WEBHOOK_URL = settings.monitoring_webhook_url
 MONITORING_WEBHOOK_TIMEOUT_SECONDS = settings.monitoring_webhook_timeout_seconds
 SENTRY_DSN = settings.sentry_dsn
+SENTRY_RELEASE = settings.sentry_release
+SENTRY_TRACES_SAMPLE_RATE = settings.sentry_traces_sample_rate
+SENTRY_PROFILES_SAMPLE_RATE = settings.sentry_profiles_sample_rate
+SENTRY_SEND_DEFAULT_PII = settings.sentry_send_default_pii
 ALERT_ERROR_THRESHOLD = settings.alert_error_threshold
 ADMIN_BOOTSTRAP_ENABLED = settings.admin_bootstrap_enabled
 ADMIN_BOOTSTRAP_EMAIL = settings.admin_bootstrap_email

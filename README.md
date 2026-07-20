@@ -113,6 +113,10 @@ Production integration secrets:
 - `MONITORING_WEBHOOK_URL` alert webhook for external monitoring
 - `MONITORING_WEBHOOK_TIMEOUT_SECONDS` default: `5`
 - `SENTRY_DSN` optional Sentry error monitoring DSN
+- `SENTRY_RELEASE` optional release label for Sentry events
+- `SENTRY_TRACES_SAMPLE_RATE` default: `0.05`
+- `SENTRY_PROFILES_SAMPLE_RATE` default: `0`
+- `SENTRY_SEND_DEFAULT_PII` default: `0`
 - `ALERT_ERROR_THRESHOLD` default: `5`
 - `ADMIN_BOOTSTRAP_ENABLED` set to `1` only for a one-time admin account bootstrap
 - `ADMIN_BOOTSTRAP_EMAIL` real admin email address
@@ -306,6 +310,8 @@ Admin production operations:
 - `GET /admin/integrations/status`
 - `GET /admin/integrations/events`
 - `POST /admin/alerts/test`
+
+For production monitoring setup, see [docs/monitoring-sentry.md](docs/monitoring-sentry.md).
 
 ## Chat buying suggestions
 

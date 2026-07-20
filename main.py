@@ -79,6 +79,10 @@ from config import (
     RUN_MIGRATIONS_ON_STARTUP,
     SECRET_KEY,
     SENTRY_DSN,
+    SENTRY_PROFILES_SAMPLE_RATE,
+    SENTRY_RELEASE,
+    SENTRY_SEND_DEFAULT_PII,
+    SENTRY_TRACES_SAMPLE_RATE,
     TRUSTED_HOSTS,
     is_testing,
 )
@@ -188,16 +192,84 @@ def configure_json_logger() -> logging.Logger:
 logger = configure_json_logger()
 
 
+SENSITIVE_MONITORING_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "database_url",
+    "dsn",
+    "email_password",
+    "key",
+    "password",
+    "refresh_token",
+    "secret",
+    "set-cookie",
+    "token",
+}
+
+
+def is_sensitive_monitoring_key(key: Any) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return any(sensitive_key in normalized for sensitive_key in SENSITIVE_MONITORING_KEYS)
+
+
+def scrub_monitoring_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "[Filtered]" if is_sensitive_monitoring_key(key) else scrub_monitoring_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [scrub_monitoring_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(scrub_monitoring_value(item) for item in value)
+    return value
+
+
+def scrub_sentry_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+    return scrub_monitoring_value(event)
+
+
+def sentry_is_configured() -> bool:
+    return bool(SENTRY_DSN) and not is_testing()
+
+
+def sentry_integrations() -> list[Any]:
+    try:
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+    except ImportError:
+        return []
+    return [StarletteIntegration(), FastApiIntegration()]
+
+
 def configure_error_monitoring() -> None:
-    if not SENTRY_DSN or is_testing():
+    if not sentry_is_configured():
         return
     try:
         import sentry_sdk
     except ImportError:
         log_event("monitoring.sentry_unavailable", dsn_configured=True)
         return
-    sentry_sdk.init(dsn=SENTRY_DSN, environment=APP_ENV)
-    log_event("monitoring.sentry_configured")
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=APP_ENV,
+        release=SENTRY_RELEASE,
+        integrations=sentry_integrations(),
+        traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+        profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+        send_default_pii=SENTRY_SEND_DEFAULT_PII,
+        before_send=scrub_sentry_event,
+    )
+    log_event(
+        "monitoring.sentry_configured",
+        release_configured=bool(SENTRY_RELEASE),
+        traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+        profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+        send_default_pii=SENTRY_SEND_DEFAULT_PII,
+    )
 
 
 METRICS: dict[str, int] = {
@@ -363,6 +435,90 @@ def send_monitoring_alert(
     return True
 
 
+def apply_sentry_scope(scope: Any, request: Request | None, extra: dict[str, Any]) -> None:
+    if hasattr(scope, "set_tag"):
+        scope.set_tag("app_env", APP_ENV)
+        if request is not None:
+            scope.set_tag("http.method", request.method)
+            scope.set_tag("http.path", request.url.path)
+    if hasattr(scope, "set_extra"):
+        scope.set_extra("snchatbot", scrub_monitoring_value(extra))
+        if request is not None:
+            scope.set_extra("request_id", request_id_from_request(request))
+
+
+def sentry_scope_context(sentry_sdk: Any):
+    scope_factory = getattr(sentry_sdk, "new_scope", None) or getattr(sentry_sdk, "push_scope", None)
+    if scope_factory is None:
+        return None
+    return scope_factory()
+
+
+def capture_exception_for_monitoring(
+    exc: Exception,
+    request: Request | None = None,
+    extra: dict[str, Any] | None = None,
+) -> bool:
+    if not sentry_is_configured():
+        return False
+    try:
+        import sentry_sdk
+    except ImportError:
+        return False
+
+    try:
+        scope_context = sentry_scope_context(sentry_sdk)
+        if scope_context is None:
+            sentry_sdk.capture_exception(exc)
+        else:
+            with scope_context as scope:
+                apply_sentry_scope(scope, request, extra or {})
+                sentry_sdk.capture_exception(exc)
+    except Exception as sentry_exc:
+        log_event(
+            "monitoring.sentry_capture_failed",
+            level=logging.ERROR,
+            error_type=sentry_exc.__class__.__name__,
+        )
+        return False
+
+    return True
+
+
+def capture_message_for_monitoring(
+    event: str,
+    severity: str = "info",
+    request: Request | None = None,
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    if not sentry_is_configured():
+        return False
+    try:
+        import sentry_sdk
+    except ImportError:
+        return False
+
+    try:
+        scope_context = sentry_scope_context(sentry_sdk)
+        if scope_context is None:
+            sentry_sdk.capture_message(event, level=severity)
+        else:
+            with scope_context as scope:
+                apply_sentry_scope(scope, request, payload or {})
+                sentry_sdk.capture_message(event, level=severity)
+    except Exception as sentry_exc:
+        log_event(
+            "monitoring.sentry_capture_failed",
+            level=logging.ERROR,
+            error_type=sentry_exc.__class__.__name__,
+            event=event,
+        )
+        return False
+
+    log_event("monitoring.sentry_message_sent", event=event, severity=severity)
+    return True
+
+
 def record_integration_event(
     db: Session,
     service: str,
@@ -524,12 +680,23 @@ async def request_id_middleware(request: Request, call_next):
         return error_response(request, 413, "Request body too large")
     except Exception as exc:
         increment_metric("errors_total")
+        sentry_captured = capture_exception_for_monitoring(
+            exc,
+            request,
+            {
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            },
+        )
         log_event(
             "error.unhandled",
             request,
             level=logging.ERROR,
             error_type=exc.__class__.__name__,
             duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+            sentry_captured=sentry_captured,
         )
         send_monitoring_alert(
             "error.unhandled",
@@ -551,12 +718,32 @@ async def request_id_middleware(request: Request, call_next):
 async def observability_http_exception_handler(request: Request, exc: HTTPException):
     if exc.status_code >= 500:
         increment_metric("errors_total")
+        sentry_captured = capture_exception_for_monitoring(
+            exc,
+            request,
+            {
+                "status_code": exc.status_code,
+                "detail": exc.detail,
+            },
+        )
+        send_monitoring_alert(
+            "error.http",
+            payload={
+                "request_id": request_id_from_request(request),
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": exc.status_code,
+            },
+        )
+    else:
+        sentry_captured = False
     log_event(
         "error.http",
         request,
         level=logging.WARNING if exc.status_code < 500 else logging.ERROR,
         status_code=exc.status_code,
         detail=exc.detail,
+        sentry_captured=sentry_captured,
     )
     return error_response(
         request,
@@ -1585,6 +1772,11 @@ def integration_status() -> dict[str, Any]:
         "monitoring": {
             "webhook_configured": bool(MONITORING_WEBHOOK_URL),
             "sentry_configured": bool(SENTRY_DSN),
+            "sentry_active": sentry_is_configured(),
+            "sentry_release_configured": bool(SENTRY_RELEASE),
+            "sentry_traces_sample_rate": SENTRY_TRACES_SAMPLE_RATE,
+            "sentry_profiles_sample_rate": SENTRY_PROFILES_SAMPLE_RATE,
+            "sentry_send_default_pii": SENTRY_SEND_DEFAULT_PII,
             "alert_error_threshold": ALERT_ERROR_THRESHOLD,
         },
     }
@@ -3609,18 +3801,30 @@ async def admin_test_alert(
     request: Request,
     admin_user: User = Depends(require_permission("metrics:read")),
 ):
-    sent = send_monitoring_alert(
+    payload = {
+        "admin_user_id": admin_user.id,
+        "request_id": request_id_from_request(request),
+    }
+    webhook_sent = send_monitoring_alert(
         "monitoring.test_alert",
         severity="info",
-        payload={
-            "admin_user_id": admin_user.id,
-            "request_id": request_id_from_request(request),
-        },
+        payload=payload,
     )
-    if sent:
+    sentry_sent = capture_message_for_monitoring(
+        "monitoring.test_alert",
+        severity="info",
+        request=request,
+        payload=payload,
+    )
+    if webhook_sent or sentry_sent:
         log_admin_action(request, admin_user, "test_alert", "monitoring")
-        return MessageResponse(message="Monitoring alert sent")
-    return MessageResponse(message="Monitoring alert webhook is not configured")
+        return MessageResponse(
+            message=(
+                "Monitoring alert sent "
+                f"(webhook={str(webhook_sent).lower()}, sentry={str(sentry_sent).lower()})"
+            )
+        )
+    return MessageResponse(message="Monitoring webhook and Sentry are not configured")
 
 
 @app.get("/admin/analytics/chat")

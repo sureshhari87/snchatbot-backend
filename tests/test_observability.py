@@ -1,8 +1,11 @@
 import json
+import sys
+from types import SimpleNamespace
 
-import main
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+
+import main
 
 
 def test_request_id_header_is_returned(client):
@@ -39,6 +42,66 @@ def test_database_dependency_reports_missing_schema_tables():
     assert status["status"] == "error"
     assert status["error_type"] == "MissingDatabaseTables"
     assert status["missing_table_count"] > 0
+
+
+def test_sentry_configuration_uses_safe_defaults(monkeypatch):
+    init_calls = []
+
+    fake_sentry = SimpleNamespace(init=lambda **kwargs: init_calls.append(kwargs))
+    monkeypatch.setitem(sys.modules, "sentry_sdk", fake_sentry)
+    monkeypatch.setattr(main, "is_testing", lambda: False)
+    monkeypatch.setattr(main, "SENTRY_DSN", "https://public@example.ingest.sentry.io/1")
+    monkeypatch.setattr(main, "SENTRY_RELEASE", "test-release")
+    monkeypatch.setattr(main, "SENTRY_TRACES_SAMPLE_RATE", 0.25)
+    monkeypatch.setattr(main, "SENTRY_PROFILES_SAMPLE_RATE", 0.0)
+    monkeypatch.setattr(main, "SENTRY_SEND_DEFAULT_PII", False)
+
+    main.configure_error_monitoring()
+
+    assert len(init_calls) == 1
+    init_kwargs = init_calls[0]
+    assert init_kwargs["dsn"] == "https://public@example.ingest.sentry.io/1"
+    assert init_kwargs["environment"] == main.APP_ENV
+    assert init_kwargs["release"] == "test-release"
+    assert init_kwargs["traces_sample_rate"] == 0.25
+    assert init_kwargs["profiles_sample_rate"] == 0.0
+    assert init_kwargs["send_default_pii"] is False
+    assert init_kwargs["before_send"] is main.scrub_sentry_event
+
+
+def test_sentry_scrubber_filters_sensitive_fields():
+    event = {
+        "request": {
+            "headers": {
+                "Authorization": "Bearer secret-token",
+                "User-Agent": "pytest",
+                "Cookie": "session=secret",
+            },
+            "data": {
+                "password": "secret",
+                "nested": {"refresh_token": "secret-refresh"},
+                "message": "hello",
+            },
+        }
+    }
+
+    scrubbed = main.scrub_sentry_event(event, {})
+
+    assert scrubbed["request"]["headers"]["Authorization"] == "[Filtered]"
+    assert scrubbed["request"]["headers"]["Cookie"] == "[Filtered]"
+    assert scrubbed["request"]["data"]["password"] == "[Filtered]"
+    assert scrubbed["request"]["data"]["nested"]["refresh_token"] == "[Filtered]"
+    assert scrubbed["request"]["data"]["message"] == "hello"
+
+
+def test_admin_alert_test_reports_webhook_and_sentry(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(main, "send_monitoring_alert", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main, "capture_message_for_monitoring", lambda *args, **kwargs: True)
+
+    response = client.post("/admin/alerts/test", headers=admin_headers)
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Monitoring alert sent (webhook=true, sentry=true)"
 
 
 def test_structured_auth_log_contains_request_id(client, monkeypatch):
