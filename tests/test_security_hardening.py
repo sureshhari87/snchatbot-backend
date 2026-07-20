@@ -1,4 +1,5 @@
 import config
+import database
 import main
 
 
@@ -22,6 +23,10 @@ def test_database_url_normalizes_postgres_driver():
         == "postgresql+psycopg://user:pass@db.example.com:5432/app"
     )
     assert config.normalize_database_url("sqlite:///./jewellery.db") == "sqlite:///./jewellery.db"
+
+
+def test_database_engine_pre_ping_is_enabled():
+    assert getattr(database.engine.pool, "_pre_ping", False) is True
 
 
 def test_staging_proxy_defaults_are_secure(monkeypatch):
