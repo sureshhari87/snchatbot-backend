@@ -3,6 +3,7 @@ from datetime import timedelta
 from jose import jwt
 
 from main import ALGORITHM, SECRET_KEY, create_access_token
+from models import User
 
 
 def test_me_with_malformed_token(client):
@@ -107,6 +108,24 @@ def test_login_unknown_email(client):
     response = client.post(
         "/login", data={"username": "missing@example.com", "password": "secret123"}
     )
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid email or password"
+
+
+def test_login_with_invalid_stored_password_hash_returns_401(client, db):
+    user = User(
+        username="bad_hash_user",
+        email="bad-hash@example.com",
+        hashed_password="not-a-valid-password-hash",
+        is_verified=True,
+    )
+    db.add(user)
+    db.commit()
+
+    response = client.post(
+        "/login", data={"username": "bad-hash@example.com", "password": "secret123"}
+    )
+
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid email or password"
 

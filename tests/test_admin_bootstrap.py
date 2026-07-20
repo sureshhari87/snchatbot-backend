@@ -60,6 +60,28 @@ def test_bootstrap_admin_user_promotes_existing_user(db, monkeypatch):
     assert main.verify_password("adminpass123", user.hashed_password)
 
 
+def test_bootstrap_admin_user_repairs_invalid_existing_password_hash(db, monkeypatch):
+    user = User(
+        username="repair_owner",
+        email="repair@example.com",
+        hashed_password="not-a-valid-password-hash",
+        is_verified=True,
+        is_admin=True,
+    )
+    db.add(user)
+    db.commit()
+
+    monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_ENABLED", True)
+    monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_EMAIL", "repair@example.com")
+    monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_USERNAME", "repair_owner")
+    monkeypatch.setattr(main, "ADMIN_BOOTSTRAP_PASSWORD", "adminpass123")
+
+    main.bootstrap_admin_user(db)
+    db.refresh(user)
+
+    assert main.verify_password("adminpass123", user.hashed_password)
+
+
 def test_customer_token_cannot_access_admin_routes(client, auth_headers):
     response = client.get("/admin/metrics", headers=auth_headers)
 
