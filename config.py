@@ -136,6 +136,8 @@ class Settings:
     email_timeout_seconds: int
     resend_api_key: str | None
     resend_api_url: str
+    brevo_api_key: str | None
+    brevo_api_url: str
     password_min_length: int
     login_failure_limit: int
     login_lockout_minutes: int
@@ -264,6 +266,8 @@ def build_settings() -> Settings:
         email_timeout_seconds=get_int("EMAIL_TIMEOUT_SECONDS", 10),
         resend_api_key=get_str("RESEND_API_KEY"),
         resend_api_url=get_str("RESEND_API_URL", "https://api.resend.com/emails"),
+        brevo_api_key=get_str("BREVO_API_KEY"),
+        brevo_api_url=get_str("BREVO_API_URL", "https://api.brevo.com/v3/smtp/email"),
         password_min_length=get_int("PASSWORD_MIN_LENGTH", 8),
         login_failure_limit=get_int("LOGIN_FAILURE_LIMIT", 5),
         login_lockout_minutes=get_int("LOGIN_LOCKOUT_MINUTES", 15),
@@ -334,6 +338,8 @@ EMAIL_USE_SSL = settings.email_use_ssl
 EMAIL_TIMEOUT_SECONDS = settings.email_timeout_seconds
 RESEND_API_KEY = settings.resend_api_key
 RESEND_API_URL = settings.resend_api_url
+BREVO_API_KEY = settings.brevo_api_key
+BREVO_API_URL = settings.brevo_api_url
 PASSWORD_MIN_LENGTH = settings.password_min_length
 LOGIN_FAILURE_LIMIT = settings.login_failure_limit
 LOGIN_LOCKOUT_MINUTES = settings.login_lockout_minutes

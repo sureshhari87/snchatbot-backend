@@ -106,6 +106,56 @@ def test_send_email_uses_resend_https_provider(monkeypatch):
     ]
 
 
+def test_send_email_uses_brevo_https_provider(monkeypatch):
+    request_calls = []
+
+    def capture_request(method, url, payload, headers=None, timeout=10):
+        request_calls.append(
+            {
+                "method": method,
+                "url": url,
+                "payload": payload,
+                "headers": headers,
+                "timeout": timeout,
+            }
+        )
+        return 201, {"messageId": "<message-id@relay.domain.com>"}
+
+    monkeypatch.setattr(main, "is_testing", lambda: False)
+    monkeypatch.setattr(main, "EMAIL_PROVIDER", "brevo")
+    monkeypatch.setattr(main, "BREVO_API_KEY", "xkeysib-test")
+    monkeypatch.setattr(main, "BREVO_API_URL", "https://api.brevo.com/v3/smtp/email")
+    monkeypatch.setattr(main, "EMAIL_FROM", "noreply@example.com")
+    monkeypatch.setattr(main, "EMAIL_FROM_NAME", "Jewellery Chat")
+    monkeypatch.setattr(main, "EMAIL_TIMEOUT_SECONDS", 12)
+    monkeypatch.setattr(main, "json_http_request", capture_request)
+
+    sent = main.send_email(
+        "customer@example.com",
+        "Welcome",
+        "Hello from Jewellery Chat",
+    )
+
+    assert sent is True
+    assert request_calls == [
+        {
+            "method": "POST",
+            "url": "https://api.brevo.com/v3/smtp/email",
+            "payload": {
+                "sender": {
+                    "name": "Jewellery Chat",
+                    "email": "noreply@example.com",
+                },
+                "to": [{"email": "customer@example.com"}],
+                "subject": "Welcome",
+                "textContent": "Hello from Jewellery Chat",
+            },
+            "headers": {"api-key": "xkeysib-test"},
+            "timeout": 12,
+        }
+    ]
+
+
 def test_send_email_skips_delivery_in_test_mode(monkeypatch):
     monkeypatch.setenv("TESTING", "1")
     monkeypatch.setattr(main, "EMAIL_HOST", "smtp.example.com")

@@ -43,6 +43,8 @@ from config import (
     ADMIN_BOOTSTRAP_USERNAME,
     APP_DEBUG,
     APP_ENV,
+    BREVO_API_KEY,
+    BREVO_API_URL,
     CORS_ALLOW_CREDENTIALS,
     CORS_ORIGINS,
     DATABASE_URL,
@@ -1107,11 +1109,17 @@ def resend_is_configured() -> bool:
     return bool(RESEND_API_KEY and EMAIL_FROM)
 
 
+def brevo_is_configured() -> bool:
+    return bool(BREVO_API_KEY and EMAIL_FROM)
+
+
 def smtp_is_configured() -> bool:
     return bool(EMAIL_HOST)
 
 
 def email_provider_is_configured() -> bool:
+    if EMAIL_PROVIDER == "brevo":
+        return brevo_is_configured()
     if EMAIL_PROVIDER == "resend":
         return resend_is_configured()
     return smtp_is_configured()
@@ -1181,6 +1189,73 @@ def send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
+def send_email_via_brevo(to_email: str, subject: str, body: str) -> bool:
+    if not brevo_is_configured():
+        return False
+
+    payload = {
+        "sender": {
+            "name": EMAIL_FROM_NAME,
+            "email": EMAIL_FROM,
+        },
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "textContent": body,
+    }
+    headers = {"api-key": BREVO_API_KEY}
+
+    try:
+        status_code, response_body = json_http_request(
+            "POST",
+            BREVO_API_URL,
+            payload,
+            headers=headers,
+            timeout=EMAIL_TIMEOUT_SECONDS,
+        )
+        if 200 <= status_code < 300:
+            log_event(
+                "email.sent",
+                provider="brevo",
+                to_email=to_email,
+                subject=subject,
+                provider_message_id=response_body.get("messageId"),
+            )
+            return True
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="brevo",
+            to_email=to_email,
+            subject=subject,
+            status_code=status_code,
+            response=response_body,
+        )
+        return False
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="brevo",
+            to_email=to_email,
+            subject=subject,
+            status_code=exc.code,
+            error_type=exc.__class__.__name__,
+            error_body=error_body[:500],
+        )
+        return False
+    except Exception as exc:
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="brevo",
+            to_email=to_email,
+            subject=subject,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+
+
 def send_email_via_smtp(to_email: str, subject: str, body: str) -> bool:
     if not smtp_is_configured():
         return False
@@ -1236,6 +1311,8 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
 
     if EMAIL_PROVIDER == "resend":
         return send_email_via_resend(to_email, subject, body)
+    if EMAIL_PROVIDER == "brevo":
+        return send_email_via_brevo(to_email, subject, body)
     return send_email_via_smtp(to_email, subject, body)
 
 
@@ -3108,6 +3185,28 @@ def database_dependency_status(db: Session) -> dict[str, Any]:
 
 
 def email_dependency_status() -> dict[str, Any]:
+    if EMAIL_PROVIDER == "brevo":
+        if brevo_is_configured():
+            return {
+                "status": "configured",
+                "critical": False,
+                "provider": "brevo",
+                "api_url": BREVO_API_URL,
+            }
+        return {
+            "status": "misconfigured",
+            "critical": False,
+            "provider": "brevo",
+            "missing": [
+                name
+                for name, configured in {
+                    "BREVO_API_KEY": bool(BREVO_API_KEY),
+                    "EMAIL_FROM": bool(EMAIL_FROM),
+                }.items()
+                if not configured
+            ],
+        }
+
     if EMAIL_PROVIDER == "resend":
         if resend_is_configured():
             return {

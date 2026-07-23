@@ -131,7 +131,7 @@ Production integration secrets:
 
 For local Gmail SMTP testing, use an app password, not your normal account password. If email is not configured, the app still creates the token and prints the email body in logs for local development.
 
-For Hugging Face Spaces, do not use Gmail SMTP for production email. Spaces network egress is limited to HTTP/HTTPS-style ports, so SMTP ports such as `587` and `465` can fail even when your Gmail credentials are correct. Use an HTTPS email API provider such as Resend, Brevo, SendGrid, Mailgun, or Postmark.
+For Hugging Face Spaces, do not use Gmail SMTP for production email. Spaces network egress is limited to HTTP/HTTPS-style ports, so SMTP ports such as `587` and `465` can fail even when your Gmail credentials are correct. Use an HTTPS email API provider such as Brevo, SendGrid, Mailgun, or Postmark. If Resend returns Cloudflare `1010 browser_signature_banned`, switch to `EMAIL_PROVIDER=brevo`.
 
 For Hugging Face MVP deployment before your Android deep links are ready, use the backend fallback pages:
 
@@ -140,13 +140,13 @@ FRONTEND_VERIFY_URL=https://sureshhari-snchatbot-backend.hf.space/verify-email
 FRONTEND_RESET_URL=https://sureshhari-snchatbot-backend.hf.space/reset-password
 ```
 
-Then add HTTPS email provider secrets one by one. Example with Resend:
+Then add HTTPS email provider secrets one by one. Example with Brevo:
 
 ```env
-EMAIL_PROVIDER=resend
-RESEND_API_KEY=re_your_resend_api_key
-RESEND_API_URL=https://api.resend.com/emails
-EMAIL_FROM=onboarding@resend.dev
+EMAIL_PROVIDER=brevo
+BREVO_API_KEY=xkeysib-your-brevo-api-key
+BREVO_API_URL=https://api.brevo.com/v3/smtp/email
+EMAIL_FROM=your-verified-brevo-sender@example.com
 EMAIL_FROM_NAME=Sona Jewellery
 EMAIL_TIMEOUT_SECONDS=10
 ```
