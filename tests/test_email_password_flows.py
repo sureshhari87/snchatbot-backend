@@ -1,5 +1,7 @@
+import urllib.parse
 from datetime import timedelta
 
+import main
 from models import EmailVerificationToken, PasswordResetToken, User, utc_now
 
 
@@ -73,6 +75,49 @@ def test_verify_email_marks_user_verified(client, db):
     assert token_row.is_used is True
 
 
+def test_verify_email_click_link_marks_user_verified(client, db):
+    from main import generate_opaque_token, hash_opaque_token
+
+    user = User(
+        username="clickverify",
+        email="clickverify@example.com",
+        hashed_password="hashed-password",
+        is_verified=False,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    raw_token = generate_opaque_token()
+    token_row = EmailVerificationToken(
+        user_id=user.id,
+        token_hash=hash_opaque_token(raw_token),
+        is_used=False,
+        expires_at=utc_now() + timedelta(minutes=30),
+    )
+    db.add(token_row)
+    db.commit()
+
+    response = client.get("/verify-email", params={"token": raw_token})
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Email Verified" in response.text
+
+    db.refresh(user)
+    db.refresh(token_row)
+    assert user.is_verified is True
+    assert token_row.is_used is True
+
+
+def test_verify_email_click_link_returns_html_error_for_invalid_token(client):
+    response = client.get("/verify-email", params={"token": "not-a-real-token"})
+
+    assert response.status_code == 400
+    assert "text/html" in response.headers["content-type"]
+    assert "Email Verification Failed" in response.text
+
+
 def test_verify_email_rejects_used_token(client, db):
     from main import generate_opaque_token, hash_opaque_token
 
@@ -131,6 +176,38 @@ def test_verify_email_rejects_expired_token(client, db):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid or expired verification token"
+
+
+def test_register_verification_link_preserves_existing_query_params(client, monkeypatch):
+    captured = {}
+
+    def capture_verification_email(to_email, verify_link):
+        captured["to_email"] = to_email
+        captured["verify_link"] = verify_link
+
+    monkeypatch.setattr(
+        main,
+        "FRONTEND_VERIFY_URL",
+        "https://sureshhari-snchatbot-backend.hf.space/verify-email?source=email",
+    )
+    monkeypatch.setattr(main, "send_verification_email", capture_verification_email)
+
+    response = client.post(
+        "/register",
+        json={
+            "username": "queryverify",
+            "email": "queryverify@example.com",
+            "password": "secret123",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["to_email"] == "queryverify@example.com"
+
+    parsed = urllib.parse.urlsplit(captured["verify_link"])
+    params = urllib.parse.parse_qs(parsed.query)
+    assert params["source"] == ["email"]
+    assert "token" in params
 
 
 def test_resend_verification_returns_generic_response_for_unknown_email(client):
@@ -230,6 +307,48 @@ def test_reset_password_updates_password(client, db):
 
     assert response.status_code == 200
     assert response.json()["message"] == "Password reset successful"
+
+    db.refresh(user)
+    db.refresh(token_row)
+    assert verify_password("newpass123", user.hashed_password) is True
+    assert token_row.is_used is True
+
+
+def test_reset_password_click_form_updates_password(client, db):
+    from main import generate_opaque_token, hash_opaque_token, hash_password, verify_password
+
+    user = User(
+        username="formreset",
+        email="formreset@example.com",
+        hashed_password=hash_password("oldpass123"),
+        is_verified=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    raw_token = generate_opaque_token()
+    token_row = PasswordResetToken(
+        user_id=user.id,
+        token_hash=hash_opaque_token(raw_token),
+        is_used=False,
+        expires_at=utc_now() + timedelta(minutes=15),
+    )
+    db.add(token_row)
+    db.commit()
+
+    form_response = client.get("/reset-password", params={"token": raw_token})
+    assert form_response.status_code == 200
+    assert "text/html" in form_response.headers["content-type"]
+    assert "Reset Password" in form_response.text
+
+    reset_response = client.post(
+        "/reset-password/form",
+        data={"token": raw_token, "new_password": "newpass123"},
+    )
+
+    assert reset_response.status_code == 200
+    assert "Password Reset Successful" in reset_response.text
 
     db.refresh(user)
     db.refresh(token_row)

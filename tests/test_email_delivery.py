@@ -69,3 +69,42 @@ def test_send_email_skips_delivery_in_test_mode(monkeypatch):
     )
 
     assert sent is False
+
+
+def test_admin_email_test_endpoint_sends_test_email(client, admin_headers, monkeypatch):
+    sent_messages = []
+
+    def capture_email(to_email, subject, body):
+        sent_messages.append((to_email, subject, body))
+        return True
+
+    monkeypatch.setattr(main, "EMAIL_HOST", "smtp.example.com")
+    monkeypatch.setattr(main, "send_email", capture_email)
+
+    response = client.post(
+        "/admin/email/test",
+        headers=admin_headers,
+        json={"to_email": "owner@example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "SMTP test email sent"
+    assert sent_messages == [
+        (
+            "owner@example.com",
+            "Jewellery Chat SMTP test",
+            (
+                "This is a test email from your Jewellery Chat backend.\n\n"
+                "If you received this, SMTP delivery is working."
+            ),
+        )
+    ]
+
+
+def test_admin_email_test_endpoint_reports_missing_smtp(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(main, "EMAIL_HOST", None)
+
+    response = client.post("/admin/email/test", headers=admin_headers)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "SMTP is not configured"

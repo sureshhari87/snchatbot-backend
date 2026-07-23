@@ -35,6 +35,8 @@ Wire these endpoints first:
 - `POST /reset-password`
 - `POST /verify-email`
 - `POST /resend-verification`
+- `GET /verify-email?token=...` for backend-hosted email verification fallback
+- `GET /reset-password?token=...` for backend-hosted password reset fallback
 
 Android behavior:
 
@@ -49,6 +51,8 @@ Authorization: Bearer <access_token>
 - If an API call returns `401`, call `POST /refresh`, save the new tokens, then retry once.
 - If refresh fails, clear tokens and send the user to login.
 - If login returns `403` with email verification message, show a verify-email reminder and resend button.
+- Until Android deep links are ready, set `FRONTEND_VERIFY_URL` and `FRONTEND_RESET_URL` to the backend
+  fallback pages so inbox links still work.
 
 ## 3. Home And Catalog
 

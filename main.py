@@ -1,4 +1,5 @@
 import hashlib
+import html
 import json
 import logging
 import re
@@ -7,6 +8,7 @@ import smtplib
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager
@@ -17,10 +19,10 @@ from pathlib import Path
 from typing import Any, List
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from pwdlib import PasswordHash
@@ -135,6 +137,7 @@ from schemas import (
     ComplaintOut,
     CustomOrderCreate,
     CustomOrderOut,
+    EmailTestRequest,
     ExternalIntegrationEventOut,
     FeaturedItemCreate,
     FeaturedItemOut,
@@ -1133,6 +1136,15 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
+def url_with_token(base_url: str, token: str) -> str:
+    parsed_url = urllib.parse.urlsplit(base_url)
+    query_params = urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+    query_params.append(("token", token))
+    return urllib.parse.urlunsplit(
+        parsed_url._replace(query=urllib.parse.urlencode(query_params))
+    )
+
+
 def send_verification_email(to_email: str, verify_link: str) -> None:
     body = (
         "Welcome to Jewellery Chat.\n\n"
@@ -1151,6 +1163,224 @@ def send_password_reset_email(to_email: str, reset_link: str) -> None:
         f"This link expires in {PASSWORD_RESET_EXPIRE_MINUTES} minutes."
     )
     send_email(to_email, "Reset your Jewellery Chat password", body)
+
+
+def auth_flow_html(title: str, message: str, status_code: int = 200) -> HTMLResponse:
+    escaped_title = html.escape(title)
+    escaped_message = html.escape(message)
+    color = "#0f7a46" if status_code < 400 else "#b42318"
+    content = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escaped_title}</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f7f3ef;
+      color: #211a18;
+    }}
+    main {{
+      max-width: 520px;
+      margin: 12vh auto;
+      padding: 32px;
+      background: #fff;
+      border: 1px solid #e3d8d0;
+      border-radius: 8px;
+      box-shadow: 0 16px 40px rgba(38, 28, 20, 0.08);
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: 28px;
+      color: {color};
+    }}
+    p {{
+      line-height: 1.55;
+      margin: 0;
+    }}
+    label {{
+      display: block;
+      margin: 18px 0 8px;
+      font-weight: 700;
+    }}
+    input {{
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px;
+      border: 1px solid #cdbfb4;
+      border-radius: 6px;
+      font-size: 16px;
+    }}
+    button {{
+      margin-top: 18px;
+      width: 100%;
+      padding: 12px 14px;
+      border: 0;
+      border-radius: 6px;
+      background: #6b3f2a;
+      color: #fff;
+      font-weight: 700;
+      font-size: 16px;
+      cursor: pointer;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{escaped_title}</h1>
+    <p>{escaped_message}</p>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(content=content, status_code=status_code)
+
+
+def reset_password_form_html(token: str) -> HTMLResponse:
+    escaped_token = html.escape(token, quote=True)
+    content = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reset Password</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f7f3ef;
+      color: #211a18;
+    }}
+    main {{
+      max-width: 520px;
+      margin: 10vh auto;
+      padding: 32px;
+      background: #fff;
+      border: 1px solid #e3d8d0;
+      border-radius: 8px;
+      box-shadow: 0 16px 40px rgba(38, 28, 20, 0.08);
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: 28px;
+      color: #6b3f2a;
+    }}
+    p {{
+      line-height: 1.55;
+      margin: 0 0 8px;
+    }}
+    label {{
+      display: block;
+      margin: 18px 0 8px;
+      font-weight: 700;
+    }}
+    input {{
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px;
+      border: 1px solid #cdbfb4;
+      border-radius: 6px;
+      font-size: 16px;
+    }}
+    button {{
+      margin-top: 18px;
+      width: 100%;
+      padding: 12px 14px;
+      border: 0;
+      border-radius: 6px;
+      background: #6b3f2a;
+      color: #fff;
+      font-weight: 700;
+      font-size: 16px;
+      cursor: pointer;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Reset Password</h1>
+    <p>Enter a new password for your Jewellery Chat account.</p>
+    <p>Your password must include at least one letter and one number.</p>
+    <form action="/reset-password/form" method="post">
+      <input type="hidden" name="token" value="{escaped_token}">
+      <label for="new_password">New password</label>
+      <input
+        id="new_password"
+        name="new_password"
+        type="password"
+        autocomplete="new-password"
+        minlength="{PASSWORD_MIN_LENGTH}"
+        required
+      >
+      <button type="submit">Update Password</button>
+    </form>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(content=content)
+
+
+def verify_email_token(db: Session, raw_token: str, request: Request | None = None) -> MessageResponse:
+    token_hash = hash_opaque_token(raw_token)
+
+    row = (
+        db.query(EmailVerificationToken)
+        .filter(EmailVerificationToken.token_hash == token_hash)
+        .first()
+    )
+
+    if not row or row.is_used:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+
+    if row.expires_at < utc_now():
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+
+    user = db.query(User).filter(User.id == row.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid verification request")
+
+    user.is_verified = True
+    row.is_used = True
+    db.commit()
+    log_event("auth.email_verified", request, user_id=user.id, email=user.email)
+
+    return MessageResponse(message="Email verified successfully")
+
+
+def reset_password_with_token(
+    db: Session,
+    raw_token: str,
+    new_password: str,
+    request: Request | None = None,
+) -> MessageResponse:
+    validate_password_strength(new_password)
+
+    token_hash = hash_reset_token(raw_token)
+
+    reset_row = (
+        db.query(PasswordResetToken).filter(PasswordResetToken.token_hash == token_hash).first()
+    )
+
+    if not reset_row or reset_row.is_used:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    if reset_row.expires_at < utc_now():
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    user = db.query(User).filter(User.id == reset_row.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid reset request")
+
+    user.hashed_password = hash_password(new_password)
+    reset_row.is_used = True
+
+    revoke_user_refresh_tokens(db, user.id, "password_reset", request)
+
+    db.commit()
+    log_event("auth.password_reset_success", request, user_id=user.id, email=user.email)
+
+    return MessageResponse(message="Password reset successful")
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
@@ -2876,7 +3106,7 @@ async def register(
     )
     db.commit()
 
-    verify_link = f"{FRONTEND_VERIFY_URL}?token={raw_token}"
+    verify_link = url_with_token(FRONTEND_VERIFY_URL, raw_token)
     send_verification_email(new_user.email, verify_link)
     log_event("auth.register_success", request, user_id=new_user.id, email=new_user.email)
 
@@ -3910,6 +4140,37 @@ async def admin_integration_events(
     return query.order_by(ExternalIntegrationEvent.created_at.desc()).limit(limit).all()
 
 
+@app.post("/admin/email/test", response_model=MessageResponse)
+async def admin_test_email(
+    request: Request,
+    payload: EmailTestRequest | None = None,
+    admin_user: User = Depends(require_permission("metrics:read")),
+):
+    if not EMAIL_HOST:
+        raise HTTPException(status_code=400, detail="SMTP is not configured")
+
+    to_email = str(payload.to_email) if payload and payload.to_email else admin_user.email
+    sent = send_email(
+        to_email,
+        "Jewellery Chat SMTP test",
+        (
+            "This is a test email from your Jewellery Chat backend.\n\n"
+            "If you received this, SMTP delivery is working."
+        ),
+    )
+    if not sent:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "SMTP test email failed. Check EMAIL_HOST, EMAIL_USERNAME, "
+                "EMAIL_PASSWORD, EMAIL_FROM, and Gmail app-password settings."
+            ),
+        )
+
+    log_admin_action(request, admin_user, "test_email", "email")
+    return MessageResponse(message="SMTP test email sent")
+
+
 @app.post("/admin/alerts/test", response_model=MessageResponse)
 async def admin_test_alert(
     request: Request,
@@ -4873,10 +5134,15 @@ async def forgot_password(
     )
     db.commit()
 
-    reset_link = f"{FRONTEND_RESET_URL}?token={raw_token}"
+    reset_link = url_with_token(FRONTEND_RESET_URL, raw_token)
     send_password_reset_email(user.email, reset_link)
 
     return generic_response
+
+
+@app.get("/reset-password", response_class=HTMLResponse)
+async def reset_password_page(token: str = Query(...)):
+    return reset_password_form_html(token)
 
 
 @app.post("/reset-password", response_model=MessageResponse)
@@ -4884,59 +5150,52 @@ async def forgot_password(
 async def reset_password(
     request: Request, req: ResetPasswordRequest, db: Session = Depends(get_db)
 ):
-    validate_password_strength(req.new_password)
+    return reset_password_with_token(db, req.token, req.new_password, request)
 
-    token_hash = hash_reset_token(req.token)
 
-    reset_row = (
-        db.query(PasswordResetToken).filter(PasswordResetToken.token_hash == token_hash).first()
+@app.post("/reset-password/form", response_class=HTMLResponse, include_in_schema=False)
+@limiter.limit("5/minute")
+async def reset_password_form_submit(
+    request: Request,
+    token: str = Form(...),
+    new_password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        reset_password_with_token(db, token, new_password, request)
+    except HTTPException as exc:
+        return auth_flow_html("Password Reset Failed", str(exc.detail), exc.status_code)
+
+    return auth_flow_html(
+        "Password Reset Successful",
+        "Your password has been updated. You can return to the Sona Jewellery app and sign in.",
     )
-
-    if not reset_row or reset_row.is_used:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    if reset_row.expires_at < utc_now():
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-
-    user = db.query(User).filter(User.id == reset_row.user_id).first()
-    if not user:
-        raise HTTPException(status_code=400, detail="Invalid reset request")
-
-    user.hashed_password = hash_password(req.new_password)
-    reset_row.is_used = True
-
-    revoke_user_refresh_tokens(db, user.id, "password_reset", request)
-
-    db.commit()
-
-    return MessageResponse(message="Password reset successful")
 
 
 @app.post("/verify-email", response_model=MessageResponse)
-async def verify_email(req: VerifyEmailRequest, db: Session = Depends(get_db)):
-    token_hash = hash_opaque_token(req.token)
+async def verify_email(
+    request: Request,
+    req: VerifyEmailRequest,
+    db: Session = Depends(get_db),
+):
+    return verify_email_token(db, req.token, request)
 
-    row = (
-        db.query(EmailVerificationToken)
-        .filter(EmailVerificationToken.token_hash == token_hash)
-        .first()
+
+@app.get("/verify-email", response_class=HTMLResponse)
+async def verify_email_click(
+    request: Request,
+    token: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        verify_email_token(db, token, request)
+    except HTTPException as exc:
+        return auth_flow_html("Email Verification Failed", str(exc.detail), exc.status_code)
+
+    return auth_flow_html(
+        "Email Verified",
+        "Your email is verified. You can return to the Sona Jewellery app and sign in.",
     )
-
-    if not row or row.is_used:
-        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
-
-    if row.expires_at < utc_now():
-        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
-
-    user = db.query(User).filter(User.id == row.user_id).first()
-    if not user:
-        raise HTTPException(status_code=400, detail="Invalid verification request")
-
-    user.is_verified = True
-    row.is_used = True
-    db.commit()
-
-    return MessageResponse(message="Email verified successfully")
 
 
 @app.post("/resend-verification", response_model=MessageResponse)
@@ -4975,7 +5234,7 @@ async def resend_verification(
     )
     db.commit()
 
-    verify_link = f"{FRONTEND_VERIFY_URL}?token={raw_token}"
+    verify_link = url_with_token(FRONTEND_VERIFY_URL, raw_token)
     send_verification_email(user.email, verify_link)
 
     return generic_response

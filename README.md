@@ -46,7 +46,10 @@ Backend API for a Flutter jewellery ecommerce assistant.
 - `POST /logout-all-devices`
 - `POST /forgot-password`
 - `POST /verify-email`
+- `GET /verify-email?token=...`
 - `POST /resend-verification`
+- `POST /reset-password`
+- `GET /reset-password?token=...`
 - `POST /wishlist`
 - `POST /save-for-later`
 - `POST /request-callback`
@@ -124,6 +127,31 @@ Production integration secrets:
 - `ADMIN_BOOTSTRAP_PASSWORD` temporary bootstrap password, remove after first successful startup
 
 For Gmail, use an app password, not your normal account password. If SMTP is not configured, the app still creates the token and prints the email body in logs for local development.
+
+For Hugging Face MVP deployment before your Android deep links are ready, use the backend fallback pages:
+
+```env
+FRONTEND_VERIFY_URL=https://sureshhari-snchatbot-backend.hf.space/verify-email
+FRONTEND_RESET_URL=https://sureshhari-snchatbot-backend.hf.space/reset-password
+```
+
+Then add Gmail SMTP secrets one by one:
+
+```env
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USERNAME=your-gmail-address@gmail.com
+EMAIL_PASSWORD=your-16-character-gmail-app-password-without-spaces
+EMAIL_FROM=your-gmail-address@gmail.com
+EMAIL_FROM_NAME=Sona Jewellery
+EMAIL_USE_TLS=1
+EMAIL_USE_SSL=0
+EMAIL_TIMEOUT_SECONDS=10
+```
+
+After restart, sign in as admin, authorize `/docs`, and execute `POST /admin/email/test`.
+If the response is `SMTP test email sent`, register a new customer email and click the
+verification link from the inbox.
 
 ## Admin Account Bootstrap
 

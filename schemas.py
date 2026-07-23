@@ -559,5 +559,9 @@ class ResendVerificationRequest(BaseModel):
     email: EmailStr
 
 
+class EmailTestRequest(BaseModel):
+    to_email: Optional[EmailStr] = None
+
+
 class MessageResponse(BaseModel):
     message: str
