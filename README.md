@@ -91,6 +91,7 @@ Set these in Hugging Face secrets, or copy `.env.example` to `.env` for local de
 
 Email secrets for registration verification and password reset:
 
+- `EMAIL_PROVIDER` one of `smtp` or `resend`; use `resend` on Hugging Face
 - `EMAIL_HOST`
 - `EMAIL_PORT` default: `587`
 - `EMAIL_USERNAME`
@@ -100,6 +101,8 @@ Email secrets for registration verification and password reset:
 - `EMAIL_USE_TLS` default: `1`
 - `EMAIL_USE_SSL` default: `0`
 - `EMAIL_TIMEOUT_SECONDS` default: `10`
+- `RESEND_API_KEY` required when `EMAIL_PROVIDER=resend`
+- `RESEND_API_URL` default: `https://api.resend.com/emails`
 
 Production integration secrets:
 
@@ -126,7 +129,9 @@ Production integration secrets:
 - `ADMIN_BOOTSTRAP_USERNAME` real admin username
 - `ADMIN_BOOTSTRAP_PASSWORD` temporary bootstrap password, remove after first successful startup
 
-For Gmail, use an app password, not your normal account password. If SMTP is not configured, the app still creates the token and prints the email body in logs for local development.
+For local Gmail SMTP testing, use an app password, not your normal account password. If email is not configured, the app still creates the token and prints the email body in logs for local development.
+
+For Hugging Face Spaces, do not use Gmail SMTP for production email. Spaces network egress is limited to HTTP/HTTPS-style ports, so SMTP ports such as `587` and `465` can fail even when your Gmail credentials are correct. Use an HTTPS email API provider such as Resend, Brevo, SendGrid, Mailgun, or Postmark.
 
 For Hugging Face MVP deployment before your Android deep links are ready, use the backend fallback pages:
 
@@ -135,22 +140,19 @@ FRONTEND_VERIFY_URL=https://sureshhari-snchatbot-backend.hf.space/verify-email
 FRONTEND_RESET_URL=https://sureshhari-snchatbot-backend.hf.space/reset-password
 ```
 
-Then add Gmail SMTP secrets one by one:
+Then add HTTPS email provider secrets one by one. Example with Resend:
 
 ```env
-EMAIL_HOST=smtp.gmail.com
-EMAIL_PORT=587
-EMAIL_USERNAME=your-gmail-address@gmail.com
-EMAIL_PASSWORD=your-16-character-gmail-app-password-without-spaces
-EMAIL_FROM=your-gmail-address@gmail.com
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=re_your_resend_api_key
+RESEND_API_URL=https://api.resend.com/emails
+EMAIL_FROM=onboarding@resend.dev
 EMAIL_FROM_NAME=Sona Jewellery
-EMAIL_USE_TLS=1
-EMAIL_USE_SSL=0
 EMAIL_TIMEOUT_SECONDS=10
 ```
 
 After restart, sign in as admin, authorize `/docs`, and execute `POST /admin/email/test`.
-If the response is `SMTP test email sent`, register a new customer email and click the
+If the response is `Email test sent`, register a new customer email and click the
 verification link from the inbox.
 
 ## Admin Account Bootstrap

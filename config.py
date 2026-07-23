@@ -124,6 +124,7 @@ class Settings:
     port: int
     web_concurrency: int
     uvicorn_log_level: str
+    email_provider: str
     email_host: str | None
     email_port: int
     email_username: str | None
@@ -133,6 +134,8 @@ class Settings:
     email_use_tls: bool
     email_use_ssl: bool
     email_timeout_seconds: int
+    resend_api_key: str | None
+    resend_api_url: str
     password_min_length: int
     login_failure_limit: int
     login_lockout_minutes: int
@@ -249,6 +252,7 @@ def build_settings() -> Settings:
         port=get_int("PORT", 7860),
         web_concurrency=max(get_int("WEB_CONCURRENCY", 1), 1),
         uvicorn_log_level=get_str("UVICORN_LOG_LEVEL", "info"),
+        email_provider=(get_str("EMAIL_PROVIDER", "smtp") or "smtp").lower(),
         email_host=get_str("EMAIL_HOST"),
         email_port=get_int("EMAIL_PORT", 587),
         email_username=email_username,
@@ -258,6 +262,8 @@ def build_settings() -> Settings:
         email_use_tls=get_bool("EMAIL_USE_TLS", True),
         email_use_ssl=get_bool("EMAIL_USE_SSL", False),
         email_timeout_seconds=get_int("EMAIL_TIMEOUT_SECONDS", 10),
+        resend_api_key=get_str("RESEND_API_KEY"),
+        resend_api_url=get_str("RESEND_API_URL", "https://api.resend.com/emails"),
         password_min_length=get_int("PASSWORD_MIN_LENGTH", 8),
         login_failure_limit=get_int("LOGIN_FAILURE_LIMIT", 5),
         login_lockout_minutes=get_int("LOGIN_LOCKOUT_MINUTES", 15),
@@ -317,6 +323,7 @@ WEB_CONCURRENCY = settings.web_concurrency
 UVICORN_LOG_LEVEL = settings.uvicorn_log_level
 
 EMAIL_HOST = settings.email_host
+EMAIL_PROVIDER = settings.email_provider
 EMAIL_PORT = settings.email_port
 EMAIL_USERNAME = settings.email_username
 EMAIL_PASSWORD = settings.email_password
@@ -325,6 +332,8 @@ EMAIL_FROM_NAME = settings.email_from_name
 EMAIL_USE_TLS = settings.email_use_tls
 EMAIL_USE_SSL = settings.email_use_ssl
 EMAIL_TIMEOUT_SECONDS = settings.email_timeout_seconds
+RESEND_API_KEY = settings.resend_api_key
+RESEND_API_URL = settings.resend_api_url
 PASSWORD_MIN_LENGTH = settings.password_min_length
 LOGIN_FAILURE_LIMIT = settings.login_failure_limit
 LOGIN_LOCKOUT_MINUTES = settings.login_lockout_minutes

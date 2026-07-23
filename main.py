@@ -35,6 +35,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
+    ALERT_ERROR_THRESHOLD,
     ALGORITHM,
     ADMIN_BOOTSTRAP_EMAIL,
     ADMIN_BOOTSTRAP_ENABLED,
@@ -50,6 +51,7 @@ from config import (
     EMAIL_HOST,
     EMAIL_PASSWORD,
     EMAIL_PORT,
+    EMAIL_PROVIDER,
     EMAIL_TIMEOUT_SECONDS,
     EMAIL_USE_SSL,
     EMAIL_USE_TLS,
@@ -58,15 +60,14 @@ from config import (
     FRONTEND_RESET_URL,
     FRONTEND_VERIFY_URL,
     HTTPS_REDIRECT,
-    ALERT_ERROR_THRESHOLD,
-    LOGIN_FAILURE_LIMIT,
-    LOGIN_LOCKOUT_MINUTES,
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_ENABLED,
     LLM_MAX_TOKENS,
     LLM_MODEL,
     LLM_TIMEOUT_SECONDS,
+    LOGIN_FAILURE_LIMIT,
+    LOGIN_LOCKOUT_MINUTES,
     MAX_REQUEST_BODY_BYTES,
     MONITORING_WEBHOOK_TIMEOUT_SECONDS,
     MONITORING_WEBHOOK_URL,
@@ -77,6 +78,8 @@ from config import (
     PASSWORD_MIN_LENGTH,
     PASSWORD_RESET_EXPIRE_MINUTES,
     REFRESH_TOKEN_EXPIRE_DAYS,
+    RESEND_API_KEY,
+    RESEND_API_URL,
     RESEND_VERIFICATION_COOLDOWN_SECONDS,
     RUN_MIGRATIONS_ON_STARTUP,
     SECRET_KEY,
@@ -362,6 +365,8 @@ def log_startup_configuration() -> None:
         app_env=APP_ENV,
         run_migrations_on_startup=RUN_MIGRATIONS_ON_STARTUP,
         database_backend=database_backend_name(),
+        email_provider=EMAIL_PROVIDER,
+        email_provider_configured=email_provider_is_configured(),
         admin_bootstrap_enabled=ADMIN_BOOTSTRAP_ENABLED,
         admin_bootstrap_email_configured=bool(ADMIN_BOOTSTRAP_EMAIL),
         admin_bootstrap_username_configured=bool(ADMIN_BOOTSTRAP_USERNAME),
@@ -1098,9 +1103,86 @@ def store_refresh_token(
     return token_row
 
 
-def send_email(to_email: str, subject: str, body: str) -> bool:
-    if is_testing() or not EMAIL_HOST:
-        print(f"EMAIL NOT SENT: {subject} -> {to_email}\n{body}")
+def resend_is_configured() -> bool:
+    return bool(RESEND_API_KEY and EMAIL_FROM)
+
+
+def smtp_is_configured() -> bool:
+    return bool(EMAIL_HOST)
+
+
+def email_provider_is_configured() -> bool:
+    if EMAIL_PROVIDER == "resend":
+        return resend_is_configured()
+    return smtp_is_configured()
+
+
+def send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
+    if not resend_is_configured():
+        return False
+
+    payload = {
+        "from": formataddr((EMAIL_FROM_NAME, EMAIL_FROM)),
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+    }
+    headers = {"Authorization": f"Bearer {RESEND_API_KEY}"}
+
+    try:
+        status_code, response_body = json_http_request(
+            "POST",
+            RESEND_API_URL,
+            payload,
+            headers=headers,
+            timeout=EMAIL_TIMEOUT_SECONDS,
+        )
+        if 200 <= status_code < 300:
+            log_event(
+                "email.sent",
+                provider="resend",
+                to_email=to_email,
+                subject=subject,
+                provider_message_id=response_body.get("id"),
+            )
+            return True
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="resend",
+            to_email=to_email,
+            subject=subject,
+            status_code=status_code,
+            response=response_body,
+        )
+        return False
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="resend",
+            to_email=to_email,
+            subject=subject,
+            status_code=exc.code,
+            error_type=exc.__class__.__name__,
+            error_body=error_body[:500],
+        )
+        return False
+    except Exception as exc:
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="resend",
+            to_email=to_email,
+            subject=subject,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+
+
+def send_email_via_smtp(to_email: str, subject: str, body: str) -> bool:
+    if not smtp_is_configured():
         return False
 
     message = EmailMessage()
@@ -1130,10 +1212,31 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
                 if EMAIL_USERNAME and EMAIL_PASSWORD:
                     smtp.login(EMAIL_USERNAME, EMAIL_PASSWORD)
                 smtp.send_message(message)
+        log_event("email.sent", provider="smtp", to_email=to_email, subject=subject)
         return True
     except Exception as exc:
-        print(f"EMAIL SEND FAILED: {subject} -> {to_email}: {exc}")
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="smtp",
+            to_email=to_email,
+            subject=subject,
+            host=EMAIL_HOST,
+            port=EMAIL_PORT,
+            error_type=exc.__class__.__name__,
+            error=str(exc)[:500],
+        )
         return False
+
+
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    if is_testing() or not email_provider_is_configured():
+        print(f"EMAIL NOT SENT: {subject} -> {to_email}\n{body}")
+        return False
+
+    if EMAIL_PROVIDER == "resend":
+        return send_email_via_resend(to_email, subject, body)
+    return send_email_via_smtp(to_email, subject, body)
 
 
 def url_with_token(base_url: str, token: str) -> str:
@@ -3005,14 +3108,37 @@ def database_dependency_status(db: Session) -> dict[str, Any]:
 
 
 def email_dependency_status() -> dict[str, Any]:
-    if EMAIL_HOST:
+    if EMAIL_PROVIDER == "resend":
+        if resend_is_configured():
+            return {
+                "status": "configured",
+                "critical": False,
+                "provider": "resend",
+                "api_url": RESEND_API_URL,
+            }
+        return {
+            "status": "misconfigured",
+            "critical": False,
+            "provider": "resend",
+            "missing": [
+                name
+                for name, configured in {
+                    "RESEND_API_KEY": bool(RESEND_API_KEY),
+                    "EMAIL_FROM": bool(EMAIL_FROM),
+                }.items()
+                if not configured
+            ],
+        }
+
+    if smtp_is_configured():
         return {
             "status": "configured",
             "critical": False,
+            "provider": "smtp",
             "host": EMAIL_HOST,
             "port": EMAIL_PORT,
         }
-    return {"status": "disabled", "critical": False}
+    return {"status": "disabled", "critical": False, "provider": EMAIL_PROVIDER}
 
 
 def optional_service_status(enabled: bool, configured: bool, name: str) -> dict[str, Any]:
@@ -4146,29 +4272,29 @@ async def admin_test_email(
     payload: EmailTestRequest | None = None,
     admin_user: User = Depends(require_permission("metrics:read")),
 ):
-    if not EMAIL_HOST:
-        raise HTTPException(status_code=400, detail="SMTP is not configured")
+    if not email_provider_is_configured():
+        raise HTTPException(status_code=400, detail="Email provider is not configured")
 
     to_email = str(payload.to_email) if payload and payload.to_email else admin_user.email
     sent = send_email(
         to_email,
-        "Jewellery Chat SMTP test",
+        "Jewellery Chat email test",
         (
             "This is a test email from your Jewellery Chat backend.\n\n"
-            "If you received this, SMTP delivery is working."
+            "If you received this, email delivery is working."
         ),
     )
     if not sent:
         raise HTTPException(
             status_code=502,
             detail=(
-                "SMTP test email failed. Check EMAIL_HOST, EMAIL_USERNAME, "
-                "EMAIL_PASSWORD, EMAIL_FROM, and Gmail app-password settings."
+                "Email test failed. Check EMAIL_PROVIDER, EMAIL_FROM, and the selected "
+                "provider secret such as RESEND_API_KEY or SMTP credentials."
             ),
         )
 
     log_admin_action(request, admin_user, "test_email", "email")
-    return MessageResponse(message="SMTP test email sent")
+    return MessageResponse(message="Email test sent")
 
 
 @app.post("/admin/alerts/test", response_model=MessageResponse)
