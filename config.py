@@ -217,6 +217,13 @@ def build_settings() -> Settings:
 
     database_url = normalize_database_url(get_str("DATABASE_URL", defaults["DATABASE_URL"]))
     email_username = get_str("EMAIL_USERNAME")
+    llm_api_key = get_str("LLM_API_KEY") or get_str("OPENAI_API_KEY")
+    llm_base_url = (
+        get_str("LLM_BASE_URL")
+        or get_str("OPENAI_BASE_URL")
+        or ("https://api.openai.com/v1" if llm_api_key else None)
+    )
+    llm_model = get_str("LLM_MODEL") or get_str("OPENAI_MODEL", "gpt-4o-mini")
     frontend_reset_url = get_str("FRONTEND_RESET_URL", "http://localhost:3000/reset-password")
     frontend_verify_url = get_str("FRONTEND_VERIFY_URL", "http://localhost:3000/verify-email")
     cors_origins = normalize_cors_origins(
@@ -277,10 +284,10 @@ def build_settings() -> Settings:
         oms_api_key=get_str("OMS_API_KEY"),
         oms_timeout_seconds=get_int("OMS_TIMEOUT_SECONDS", 10),
         oms_enabled=get_bool("OMS_ENABLED", False),
-        llm_enabled=get_bool("LLM_ENABLED", False),
-        llm_base_url=get_str("LLM_BASE_URL"),
-        llm_api_key=get_str("LLM_API_KEY"),
-        llm_model=get_str("LLM_MODEL", "gpt-4o-mini"),
+        llm_enabled=get_bool("LLM_ENABLED", bool(llm_api_key)),
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_model=llm_model,
         llm_timeout_seconds=get_int("LLM_TIMEOUT_SECONDS", 20),
         llm_max_tokens=get_int("LLM_MAX_TOKENS", 350),
         monitoring_webhook_url=get_str("MONITORING_WEBHOOK_URL"),

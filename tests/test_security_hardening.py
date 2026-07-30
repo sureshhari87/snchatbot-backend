@@ -25,6 +25,52 @@ def test_database_url_normalizes_postgres_driver():
     assert config.normalize_database_url("sqlite:///./jewellery.db") == "sqlite:///./jewellery.db"
 
 
+def test_openai_api_key_enables_default_llm_settings(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("LLM_ENABLED", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = config.build_settings()
+
+    assert settings.llm_enabled is True
+    assert settings.llm_api_key == "openai-test-key"
+    assert settings.llm_base_url == "https://api.openai.com/v1"
+    assert settings.llm_model == "gpt-4o-mini"
+
+
+def test_llm_enabled_can_disable_openai_alias(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.setenv("LLM_ENABLED", "0")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+
+    settings = config.build_settings()
+
+    assert settings.llm_enabled is False
+    assert settings.llm_api_key == "openai-test-key"
+
+
+def test_provider_llm_settings_override_openai_aliases(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("LLM_API_KEY", "provider-test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "provider-model")
+    monkeypatch.delenv("LLM_ENABLED", raising=False)
+
+    settings = config.build_settings()
+
+    assert settings.llm_enabled is True
+    assert settings.llm_api_key == "provider-test-key"
+    assert settings.llm_base_url == "https://llm.example/v1"
+    assert settings.llm_model == "provider-model"
+
+
 def test_database_engine_pre_ping_is_enabled():
     assert getattr(database.engine.pool, "_pre_ping", False) is True
 

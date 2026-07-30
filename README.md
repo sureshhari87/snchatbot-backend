@@ -91,7 +91,7 @@ Set these in Hugging Face secrets, or copy `.env.example` to `.env` for local de
 
 Email secrets for registration verification and password reset:
 
-- `EMAIL_PROVIDER` one of `smtp` or `resend`; use `resend` on Hugging Face
+- `EMAIL_PROVIDER` one of `smtp`, `resend`, or `brevo`; use an HTTPS provider such as `brevo` on Hugging Face
 - `EMAIL_HOST`
 - `EMAIL_PORT` default: `587`
 - `EMAIL_USERNAME`
@@ -110,10 +110,13 @@ Production integration secrets:
 - `OMS_BASE_URL` base URL for your order-management API
 - `OMS_API_KEY` bearer token for the OMS API
 - `OMS_TIMEOUT_SECONDS` default: `10`
-- `LLM_ENABLED` enables grounded LLM replies when `1`
-- `LLM_BASE_URL` OpenAI-compatible base URL, for example `https://api.openai.com/v1`
-- `LLM_API_KEY`
-- `LLM_MODEL` default: `gpt-4o-mini`
+- `OPENAI_API_KEY` simple Hugging Face secret for OpenAI; do not put this in GitHub or Android
+- `OPENAI_BASE_URL` optional, default: `https://api.openai.com/v1`
+- `OPENAI_MODEL` optional, default: `gpt-4o-mini`
+- `LLM_ENABLED` enables grounded LLM replies when `1`; if unset, an OpenAI key enables the LLM automatically
+- `LLM_BASE_URL` OpenAI-compatible provider URL; overrides `OPENAI_BASE_URL` when present
+- `LLM_API_KEY` generic provider key; overrides `OPENAI_API_KEY` when present
+- `LLM_MODEL` generic provider model; overrides `OPENAI_MODEL` when present
 - `LLM_TIMEOUT_SECONDS` default: `20`
 - `LLM_MAX_TOKENS` default: `350`
 - `MONITORING_WEBHOOK_URL` alert webhook for external monitoring
@@ -231,10 +234,14 @@ Before real customers use the app, follow [docs/database-backup-plan.md](docs/da
 
 ## Optional LLM Layer
 
-The chatbot works with catalogue/rule-based answers by default. A guarded OpenAI-compatible LLM
-layer can be enabled later with `LLM_ENABLED=1`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
+The chatbot works with catalogue/rule-based answers by default. For Hugging Face OpenAI setup,
+store `OPENAI_API_KEY` as a Space secret and set `LLM_ENABLED=1` if that variable exists. The
+backend defaults to `https://api.openai.com/v1` and `gpt-4o-mini`. Advanced OpenAI-compatible
+providers can still use `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
+
 It sends only filtered catalogue and FAQ/policy context to the provider, validates the reply, and
-falls back to rules if the provider fails or returns unsafe text.
+falls back to rules if the provider fails or returns unsafe text. Never ship the OpenAI key in the
+Android app or commit it to GitHub.
 
 See [docs/llm-layer.md](docs/llm-layer.md) before enabling it in Hugging Face.
 
@@ -342,7 +349,7 @@ Important mobile flows:
 
 Order support is capture-only until `OMS_ENABLED=1` and `OMS_BASE_URL` are configured. After that, lookup, cancel, return, refund, and `/orders/support` requests are sent to your OMS and audited in `external_integration_events`. See [docs/oms-integration.md](docs/oms-integration.md) for the required OMS API contract and Android handling notes.
 
-The LLM layer is optional and disabled by default. When `LLM_ENABLED=1`, `LLM_BASE_URL`, and `LLM_API_KEY` are configured, `/chat` sends a grounded catalog prompt to an OpenAI-compatible chat-completions endpoint. If the LLM fails, the backend falls back to the existing deterministic catalog reply.
+The LLM layer is optional. When Hugging Face has `OPENAI_API_KEY` and `LLM_ENABLED=1` or no explicit `LLM_ENABLED=0`, `/chat` sends a grounded catalog prompt to the OpenAI chat-completions endpoint. If the LLM fails, the backend falls back to the existing deterministic catalog reply.
 
 Admin production operations:
 

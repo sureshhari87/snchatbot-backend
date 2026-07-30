@@ -16,15 +16,29 @@ The LLM is skipped for order status, return/refund, complaint, and human-handoff
 
 ## Hugging Face Secrets
 
-Add these only when you are ready to use a real provider:
+For OpenAI, add the real key only in Hugging Face Space secrets. Do not commit it to GitHub and do
+not put it in the Android app.
+
+```env
+OPENAI_API_KEY=replace-with-openai-api-key
+OPENAI_MODEL=gpt-4o-mini
+LLM_ENABLED=1
+LLM_TIMEOUT_SECONDS=20
+LLM_MAX_TOKENS=350
+```
+
+`OPENAI_BASE_URL` is optional and defaults to `https://api.openai.com/v1`. If `LLM_ENABLED` is not
+set, the backend enables the LLM automatically when `OPENAI_API_KEY` is present. If `LLM_ENABLED=0`
+is set, the LLM stays disabled even when the key exists.
+
+For another OpenAI-compatible provider, use the generic variables. These override the `OPENAI_*`
+shortcuts when present:
 
 ```env
 LLM_ENABLED=1
-LLM_BASE_URL=https://api.openai.com/v1
+LLM_BASE_URL=https://provider.example/v1
 LLM_API_KEY=replace-with-provider-api-key
-LLM_MODEL=gpt-4o-mini
-LLM_TIMEOUT_SECONDS=20
-LLM_MAX_TOKENS=350
+LLM_MODEL=provider-model
 ```
 
 `LLM_BASE_URL` can be either the provider base URL or the full `/chat/completions` URL. The
@@ -34,7 +48,7 @@ For MVP production, keep these off until you have budget limits and provider bil
 
 ```env
 LLM_ENABLED=0
-LLM_BASE_URL=
+OPENAI_API_KEY=
 LLM_API_KEY=
 ```
 
