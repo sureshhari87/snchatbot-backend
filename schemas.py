@@ -372,6 +372,77 @@ class ComplaintOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class OrderItemSync(BaseModel):
+    product_id: Optional[str] = None
+    backend_product_id: Optional[int] = None
+    name: str = Field(..., min_length=1)
+    qty: int = Field(default=1, ge=1)
+    price: float = Field(default=0, ge=0)
+    image: Optional[str] = None
+
+
+class OrderSyncRequest(BaseModel):
+    order_reference: str = Field(..., min_length=1)
+    status: str = "placed"
+    total: float = Field(default=0, ge=0)
+    currency: str = "INR"
+    items: List[OrderItemSync] = Field(default_factory=list)
+    customer_name: Optional[str] = None
+    customer_email: Optional[EmailStr] = None
+    customer_phone: Optional[str] = None
+    delivery_address: Optional[dict[str, Any]] = None
+    payment_status: Optional[str] = None
+    payment_reference: Optional[str] = None
+    tracking_number: Optional[str] = None
+    tracking_url: Optional[str] = None
+    expected_delivery: Optional[str] = None
+    source: str = "android_app"
+    raw_payload: Optional[dict[str, Any]] = None
+
+
+class OrderItemOut(BaseModel):
+    id: int
+    product_reference: Optional[str] = None
+    backend_product_id: Optional[int] = None
+    name: str
+    qty: int
+    unit_price: float
+    image: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrderSnapshotOut(BaseModel):
+    id: int
+    user_id: int
+    order_reference: str
+    status: str
+    total: float
+    currency: str
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    customer_phone: Optional[str] = None
+    delivery_address: dict[str, Any] = Field(default_factory=dict)
+    payment_status: Optional[str] = None
+    payment_reference: Optional[str] = None
+    tracking_number: Optional[str] = None
+    tracking_url: Optional[str] = None
+    expected_delivery: Optional[str] = None
+    source: str
+    items: List[OrderItemOut] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class OrderStatusUpdate(BaseModel):
+    status: Optional[str] = None
+    payment_status: Optional[str] = None
+    tracking_number: Optional[str] = None
+    tracking_url: Optional[str] = None
+    expected_delivery: Optional[str] = None
+    delivery_address: Optional[dict[str, Any]] = None
+
+
 class OrderSupportCreate(BaseModel):
     order_reference: Optional[str] = None
     request_type: Literal["status", "cancel", "return", "refund", "delivery", "other"] = "status"

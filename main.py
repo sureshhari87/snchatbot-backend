@@ -110,6 +110,8 @@ from models import (
     NotificationSettings,
     LeadCapture,
     OrderSupportRequest,
+    OrderSnapshot,
+    OrderSnapshotItem,
     PasswordResetToken,
     Product,
     ProductCategory,
@@ -162,6 +164,9 @@ from schemas import (
     OrderActionOut,
     OrderActionRequest,
     OrderLookupOut,
+    OrderSnapshotOut,
+    OrderStatusUpdate,
+    OrderSyncRequest,
     OrderSupportCreate,
     OrderSupportOut,
     ProductCreate,
@@ -2169,8 +2174,130 @@ def dump_json_list(value: list[Any]) -> str:
     return json.dumps(value)
 
 
+def local_order_for_user(
+    db: Session,
+    user_id: int,
+    order_reference: str,
+) -> OrderSnapshot | None:
+    return (
+        db.query(OrderSnapshot)
+        .filter(
+            OrderSnapshot.user_id == user_id,
+            OrderSnapshot.order_reference == order_reference,
+        )
+        .first()
+    )
+
+
+def local_order_items(db: Session, order_id: int) -> list[OrderSnapshotItem]:
+    return (
+        db.query(OrderSnapshotItem)
+        .filter(OrderSnapshotItem.order_id == order_id)
+        .order_by(OrderSnapshotItem.id.asc())
+        .all()
+    )
+
+
+def serialize_order_item(item: OrderSnapshotItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "product_reference": item.product_reference,
+        "backend_product_id": item.backend_product_id,
+        "name": item.name,
+        "qty": item.qty,
+        "unit_price": item.unit_price,
+        "image": item.image,
+    }
+
+
+def serialize_order_snapshot(db: Session, order: OrderSnapshot) -> dict[str, Any]:
+    return {
+        "id": order.id,
+        "user_id": order.user_id,
+        "order_reference": order.order_reference,
+        "status": order.status,
+        "total": order.total,
+        "currency": order.currency,
+        "customer_name": order.customer_name,
+        "customer_email": order.customer_email,
+        "customer_phone": order.customer_phone,
+        "delivery_address": load_json_object(order.delivery_address),
+        "payment_status": order.payment_status,
+        "payment_reference": order.payment_reference,
+        "tracking_number": order.tracking_number,
+        "tracking_url": order.tracking_url,
+        "expected_delivery": order.expected_delivery,
+        "source": order.source,
+        "items": [serialize_order_item(item) for item in local_order_items(db, order.id)],
+        "created_at": order.created_at,
+        "updated_at": order.updated_at,
+    }
+
+
+def local_order_lookup_data(db: Session, order: OrderSnapshot) -> dict[str, Any]:
+    serialized = serialize_order_snapshot(db, order)
+    serialized["order_reference"] = order.order_reference
+    for field in ["created_at", "updated_at"]:
+        value = serialized.get(field)
+        if isinstance(value, datetime):
+            serialized[field] = value.isoformat()
+    return serialized
+
+
+def upsert_local_order_snapshot(
+    db: Session,
+    user: User,
+    payload: OrderSyncRequest,
+) -> OrderSnapshot:
+    order = local_order_for_user(db, user.id, payload.order_reference)
+    now = utc_now()
+    if order is None:
+        order = OrderSnapshot(
+            user_id=user.id,
+            order_reference=payload.order_reference,
+            created_at=now,
+        )
+        db.add(order)
+        db.flush()
+
+    order.status = payload.status
+    order.total = payload.total
+    order.currency = payload.currency or "INR"
+    order.customer_name = payload.customer_name
+    order.customer_email = str(payload.customer_email) if payload.customer_email else None
+    order.customer_phone = payload.customer_phone
+    order.delivery_address = dump_json_object(payload.delivery_address or {})
+    order.payment_status = payload.payment_status
+    order.payment_reference = payload.payment_reference
+    order.tracking_number = payload.tracking_number
+    order.tracking_url = payload.tracking_url
+    order.expected_delivery = payload.expected_delivery
+    order.source = payload.source or "android_app"
+    order.raw_payload = dump_json_object(payload.raw_payload or payload.model_dump(mode="json"))
+    order.updated_at = now
+
+    db.query(OrderSnapshotItem).filter(OrderSnapshotItem.order_id == order.id).delete()
+    for item in payload.items:
+        db.add(
+            OrderSnapshotItem(
+                order_id=order.id,
+                product_reference=item.product_id,
+                backend_product_id=item.backend_product_id,
+                name=item.name,
+                qty=item.qty,
+                unit_price=item.price,
+                image=item.image,
+            )
+        )
+
+    return order
+
 def integration_status() -> dict[str, Any]:
     return {
+        "order_backend": {
+            "enabled": True,
+            "source": "local_postgres",
+        },
         "oms": {
             "enabled": oms_is_configured(),
             "base_url_configured": bool(OMS_BASE_URL),
@@ -2254,6 +2381,59 @@ def submit_oms_order_action(
         return "failed", {}, exc.__class__.__name__, None
 
     return "synced", body, None, status_code
+
+
+def lookup_order_backend(
+    db: Session,
+    user: User,
+    order_reference: str,
+) -> tuple[str, dict[str, Any], str | None, int | None]:
+    integration_state, data, error, status_code = lookup_oms_order(order_reference)
+    if integration_state == "synced":
+        return integration_state, data, error, status_code
+
+    local_order = local_order_for_user(db, user.id, order_reference)
+    if local_order:
+        fallback_state = "local" if integration_state == "disabled" else "local_fallback"
+        return fallback_state, local_order_lookup_data(db, local_order), error, status_code
+
+    return integration_state, data, error, status_code
+
+
+def submit_order_action_backend(
+    db: Session,
+    user: User,
+    order_reference: str | None,
+    action: str,
+    payload: dict[str, Any],
+) -> tuple[str, dict[str, Any], str | None, int | None]:
+    integration_state, data, error, status_code = submit_oms_order_action(
+        order_reference,
+        action,
+        payload,
+    )
+    if integration_state == "synced":
+        return integration_state, data, error, status_code
+
+    if order_reference:
+        local_order = local_order_for_user(db, user.id, order_reference)
+        if local_order:
+            local_order.status = f"{action}_requested"
+            local_order.updated_at = utc_now()
+            fallback_state = "local" if integration_state == "capture_only" else "local_fallback"
+            return fallback_state, local_order_lookup_data(db, local_order), error, status_code
+
+    return integration_state, data, error, status_code
+
+
+def order_request_status(integration_state: str) -> str:
+    if integration_state == "synced":
+        return "synced_to_oms"
+    if integration_state in {"local", "local_fallback"}:
+        return "synced_to_order_backend"
+    if integration_state == "failed":
+        return "oms_failed"
+    return "received"
 
 
 def llm_is_configured() -> bool:
@@ -3888,7 +4068,9 @@ async def mobile_config(db: Session = Depends(get_db)):
             "feedback": True,
             "customer_actions": True,
             "order_support_capture": True,
-            "oms_order_lookup": oms_is_configured(),
+            "order_sync": True,
+            "order_backend_lookup": True,
+            "oms_order_lookup": True,
             "llm_grounded_answers": llm_is_configured(),
             "addresses": True,
             "notification_settings": True,
@@ -4615,6 +4797,44 @@ async def admin_update_complaint(
     return complaint
 
 
+@app.get("/admin/orders", response_model=list[OrderSnapshotOut])
+async def admin_list_orders(
+    status_filter: str | None = Query(default=None, alias="status"),
+    source: str | None = None,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    query = db.query(OrderSnapshot).order_by(OrderSnapshot.created_at.desc())
+    if status_filter:
+        query = query.filter(OrderSnapshot.status == status_filter)
+    if source:
+        query = query.filter(OrderSnapshot.source == source)
+    return [serialize_order_snapshot(db, order) for order in query.all()]
+
+
+@app.patch("/admin/orders/{order_id}", response_model=OrderSnapshotOut)
+async def admin_update_order(
+    order_id: int,
+    payload: OrderStatusUpdate,
+    request: Request,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    order = db.query(OrderSnapshot).filter(OrderSnapshot.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+    if "delivery_address" in updates:
+        order.delivery_address = dump_json_object(updates.pop("delivery_address") or {})
+    for field, value in updates.items():
+        setattr(order, field, value)
+    order.updated_at = utc_now()
+    log_admin_action(request, admin_user, "update", "order", order.id)
+    db.commit()
+    db.refresh(order)
+    return serialize_order_snapshot(db, order)
+
 @app.get("/admin/orders/support", response_model=list[OrderSupportOut])
 async def admin_list_order_support_requests(
     limit: int = Query(default=100, ge=1, le=500),
@@ -4910,6 +5130,40 @@ async def list_my_complaints(
     )
 
 
+@app.post("/orders/sync", response_model=OrderSnapshotOut)
+async def sync_order_snapshot(
+    payload: OrderSyncRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    order = upsert_local_order_snapshot(db, current_user, payload)
+    record_integration_event(
+        db,
+        service="order_backend",
+        action="sync",
+        status_value="synced",
+        user_id=current_user.id,
+        reference=payload.order_reference,
+        request_payload=payload.model_dump(mode="json"),
+    )
+    db.commit()
+    db.refresh(order)
+    return serialize_order_snapshot(db, order)
+
+
+@app.get("/orders/my", response_model=list[OrderSnapshotOut])
+async def list_my_orders(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    orders = (
+        db.query(OrderSnapshot)
+        .filter(OrderSnapshot.user_id == current_user.id)
+        .order_by(OrderSnapshot.created_at.desc())
+        .all()
+    )
+    return [serialize_order_snapshot(db, order) for order in orders]
+
 @app.post("/orders/support", response_model=OrderSupportOut)
 async def create_order_support_request(
     payload: OrderSupportCreate,
@@ -4926,14 +5180,18 @@ async def create_order_support_request(
         "source": "chatbot_api",
     }
     if payload.request_type in {"cancel", "return", "refund"}:
-        integration_state, oms_response, integration_error, status_code = submit_oms_order_action(
+        integration_state, oms_response, integration_error, status_code = submit_order_action_backend(
+            db,
+            current_user,
             payload.order_reference,
             payload.request_type,
             oms_payload,
         )
     elif payload.request_type in {"status", "delivery"} and payload.order_reference:
-        integration_state, oms_response, integration_error, status_code = lookup_oms_order(
-            payload.order_reference
+        integration_state, oms_response, integration_error, status_code = lookup_order_backend(
+            db,
+            current_user,
+            payload.order_reference,
         )
 
     order_request = OrderSupportRequest(
@@ -4941,13 +5199,7 @@ async def create_order_support_request(
         order_reference=payload.order_reference,
         request_type=payload.request_type,
         message=payload.message,
-        status=(
-            "synced_to_oms"
-            if integration_state == "synced"
-            else "oms_failed"
-            if integration_state == "failed"
-            else "received"
-        ),
+        status=order_request_status(integration_state),
     )
     db.add(order_request)
     record_integration_event(
@@ -5008,7 +5260,7 @@ async def get_order_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    integration_state, data, error, status_code = lookup_oms_order(order_reference)
+    integration_state, data, error, status_code = lookup_order_backend(db, current_user, order_reference)
     record_integration_event(
         db,
         service="oms",
@@ -5042,8 +5294,8 @@ async def cancel_order(
     db: Session = Depends(get_db),
 ):
     request_payload = payload.model_dump()
-    integration_state, data, error, status_code = submit_oms_order_action(
-        order_reference, "cancel", request_payload
+    integration_state, data, error, status_code = submit_order_action_backend(
+        db, current_user, order_reference, "cancel", request_payload
     )
     record_integration_event(
         db,
@@ -5075,8 +5327,8 @@ async def request_order_return(
     db: Session = Depends(get_db),
 ):
     request_payload = payload.model_dump()
-    integration_state, data, error, status_code = submit_oms_order_action(
-        order_reference, "return", request_payload
+    integration_state, data, error, status_code = submit_order_action_backend(
+        db, current_user, order_reference, "return", request_payload
     )
     record_integration_event(
         db,
@@ -5108,8 +5360,8 @@ async def request_order_refund(
     db: Session = Depends(get_db),
 ):
     request_payload = payload.model_dump()
-    integration_state, data, error, status_code = submit_oms_order_action(
-        order_reference, "refund", request_payload
+    integration_state, data, error, status_code = submit_order_action_backend(
+        db, current_user, order_reference, "refund", request_payload
     )
     record_integration_event(
         db,

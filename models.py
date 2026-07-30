@@ -302,6 +302,44 @@ class OrderSupportRequest(Base):
     created_at = Column(DateTime, default=utc_now, nullable=False)
 
 
+class OrderSnapshot(Base):
+    __tablename__ = "order_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    order_reference = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="placed", index=True)
+    total = Column(Float, nullable=False, default=0)
+    currency = Column(String, nullable=False, default="INR")
+    customer_name = Column(String, nullable=True)
+    customer_email = Column(String, nullable=True)
+    customer_phone = Column(String, nullable=True)
+    delivery_address = Column(Text, nullable=True)
+    payment_status = Column(String, nullable=True, index=True)
+    payment_reference = Column(String, nullable=True, index=True)
+    tracking_number = Column(String, nullable=True)
+    tracking_url = Column(String, nullable=True)
+    expected_delivery = Column(String, nullable=True)
+    source = Column(String, nullable=False, default="android_app", index=True)
+    raw_payload = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class OrderSnapshotItem(Base):
+    __tablename__ = "order_snapshot_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("order_snapshots.id"), nullable=False, index=True)
+    product_reference = Column(String, nullable=True, index=True)
+    backend_product_id = Column(Integer, nullable=True, index=True)
+    name = Column(String, nullable=False)
+    qty = Column(Integer, nullable=False, default=1)
+    unit_price = Column(Float, nullable=False, default=0)
+    image = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+
+
 class LeadCapture(Base):
     __tablename__ = "lead_captures"
 
