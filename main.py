@@ -124,6 +124,8 @@ from models import (
     WishlistItem,
     utc_now,
 )
+from sona_ai.main import app as sona_ai_app
+
 from schemas import (
     AppConfigCreate,
     AppConfigOut,
@@ -575,6 +577,8 @@ app = FastAPI(
     debug=APP_DEBUG,
     lifespan=lifespan,
 )
+
+app.mount('/sona', sona_ai_app)
 
 limiter = Limiter(key_func=get_remote_address, enabled=not is_testing())
 LOGIN_FAILURES: dict[str, list[datetime]] = {}
