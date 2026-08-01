@@ -604,6 +604,10 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 
+class FirebaseAuthRequest(BaseModel):
+    id_token: str = Field(min_length=20)
+
+
 class UserOut(BaseModel):
     id: int
     username: str

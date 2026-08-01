@@ -106,6 +106,9 @@ Email secrets for registration verification and password reset:
 
 Production integration secrets:
 
+- `FIREBASE_PROJECT_ID` Firebase project ID used to verify Android Firebase ID tokens
+- `FIREBASE_AUTH_ENABLED` enables `POST /auth/firebase`; defaults to enabled when `FIREBASE_PROJECT_ID` is set
+- `FIREBASE_REQUIRE_EMAIL_VERIFIED` blocks Firebase token exchange unless Firebase marks the email verified
 - `OMS_ENABLED` enables real OMS calls when `1`
 - `OMS_BASE_URL` base URL for your order-management API
 - `OMS_API_KEY` bearer token for the OMS API
@@ -335,12 +338,12 @@ python -m pytest tests\test_live_api.py -q
 
 ## Android integration contract
 
-Use `GET /mobile/config` first when the Android app starts. It exposes backend capabilities, the chat response fields the app should expect, and public non-secret config values.
+Use `GET /mobile/config` first when the Android app starts. It exposes backend capabilities, including `firebase_token_auth`, the chat response fields the app should expect, and public non-secret config values.
 
 Important mobile flows:
 
 - Browse catalogue: `GET /products`, `GET /products/{product_id}`, `GET /products/{product_id}/similar`, `GET /featured-products`, `GET /seasonal-collections`, `GET /categories`
-- Auth session: `POST /login`, `POST /refresh`, `POST /logout`, `POST /logout-all-devices`, `GET /me`
+- Auth session: Firebase app login exchanges through `POST /auth/firebase`; fallback password auth still supports `POST /login`, `POST /refresh`, `POST /logout`, `POST /logout-all-devices`, `GET /me`
 - User account: address book, notification settings, wishlist, save-for-later, and saved chat sessions
 - Chat: `POST /chat` returns `intent`, `confidence`, `answer_source`, `tool_calls`, `guardrails`, `applied_filters`, `result_count`, `suggested_next_questions`, `lead_captured`, and optional `handoff`
 - Customer actions: wishlist, save-for-later, callback requests, appointments, custom-order requests, complaints, and order-support capture
