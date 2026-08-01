@@ -35,12 +35,12 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
-    ALERT_ERROR_THRESHOLD,
-    ALGORITHM,
     ADMIN_BOOTSTRAP_EMAIL,
     ADMIN_BOOTSTRAP_ENABLED,
     ADMIN_BOOTSTRAP_PASSWORD,
     ADMIN_BOOTSTRAP_USERNAME,
+    ALERT_ERROR_THRESHOLD,
+    ALGORITHM,
     APP_DEBUG,
     APP_ENV,
     BREVO_API_KEY,
@@ -107,11 +107,11 @@ from models import (
     ExternalIntegrationEvent,
     FeaturedItem,
     KnowledgeBaseItem,
-    NotificationSettings,
     LeadCapture,
-    OrderSupportRequest,
+    NotificationSettings,
     OrderSnapshot,
     OrderSnapshotItem,
+    OrderSupportRequest,
     PasswordResetToken,
     Product,
     ProductCategory,
@@ -124,8 +124,6 @@ from models import (
     WishlistItem,
     utc_now,
 )
-from sona_ai.main import app as sona_ai_app
-
 from schemas import (
     AppConfigCreate,
     AppConfigOut,
@@ -137,9 +135,9 @@ from schemas import (
     CategoryCreate,
     CategoryOut,
     CategoryUpdate,
+    ChatMessageOut,
     ChatRequest,
     ChatResponse,
-    ChatMessageOut,
     ChatSessionDetailOut,
     ChatSessionOut,
     ComplaintCreate,
@@ -168,9 +166,9 @@ from schemas import (
     OrderLookupOut,
     OrderSnapshotOut,
     OrderStatusUpdate,
-    OrderSyncRequest,
     OrderSupportCreate,
     OrderSupportOut,
+    OrderSyncRequest,
     ProductCreate,
     ProductOut,
     ProductUpdate,
@@ -191,6 +189,7 @@ from schemas import (
     UserRegister,
     VerifyEmailRequest,
 )
+from sona_ai.main import app as sona_ai_app
 
 
 def configure_json_logger() -> logging.Logger:
@@ -4018,8 +4017,8 @@ async def seasonal_collections(db: Session = Depends(get_db)):
         db.query(SeasonalCollection)
         .filter(
             SeasonalCollection.is_active == True,
-            or_(SeasonalCollection.starts_at == None, SeasonalCollection.starts_at <= now),
-            or_(SeasonalCollection.ends_at == None, SeasonalCollection.ends_at >= now),
+            or_(SeasonalCollection.starts_at.is_(None), SeasonalCollection.starts_at <= now),
+            or_(SeasonalCollection.ends_at.is_(None), SeasonalCollection.ends_at >= now),
         )
         .order_by(SeasonalCollection.starts_at.asc(), SeasonalCollection.id.asc())
         .all()

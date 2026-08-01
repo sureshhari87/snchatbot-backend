@@ -6,11 +6,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .engine import OpenAIClient, personalize, recommend, search_catalog
-from .security import AuthenticatedUser, ai_rate_limit, concept_rate_limit
 from .models import (
-    ChatRequest, ChatResponse, ConceptRequest, ConceptResponse, PersonalizedRequest,
-    Product, RecommendationRequest, RecommendationResponse, SearchRequest, SearchResult,
+    ChatRequest,
+    ChatResponse,
+    ConceptRequest,
+    ConceptResponse,
+    PersonalizedRequest,
+    RecommendationRequest,
+    RecommendationResponse,
+    SearchRequest,
+    SearchResult,
 )
+from .security import AuthenticatedUser, ai_rate_limit, concept_rate_limit
 
 settings = get_settings()
 ai = OpenAIClient(settings)

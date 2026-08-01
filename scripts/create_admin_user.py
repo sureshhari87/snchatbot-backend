@@ -9,7 +9,6 @@ from config import PASSWORD_MIN_LENGTH
 from database import SessionLocal
 from models import User
 
-
 password_hash = PasswordHash.recommended()
 
 

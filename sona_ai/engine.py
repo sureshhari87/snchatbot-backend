@@ -8,7 +8,6 @@ import httpx
 from .config import Settings
 from .models import Product, SearchRequest
 
-
 PRICE_UNDER = re.compile(r"(?:under|below|up to|within)\s*(?:rs\.?|inr|₹)?\s*([\d,]+)", re.I)
 PRICE_OVER = re.compile(r"(?:over|above|from)\s*(?:rs\.?|inr|₹)?\s*([\d,]+)", re.I)
 KNOWN_METALS = ("gold", "rose gold", "white gold", "silver", "platinum", "diamond")

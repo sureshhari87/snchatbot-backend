@@ -9,7 +9,6 @@ from jose import JWTError, jwt
 
 from .config import Settings, get_settings
 
-
 bearer = HTTPBearer(auto_error=False)
 
 
