@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("APP_ENV", "test")
 os.environ["TESTING"] = "1"
 os.environ.setdefault("RUN_MIGRATIONS_ON_STARTUP", "0")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-for-automated-tests-only")
 
 import uuid
 
@@ -22,6 +23,7 @@ from main import (
     seed_products,
 )
 from models import User
+from sona_ai.security import limiter as ai_limiter
 
 
 @pytest.fixture(scope="function")
@@ -56,6 +58,7 @@ def db(test_engine):
 
 @pytest.fixture(scope="function")
 def client(db):
+    ai_limiter.reset()
     LOGIN_FAILURES.clear()
     reset_observability_metrics()
 
@@ -66,6 +69,7 @@ def client(db):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+    ai_limiter.reset()
     LOGIN_FAILURES.clear()
     reset_observability_metrics()
 
