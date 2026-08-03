@@ -153,6 +153,10 @@ class Settings:
     llm_model: str
     llm_timeout_seconds: int
     llm_max_tokens: int
+    firebase_project_id: str | None
+    firebase_auth_enabled: bool
+    firebase_require_email_verified: bool
+    firebase_certs_url: str
     monitoring_webhook_url: str | None
     monitoring_webhook_timeout_seconds: int
     sentry_dsn: str | None
@@ -224,6 +228,7 @@ def build_settings() -> Settings:
         or ("https://api.openai.com/v1" if llm_api_key else None)
     )
     llm_model = get_str("LLM_MODEL") or get_str("OPENAI_MODEL", "gpt-4o-mini")
+    firebase_project_id = get_str("FIREBASE_PROJECT_ID")
     frontend_reset_url = get_str("FRONTEND_RESET_URL", "http://localhost:3000/reset-password")
     frontend_verify_url = get_str("FRONTEND_VERIFY_URL", "http://localhost:3000/verify-email")
     cors_origins = normalize_cors_origins(
@@ -290,6 +295,14 @@ def build_settings() -> Settings:
         llm_model=llm_model,
         llm_timeout_seconds=get_int("LLM_TIMEOUT_SECONDS", 20),
         llm_max_tokens=get_int("LLM_MAX_TOKENS", 350),
+        firebase_project_id=firebase_project_id,
+        firebase_auth_enabled=get_bool("FIREBASE_AUTH_ENABLED", bool(firebase_project_id)),
+        firebase_require_email_verified=get_bool("FIREBASE_REQUIRE_EMAIL_VERIFIED", False),
+        firebase_certs_url=get_str(
+            "FIREBASE_CERTS_URL",
+            "https://www.googleapis.com/robot/v1/metadata/x509/"
+            "securetoken@system.gserviceaccount.com",
+        ),
         monitoring_webhook_url=get_str("MONITORING_WEBHOOK_URL"),
         monitoring_webhook_timeout_seconds=get_int("MONITORING_WEBHOOK_TIMEOUT_SECONDS", 5),
         sentry_dsn=get_str("SENTRY_DSN"),
@@ -362,6 +375,10 @@ LLM_API_KEY = settings.llm_api_key
 LLM_MODEL = settings.llm_model
 LLM_TIMEOUT_SECONDS = settings.llm_timeout_seconds
 LLM_MAX_TOKENS = settings.llm_max_tokens
+FIREBASE_PROJECT_ID = settings.firebase_project_id
+FIREBASE_AUTH_ENABLED = settings.firebase_auth_enabled
+FIREBASE_REQUIRE_EMAIL_VERIFIED = settings.firebase_require_email_verified
+FIREBASE_CERTS_URL = settings.firebase_certs_url
 MONITORING_WEBHOOK_URL = settings.monitoring_webhook_url
 MONITORING_WEBHOOK_TIMEOUT_SECONDS = settings.monitoring_webhook_timeout_seconds
 SENTRY_DSN = settings.sentry_dsn

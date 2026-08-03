@@ -59,6 +59,10 @@ from config import (
     EMAIL_USE_TLS,
     EMAIL_USERNAME,
     EMAIL_VERIFICATION_EXPIRE_MINUTES,
+    FIREBASE_AUTH_ENABLED,
+    FIREBASE_CERTS_URL,
+    FIREBASE_PROJECT_ID,
+    FIREBASE_REQUIRE_EMAIL_VERIFIED,
     FRONTEND_RESET_URL,
     FRONTEND_VERIFY_URL,
     HTTPS_REDIRECT,
@@ -150,6 +154,7 @@ from schemas import (
     FeaturedItemOut,
     FeaturedItemUpdate,
     FeedbackCreate,
+    FirebaseAuthRequest,
     ForgotPasswordRequest,
     HandoffInfo,
     InventoryUpdate,
@@ -464,7 +469,9 @@ def apply_sentry_scope(scope: Any, request: Request | None, extra: dict[str, Any
 
 
 def sentry_scope_context(sentry_sdk: Any):
-    scope_factory = getattr(sentry_sdk, "new_scope", None) or getattr(sentry_sdk, "push_scope", None)
+    scope_factory = getattr(sentry_sdk, "new_scope", None) or getattr(
+        sentry_sdk, "push_scope", None
+    )
     if scope_factory is None:
         return None
     return scope_factory()
@@ -577,7 +584,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.mount('/sona', sona_ai_app)
+app.mount("/sona", sona_ai_app)
 
 limiter = Limiter(key_func=get_remote_address, enabled=not is_testing())
 LOGIN_FAILURES: dict[str, list[datetime]] = {}
@@ -1113,6 +1120,125 @@ def store_refresh_token(
     return token_row
 
 
+def firebase_auth_is_configured() -> bool:
+    return FIREBASE_AUTH_ENABLED and bool(FIREBASE_PROJECT_ID)
+
+
+_FIREBASE_CERT_CACHE: dict[str, Any] = {"certs": {}, "expires_at": 0.0}
+
+
+def firebase_cache_max_age(cache_control: str) -> int:
+    match = re.search(r"max-age=(\d+)", cache_control or "")
+    if not match:
+        return 3600
+    return max(int(match.group(1)), 60)
+
+
+def fetch_firebase_public_certs(force_refresh: bool = False) -> dict[str, str]:
+    now = time.time()
+    cached_certs = _FIREBASE_CERT_CACHE.get("certs") or {}
+    if (
+        cached_certs
+        and not force_refresh
+        and now < float(_FIREBASE_CERT_CACHE.get("expires_at") or 0)
+    ):
+        return dict(cached_certs)
+
+    request = urllib.request.Request(
+        FIREBASE_CERTS_URL,
+        headers={"Accept": "application/json", "User-Agent": "snchatbot-backend/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw_body = response.read().decode("utf-8")
+            certs = json.loads(raw_body)
+            cache_control = response.headers.get("Cache-Control", "")
+    except Exception as exc:
+        log_event(
+            "auth.firebase_certs_fetch_failed",
+            error_type=exc.__class__.__name__,
+        )
+        raise HTTPException(
+            status_code=503, detail="Firebase auth is temporarily unavailable"
+        ) from exc
+
+    if not isinstance(certs, dict) or not certs:
+        raise HTTPException(status_code=503, detail="Firebase auth certificates are unavailable")
+
+    _FIREBASE_CERT_CACHE["certs"] = certs
+    _FIREBASE_CERT_CACHE["expires_at"] = now + firebase_cache_max_age(cache_control)
+    return dict(certs)
+
+
+def verify_firebase_id_token(id_token: str) -> dict[str, Any]:
+    if not firebase_auth_is_configured():
+        raise HTTPException(status_code=503, detail="Firebase auth is not configured")
+
+    try:
+        header = jwt.get_unverified_header(id_token)
+        key_id = header.get("kid")
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token") from exc
+
+    certs = fetch_firebase_public_certs()
+    cert = certs.get(key_id) if key_id else None
+    if cert is None and key_id:
+        certs = fetch_firebase_public_certs(force_refresh=True)
+        cert = certs.get(key_id)
+    if cert is None:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+
+    try:
+        payload = jwt.decode(
+            id_token,
+            cert,
+            algorithms=["RS256"],
+            audience=FIREBASE_PROJECT_ID,
+            issuer=f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}",
+        )
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token") from exc
+
+    if payload.get("aud") != FIREBASE_PROJECT_ID:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+    if payload.get("iss") != f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}":
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+    if not payload.get("sub"):
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+    if not payload.get("email"):
+        raise HTTPException(status_code=400, detail="Firebase token does not include an email")
+    if FIREBASE_REQUIRE_EMAIL_VERIFIED and payload.get("email_verified") is not True:
+        raise HTTPException(status_code=403, detail="Please verify your Firebase email first")
+
+    return payload
+
+
+def firebase_username_for_email(db: Session, email: str, firebase_uid: str) -> str:
+    base = re.sub(r"[^a-z0-9_]+", "_", email.split("@", 1)[0].lower()).strip("_")
+    base = (base or "firebase_user")[:40]
+    if not db.query(User).filter(User.username == base).first():
+        return base
+
+    suffix = re.sub(r"[^a-zA-Z0-9]+", "", firebase_uid)[:8] or secrets.token_hex(4)
+    candidate = f"{base}_{suffix}"[:64]
+    if not db.query(User).filter(User.username == candidate).first():
+        return candidate
+
+    for index in range(2, 1000):
+        candidate = f"{base}_{suffix}_{index}"[:64]
+        if not db.query(User).filter(User.username == candidate).first():
+            return candidate
+    return f"firebase_user_{secrets.token_hex(8)}"
+
+
+def issue_token_pair(db: Session, user: User, request: Request) -> TokenResponse:
+    access_token = create_access_token({"sub": user.email})
+    refresh_token, token_jti, family_id = build_refresh_token_for_user(user.email)
+    store_refresh_token(db, user.id, refresh_token, token_jti, family_id, request)
+    db.commit()
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
 def resend_is_configured() -> bool:
     return bool(RESEND_API_KEY and EMAIL_FROM)
 
@@ -1328,9 +1454,7 @@ def url_with_token(base_url: str, token: str) -> str:
     parsed_url = urllib.parse.urlsplit(base_url)
     query_params = urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
     query_params.append(("token", token))
-    return urllib.parse.urlunsplit(
-        parsed_url._replace(query=urllib.parse.urlencode(query_params))
-    )
+    return urllib.parse.urlunsplit(parsed_url._replace(query=urllib.parse.urlencode(query_params)))
 
 
 def send_verification_email(to_email: str, verify_link: str) -> None:
@@ -1509,7 +1633,9 @@ def reset_password_form_html(token: str) -> HTMLResponse:
     return HTMLResponse(content=content)
 
 
-def verify_email_token(db: Session, raw_token: str, request: Request | None = None) -> MessageResponse:
+def verify_email_token(
+    db: Session, raw_token: str, request: Request | None = None
+) -> MessageResponse:
     token_hash = hash_opaque_token(raw_token)
 
     row = (
@@ -1710,9 +1836,7 @@ def clear_default_addresses(db: Session, user_id: int) -> None:
 
 def notification_settings_for_user(db: Session, user_id: int) -> NotificationSettings:
     settings_row = (
-        db.query(NotificationSettings)
-        .filter(NotificationSettings.user_id == user_id)
-        .first()
+        db.query(NotificationSettings).filter(NotificationSettings.user_id == user_id).first()
     )
     if settings_row:
         return settings_row
@@ -2295,6 +2419,7 @@ def upsert_local_order_snapshot(
 
     return order
 
+
 def integration_status() -> dict[str, Any]:
     return {
         "order_backend": {
@@ -2305,6 +2430,11 @@ def integration_status() -> dict[str, Any]:
             "enabled": oms_is_configured(),
             "base_url_configured": bool(OMS_BASE_URL),
             "api_key_configured": bool(OMS_API_KEY),
+        },
+        "firebase_auth": {
+            "enabled": firebase_auth_is_configured(),
+            "project_id_configured": bool(FIREBASE_PROJECT_ID),
+            "require_email_verified": FIREBASE_REQUIRE_EMAIL_VERIFIED,
         },
         "llm": {
             "enabled": LLM_ENABLED and bool(LLM_BASE_URL and LLM_API_KEY),
@@ -2492,7 +2622,9 @@ def relevant_knowledge_items(
     candidates = (
         db.query(KnowledgeBaseItem)
         .filter(KnowledgeBaseItem.is_active == True)
-        .order_by(KnowledgeBaseItem.kind.asc(), KnowledgeBaseItem.title.asc(), KnowledgeBaseItem.id.asc())
+        .order_by(
+            KnowledgeBaseItem.kind.asc(), KnowledgeBaseItem.title.asc(), KnowledgeBaseItem.id.asc()
+        )
         .all()
     )
     scored_items: list[tuple[int, KnowledgeBaseItem]] = []
@@ -2706,11 +2838,15 @@ def is_unmatched_query(intent: str, result_count: int, filters: dict[str, Any]) 
     return intent == "unmatched" or (result_count == 0 and not has_product_search_signal(filters))
 
 
-def is_low_conversion_search(result_count: int, filters: dict[str, Any], lead_captured: bool) -> bool:
+def is_low_conversion_search(
+    result_count: int, filters: dict[str, Any], lead_captured: bool
+) -> bool:
     return has_product_search_signal(filters) and not lead_captured and 0 < result_count <= 2
 
 
-def chat_confidence(intent: str, result_count: int, filters: dict[str, Any], unmatched: bool) -> float:
+def chat_confidence(
+    intent: str, result_count: int, filters: dict[str, Any], unmatched: bool
+) -> float:
     if unmatched:
         return 0.35
     if result_count > 0 and has_product_search_signal(filters):
@@ -2882,9 +3018,9 @@ def chat_analytics_snapshot(db: Session, limit: int = 500) -> dict[str, Any]:
     unmatched_queries = [
         analytics_row_summary(row) for row in rows if row.unmatched or row.result_count == 0
     ][:10]
-    low_conversion_searches = [
-        analytics_row_summary(row) for row in rows if row.low_conversion
-    ][:10]
+    low_conversion_searches = [analytics_row_summary(row) for row in rows if row.low_conversion][
+        :10
+    ]
 
     return {
         "total_interactions": len(rows),
@@ -3436,6 +3572,9 @@ def dependency_snapshot(db: Session) -> dict[str, Any]:
         "database": database_dependency_status(db),
         "email": email_dependency_status(),
         "oms": optional_service_status(OMS_ENABLED, bool(OMS_BASE_URL), "oms"),
+        "firebase_auth": optional_service_status(
+            FIREBASE_AUTH_ENABLED, bool(FIREBASE_PROJECT_ID), "firebase_auth"
+        ),
         "llm": optional_service_status(LLM_ENABLED, bool(LLM_BASE_URL and LLM_API_KEY), "llm"),
         "monitoring": optional_service_status(
             bool(MONITORING_WEBHOOK_URL or SENTRY_DSN),
@@ -3578,6 +3717,65 @@ async def login(
         access_token=access_token,
         refresh_token=refresh_token,
     )
+
+
+@app.post("/auth/firebase", response_model=TokenResponse)
+@limiter.limit("10/minute")
+async def firebase_auth(
+    request: Request,
+    payload: FirebaseAuthRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        firebase_payload = verify_firebase_id_token(payload.id_token)
+    except HTTPException as exc:
+        log_event(
+            "auth.firebase_login_failed",
+            request,
+            success=False,
+            status_code=exc.status_code,
+            reason=str(exc.detail),
+        )
+        raise
+
+    email = str(firebase_payload["email"]).strip().lower()
+    firebase_uid = str(firebase_payload["sub"])
+    user = db.query(User).filter(User.email == email).first()
+    created = False
+
+    if user is None:
+        user = User(
+            username=firebase_username_for_email(db, email, firebase_uid),
+            email=email,
+            hashed_password=hash_password(generate_opaque_token()),
+            is_verified=True,
+            is_admin=False,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        created = True
+        log_event(
+            "auth.firebase_user_created",
+            request,
+            user_id=user.id,
+            email=user.email,
+        )
+    elif not user.is_verified:
+        user.is_verified = True
+        db.commit()
+        db.refresh(user)
+
+    token_response = issue_token_pair(db, user, request)
+    log_event(
+        "auth.firebase_login_success",
+        request,
+        user_id=user.id,
+        email=user.email,
+        success=True,
+        created=created,
+    )
+    return token_response
 
 
 @app.post("/refresh", response_model=TokenResponse)
@@ -4063,6 +4261,7 @@ async def mobile_config(db: Session = Depends(get_db)):
         "capabilities": {
             "auth": True,
             "refresh_token_rotation": True,
+            "firebase_token_auth": firebase_auth_is_configured(),
             "chat": True,
             "chat_session_memory": True,
             "product_search": True,
@@ -4686,12 +4885,7 @@ async def admin_list_callback_requests(
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
 ):
-    return (
-        db.query(CallbackRequest)
-        .order_by(CallbackRequest.created_at.desc())
-        .limit(limit)
-        .all()
-    )
+    return db.query(CallbackRequest).order_by(CallbackRequest.created_at.desc()).limit(limit).all()
 
 
 @app.patch("/admin/request-callbacks/{callback_id}", response_model=CallbackRequestOut)
@@ -4732,9 +4926,7 @@ async def admin_update_appointment(
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
 ):
-    appointment = get_record_or_404(
-        db, AppointmentBooking, appointment_id, "Appointment not found"
-    )
+    appointment = get_record_or_404(db, AppointmentBooking, appointment_id, "Appointment not found")
     appointment.status = status_in.status
     db.commit()
     db.refresh(appointment)
@@ -4780,12 +4972,7 @@ async def admin_list_complaints(
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
 ):
-    return (
-        db.query(ComplaintTicket)
-        .order_by(ComplaintTicket.created_at.desc())
-        .limit(limit)
-        .all()
-    )
+    return db.query(ComplaintTicket).order_by(ComplaintTicket.created_at.desc()).limit(limit).all()
 
 
 @app.patch("/admin/complaints/{ticket_id}", response_model=ComplaintOut)
@@ -4841,6 +5028,7 @@ async def admin_update_order(
     db.commit()
     db.refresh(order)
     return serialize_order_snapshot(db, order)
+
 
 @app.get("/admin/orders/support", response_model=list[OrderSupportOut])
 async def admin_list_order_support_requests(
@@ -5171,6 +5359,7 @@ async def list_my_orders(
     )
     return [serialize_order_snapshot(db, order) for order in orders]
 
+
 @app.post("/orders/support", response_model=OrderSupportOut)
 async def create_order_support_request(
     payload: OrderSupportCreate,
@@ -5187,12 +5376,14 @@ async def create_order_support_request(
         "source": "chatbot_api",
     }
     if payload.request_type in {"cancel", "return", "refund"}:
-        integration_state, oms_response, integration_error, status_code = submit_order_action_backend(
-            db,
-            current_user,
-            payload.order_reference,
-            payload.request_type,
-            oms_payload,
+        integration_state, oms_response, integration_error, status_code = (
+            submit_order_action_backend(
+                db,
+                current_user,
+                payload.order_reference,
+                payload.request_type,
+                oms_payload,
+            )
         )
     elif payload.request_type in {"status", "delivery"} and payload.order_reference:
         integration_state, oms_response, integration_error, status_code = lookup_order_backend(
@@ -5267,7 +5458,9 @@ async def get_order_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    integration_state, data, error, status_code = lookup_order_backend(db, current_user, order_reference)
+    integration_state, data, error, status_code = lookup_order_backend(
+        db, current_user, order_reference
+    )
     record_integration_event(
         db,
         service="oms",
