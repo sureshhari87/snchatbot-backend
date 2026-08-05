@@ -1205,12 +1205,29 @@ def verify_firebase_id_token(id_token: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="Invalid Firebase token")
     if not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Invalid Firebase token")
-    if not payload.get("email"):
-        raise HTTPException(status_code=400, detail="Firebase token does not include an email")
-    if FIREBASE_REQUIRE_EMAIL_VERIFIED and payload.get("email_verified") is not True:
+    if not payload.get("email") and not payload.get("phone_number"):
+        raise HTTPException(
+            status_code=400,
+            detail="Firebase token does not include an email or phone number",
+        )
+    if (
+        payload.get("email")
+        and FIREBASE_REQUIRE_EMAIL_VERIFIED
+        and payload.get("email_verified") is not True
+    ):
         raise HTTPException(status_code=403, detail="Please verify your Firebase email first")
 
     return payload
+
+
+def firebase_email_for_identity(payload: dict[str, Any]) -> str:
+    email = str(payload.get("email") or "").strip().lower()
+    if email:
+        return email
+
+    firebase_uid = str(payload["sub"])
+    stable_id = hashlib.sha256(firebase_uid.encode("utf-8")).hexdigest()[:24]
+    return f"phone_{stable_id}@phone.sona.invalid"
 
 
 def firebase_username_for_email(db: Session, email: str, firebase_uid: str) -> str:
@@ -3738,7 +3755,7 @@ async def firebase_auth(
         )
         raise
 
-    email = str(firebase_payload["email"]).strip().lower()
+    email = firebase_email_for_identity(firebase_payload)
     firebase_uid = str(firebase_payload["sub"])
     user = db.query(User).filter(User.email == email).first()
     created = False
