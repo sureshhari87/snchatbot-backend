@@ -64,6 +64,39 @@ def test_firebase_auth_reuses_existing_email_and_marks_verified(client, db, monk
     assert users[0].is_verified is True
 
 
+def test_firebase_auth_creates_and_reuses_phone_only_customer(client, db, monkeypatch):
+    import main
+
+    payload = {
+        "aud": "sona-test-firebase-project",
+        "iss": "https://securetoken.google.com/sona-test-firebase-project",
+        "sub": "firebasePhoneUid123",
+        "phone_number": "+919876543210",
+    }
+    monkeypatch.setattr(main, "verify_firebase_id_token", lambda token: payload)
+
+    first = client.post("/auth/firebase", json={"id_token": "firebase-phone-token-one"})
+    second = client.post("/auth/firebase", json={"id_token": "firebase-phone-token-two"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    users = db.query(User).filter(User.email.like("phone_%@phone.sona.invalid")).all()
+    assert len(users) == 1
+    assert users[0].is_verified is True
+    assert users[0].is_admin is False
+
+
+def test_firebase_phone_identity_is_stable_and_does_not_expose_phone_number():
+    import main
+
+    first = main.firebase_email_for_identity({"sub": "uid-one"})
+    second = main.firebase_email_for_identity({"sub": "uid-one"})
+
+    assert first == second
+    assert first.endswith("@phone.sona.invalid")
+    assert "uid-one" not in first
+
+
 def test_firebase_auth_validation_failure_returns_401(client, monkeypatch):
     import main
 

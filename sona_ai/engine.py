@@ -8,8 +8,14 @@ import httpx
 from .config import Settings
 from .models import Product, SearchRequest
 
-PRICE_UNDER = re.compile(r"(?:under|below|up to|within)\s*(?:rs\.?|inr|₹)?\s*([\d,]+)", re.I)
-PRICE_OVER = re.compile(r"(?:over|above|from)\s*(?:rs\.?|inr|₹)?\s*([\d,]+)", re.I)
+PRICE_UNDER = re.compile(
+    r"(?:under|below|up to|within)\D{0,12}([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?",
+    re.I,
+)
+PRICE_OVER = re.compile(
+    r"(?:over|above|from)\D{0,12}([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?",
+    re.I,
+)
 KNOWN_METALS = ("gold", "rose gold", "white gold", "silver", "platinum", "diamond")
 KNOWN_CATEGORIES = ("ring", "necklace", "earring", "bracelet", "bangle", "pendant", "chain")
 STOP_WORDS = {"a", "an", "and", "for", "me", "show", "find", "jewellery", "jewelry", "the", "with"}
@@ -28,14 +34,26 @@ def parse_query(request: SearchRequest) -> dict[str, Any]:
     return {
         "category": category,
         "metal": metal,
-        "min_price": request.min_price if request.min_price is not None else (_money(over.group(1)) if over else None),
-        "max_price": request.max_price if request.max_price is not None else (_money(under.group(1)) if under else None),
+        "min_price": request.min_price
+        if request.min_price is not None
+        else (_money(over.group(1), over.group(2)) if over else None),
+        "max_price": request.max_price
+        if request.max_price is not None
+        else (_money(under.group(1), under.group(2)) if under else None),
         "in_stock_only": request.in_stock_only,
     }
 
 
-def _money(value: str) -> float:
-    return float(value.replace(",", ""))
+def _money(value: str, unit: str | None = None) -> float:
+    amount = float(value.replace(",", ""))
+    normalized_unit = (unit or "").lower()
+    if normalized_unit in {"crore", "cr"}:
+        return amount * 10_000_000
+    if normalized_unit in {"lakh", "lac"}:
+        return amount * 100_000
+    if normalized_unit in {"k", "thousand"}:
+        return amount * 1_000
+    return amount
 
 
 def search_catalog(request: SearchRequest) -> tuple[list[Product], dict[str, Any]]:
