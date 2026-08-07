@@ -99,6 +99,7 @@ from config import (
 )
 from database import Base, SessionLocal, engine
 from models import (
+    AiGeneratedConcept,
     AppConfigEntry,
     AppointmentBooking,
     CallbackRequest,
@@ -129,6 +130,8 @@ from models import (
     utc_now,
 )
 from schemas import (
+    AiGeneratedConceptCreate,
+    AiGeneratedConceptOut,
     AppConfigCreate,
     AppConfigOut,
     AppConfigUpdate,
@@ -2299,6 +2302,29 @@ def load_json_list(raw_value: str | None) -> list[Any]:
 
 def dump_json_list(value: list[Any]) -> str:
     return json.dumps(value)
+
+
+def ai_generated_concept_out(concept: AiGeneratedConcept) -> AiGeneratedConceptOut:
+    return AiGeneratedConceptOut(
+        id=concept.id,
+        concept_id=concept.concept_id,
+        user_id=concept.user_id,
+        name=concept.name,
+        source_prompt=concept.source_prompt,
+        design_brief=concept.design_brief,
+        materials=[str(item) for item in load_json_list(concept.materials)],
+        craft_notes=[str(item) for item in load_json_list(concept.craft_notes)],
+        image_base64=concept.image_base64,
+        image_mime_type=concept.image_mime_type,
+        answer_source=concept.answer_source,
+        category=concept.category,
+        metal=concept.metal,
+        gemstones=[str(item) for item in load_json_list(concept.gemstones)],
+        budget=concept.budget,
+        related_product_ids=[str(item) for item in load_json_list(concept.related_product_ids)],
+        status=concept.status,
+        created_at=concept.created_at,
+    )
 
 
 def local_order_for_user(
@@ -4962,6 +4988,21 @@ async def admin_update_custom_order(
     return custom_order
 
 
+@app.get("/admin/ai-concepts", response_model=list[AiGeneratedConceptOut])
+async def admin_list_ai_concepts(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    concepts = (
+        db.query(AiGeneratedConcept)
+        .order_by(AiGeneratedConcept.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [ai_generated_concept_out(concept) for concept in concepts]
+
+
 @app.get("/admin/complaints", response_model=list[ComplaintOut])
 async def admin_list_complaints(
     limit: int = Query(default=100, ge=1, le=500),
@@ -5279,6 +5320,80 @@ async def list_my_custom_orders(
         .order_by(CustomOrderRequest.created_at.desc())
         .all()
     )
+
+
+@app.post("/ai-concepts", response_model=AiGeneratedConceptOut)
+async def save_ai_generated_concept(
+    payload: AiGeneratedConceptCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    existing = (
+        db.query(AiGeneratedConcept)
+        .filter(
+            AiGeneratedConcept.user_id == current_user.id,
+            AiGeneratedConcept.concept_id == payload.concept_id,
+        )
+        .first()
+    )
+
+    fields = {
+        "name": payload.name,
+        "source_prompt": payload.source_prompt,
+        "design_brief": payload.design_brief,
+        "materials": dump_json_list(payload.materials),
+        "craft_notes": dump_json_list(payload.craft_notes),
+        "image_base64": payload.image_base64,
+        "image_mime_type": payload.image_mime_type,
+        "answer_source": payload.answer_source,
+        "category": payload.category,
+        "metal": payload.metal,
+        "gemstones": dump_json_list(payload.gemstones),
+        "budget": payload.budget,
+        "related_product_ids": dump_json_list(payload.related_product_ids),
+    }
+
+    created_new = existing is None
+    if existing:
+        for key, value in fields.items():
+            setattr(existing, key, value)
+        concept = existing
+    else:
+        concept = AiGeneratedConcept(
+            concept_id=payload.concept_id,
+            user_id=current_user.id,
+            status="generated",
+            **fields,
+        )
+        db.add(concept)
+
+    if created_new:
+        create_customer_action_lead(
+            db,
+            current_user,
+            source="ai_concept",
+            intent="custom_order",
+            message=f"{payload.name}: {payload.design_brief}",
+            session_id=payload.concept_id,
+        )
+    db.commit()
+    db.refresh(concept)
+    return ai_generated_concept_out(concept)
+
+
+@app.get("/ai-concepts/my", response_model=list[AiGeneratedConceptOut])
+async def list_my_ai_generated_concepts(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    concepts = (
+        db.query(AiGeneratedConcept)
+        .filter(AiGeneratedConcept.user_id == current_user.id)
+        .order_by(AiGeneratedConcept.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return [ai_generated_concept_out(concept) for concept in concepts]
 
 
 @app.post("/complaints", response_model=ComplaintOut)

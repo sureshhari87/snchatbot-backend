@@ -277,6 +277,29 @@ class CustomOrderRequest(Base):
     created_at = Column(DateTime, default=utc_now, nullable=False)
 
 
+class AiGeneratedConcept(Base):
+    __tablename__ = "ai_generated_concepts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    concept_id = Column(String, unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    source_prompt = Column(Text, nullable=False)
+    design_brief = Column(Text, nullable=False)
+    materials = Column(Text, nullable=True)
+    craft_notes = Column(Text, nullable=True)
+    image_base64 = Column(Text, nullable=True)
+    image_mime_type = Column(String, nullable=True)
+    answer_source = Column(String, nullable=False, default="template")
+    category = Column(String, nullable=True)
+    metal = Column(String, nullable=True)
+    gemstones = Column(Text, nullable=True)
+    budget = Column(Float, nullable=True)
+    related_product_ids = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="generated")
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+
+
 class ComplaintTicket(Base):
     __tablename__ = "complaint_tickets"
 

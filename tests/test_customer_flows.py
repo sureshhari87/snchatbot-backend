@@ -1,4 +1,4 @@
-from models import LeadCapture, Product
+from models import AiGeneratedConcept, LeadCapture, Product
 
 
 def test_wishlist_flow(client, auth_headers, db):
@@ -98,6 +98,50 @@ def test_appointment_booking_flow(client, auth_headers):
 
     assert list_response.status_code == 200
     assert list_response.json()[0]["purpose"] == "Store visit for wedding jewellery"
+
+
+def test_ai_generated_concept_persistence_and_admin_review(client, auth_headers, admin_headers, db):
+    payload = {
+        "concept_id": "concept-lotus-ring-001",
+        "name": "Lotus Ruby Ring",
+        "source_prompt": "lotus inspired gold ring with ruby petals",
+        "design_brief": "A gold ring with layered lotus petals around a ruby.",
+        "materials": ["22K gold", "ruby"],
+        "craft_notes": ["Confirm stone setting and final weight."],
+        "image_base64": "abc123",
+        "image_mime_type": "image/png",
+        "answer_source": "ai",
+        "category": "Ring",
+        "metal": "Gold",
+        "gemstones": ["ruby"],
+        "budget": 50000,
+        "related_product_ids": ["firestore-ring-1", "firestore-ring-2"],
+    }
+
+    response = client.post("/ai-concepts", headers=auth_headers, json=payload)
+
+    assert response.status_code == 200
+    concept = response.json()
+    assert concept["concept_id"] == payload["concept_id"]
+    assert concept["materials"] == ["22K gold", "ruby"]
+    assert concept["related_product_ids"] == ["firestore-ring-1", "firestore-ring-2"]
+
+    saved = db.query(AiGeneratedConcept).filter_by(concept_id=payload["concept_id"]).first()
+    assert saved is not None
+    assert saved.name == "Lotus Ruby Ring"
+
+    lead = db.query(LeadCapture).filter_by(session_id=payload["concept_id"]).first()
+    assert lead is not None
+    assert lead.source == "ai_concept"
+    assert lead.intent == "custom_order"
+
+    my_response = client.get("/ai-concepts/my", headers=auth_headers)
+    assert my_response.status_code == 200
+    assert my_response.json()[0]["name"] == "Lotus Ruby Ring"
+
+    admin_response = client.get("/admin/ai-concepts", headers=admin_headers)
+    assert admin_response.status_code == 200
+    assert admin_response.json()[0]["concept_id"] == payload["concept_id"]
 
 
 def test_chat_captures_availability_lead_and_handoff(auth_client, db):

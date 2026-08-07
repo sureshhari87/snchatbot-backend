@@ -352,6 +352,44 @@ class CustomOrderOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AiGeneratedConceptCreate(BaseModel):
+    concept_id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    source_prompt: str = Field(..., min_length=1)
+    design_brief: str = Field(..., min_length=1)
+    materials: List[str] = Field(default_factory=list)
+    craft_notes: List[str] = Field(default_factory=list)
+    image_base64: Optional[str] = None
+    image_mime_type: Optional[str] = None
+    answer_source: str = "template"
+    category: Optional[str] = None
+    metal: Optional[str] = None
+    gemstones: List[str] = Field(default_factory=list)
+    budget: Optional[float] = Field(default=None, ge=0)
+    related_product_ids: List[str] = Field(default_factory=list)
+
+
+class AiGeneratedConceptOut(BaseModel):
+    id: int
+    concept_id: str
+    user_id: int
+    name: str
+    source_prompt: str
+    design_brief: str
+    materials: List[str]
+    craft_notes: List[str]
+    image_base64: Optional[str] = None
+    image_mime_type: Optional[str] = None
+    answer_source: str
+    category: Optional[str] = None
+    metal: Optional[str] = None
+    gemstones: List[str]
+    budget: Optional[float] = None
+    related_product_ids: List[str]
+    status: str
+    created_at: datetime
+
+
 class ComplaintCreate(BaseModel):
     order_reference: Optional[str] = None
     category: str = "general"
