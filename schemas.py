@@ -728,6 +728,22 @@ class FirebaseAuthRequest(BaseModel):
     id_token: str = Field(min_length=20)
 
 
+class OtpRequestCreate(BaseModel):
+    phone: str = Field(..., min_length=8, max_length=20)
+
+
+class OtpRequestOut(BaseModel):
+    message: str
+    phone_masked: str
+    expires_in_seconds: int
+    resend_after_seconds: int
+
+
+class OtpVerifyRequest(BaseModel):
+    phone: str = Field(..., min_length=8, max_length=20)
+    otp: str = Field(..., min_length=4, max_length=8)
+
+
 class UserOut(BaseModel):
     id: int
     username: str

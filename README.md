@@ -41,6 +41,9 @@ Backend API for a Flutter jewellery ecommerce assistant.
 - `POST /chat`
 - `POST /register`
 - `POST /login`
+- `POST /auth/firebase`
+- `POST /auth/otp/request`
+- `POST /auth/otp/verify`
 - `POST /refresh`
 - `POST /logout`
 - `POST /logout-all-devices`
@@ -109,6 +112,20 @@ Production integration secrets:
 - `FIREBASE_PROJECT_ID` Firebase project ID used to verify Android Firebase ID tokens
 - `FIREBASE_AUTH_ENABLED` enables `POST /auth/firebase`; defaults to enabled when `FIREBASE_PROJECT_ID` is set
 - `FIREBASE_REQUIRE_EMAIL_VERIFIED` blocks Firebase token exchange unless Firebase marks the email verified
+- `SMS_OTP_ENABLED` enables backend-controlled phone OTP login through `POST /auth/otp/request` and `POST /auth/otp/verify`
+- `SMS_PROVIDER` currently supports `onhand`
+- `PHONE_AUTH_PEPPER` stable secret used to hash phone identities; keep it unchanged after launch
+- `ONHANDSMS_API_URL`
+- `ONHANDSMS_API_KEY`
+- `ONHANDSMS_USERNAME`
+- `ONHANDSMS_PASSWORD`
+- `ONHANDSMS_SENDER_ID` approved transactional sender ID
+- `ONHANDSMS_ROUTE` default: `transactional`
+- `ONHANDSMS_TEMPLATE_ID` approved DLT/OTP template ID when required
+- `ONHANDSMS_METHOD` default: `POST`
+- `ONHANDSMS_PAYLOAD_FORMAT` one of `json`, `form`, or `query`
+- `ONHANDSMS_PAYLOAD_TEMPLATE` optional JSON object template when your OnhandSMS account uses custom field names
+- `ONHANDSMS_MESSAGE_TEMPLATE` default: `Your Sona Jewellery login OTP is {otp}. It expires in {minutes} minutes.`
 - `OMS_ENABLED` enables real OMS calls when `1`
 - `OMS_BASE_URL` base URL for your order-management API
 - `OMS_API_KEY` bearer token for the OMS API
@@ -160,6 +177,44 @@ EMAIL_TIMEOUT_SECONDS=10
 After restart, sign in as admin, authorize `/docs`, and execute `POST /admin/email/test`.
 If the response is `Email test sent`, register a new customer email and click the
 verification link from the inbox.
+
+## Phone OTP Login With OnhandSMS
+
+Phone OTP login is backend-controlled. Android should never call OnhandSMS directly and should never store OnhandSMS secrets.
+
+Flow:
+
+```text
+Android phone login screen
+-> POST /auth/otp/request {"phone":"9876543210"}
+-> customer enters OTP
+-> POST /auth/otp/verify {"phone":"9876543210","otp":"123456"}
+-> backend returns access_token and refresh_token
+```
+
+Production Hugging Face secrets:
+
+```env
+SMS_OTP_ENABLED=1
+SMS_PROVIDER=onhand
+PHONE_AUTH_PEPPER=replace-with-long-stable-secret
+ONHANDSMS_API_URL=https://your-onhandsms-api-url
+ONHANDSMS_API_KEY=your-onhandsms-key
+ONHANDSMS_SENDER_ID=your-approved-sender-id
+ONHANDSMS_ROUTE=transactional
+ONHANDSMS_TEMPLATE_ID=your-approved-otp-template-id
+ONHANDSMS_METHOD=POST
+ONHANDSMS_PAYLOAD_FORMAT=json
+ONHANDSMS_MESSAGE_TEMPLATE=Your Sona Jewellery login OTP is {otp}. It expires in {minutes} minutes.
+```
+
+If OnhandSMS gives different API field names, set `ONHANDSMS_PAYLOAD_TEMPLATE` as a JSON string, for example:
+
+```env
+ONHANDSMS_PAYLOAD_TEMPLATE={"mobile":"{phone}","text":"{message}","sender":"{sender_id}","key":"{api_key}","template":"{template_id}"}
+```
+
+Use only a transactional/OTP route and an approved DLT template for customer login OTPs.
 
 ## Admin Account Bootstrap
 
@@ -343,7 +398,7 @@ Use `GET /mobile/config` first when the Android app starts. It exposes backend c
 Important mobile flows:
 
 - Browse catalogue: `GET /products`, `GET /products/{product_id}`, `GET /products/{product_id}/similar`, `GET /featured-products`, `GET /seasonal-collections`, `GET /categories`
-- Auth session: Firebase app login exchanges through `POST /auth/firebase`; fallback password auth still supports `POST /login`, `POST /refresh`, `POST /logout`, `POST /logout-all-devices`, `GET /me`
+- Auth session: Firebase app login exchanges through `POST /auth/firebase`; phone login uses `POST /auth/otp/request` then `POST /auth/otp/verify` when `/mobile/config` has `phone_otp_auth=true`; fallback password auth still supports `POST /login`, `POST /refresh`, `POST /logout`, `POST /logout-all-devices`, `GET /me`
 - User account: address book, notification settings, wishlist, save-for-later, and saved chat sessions
 - Chat: `POST /chat` returns `intent`, `confidence`, `answer_source`, `tool_calls`, `guardrails`, `applied_filters`, `result_count`, `suggested_next_questions`, `lead_captured`, and optional `handoff`
 - Customer actions: wishlist, save-for-later, callback requests, appointments, custom-order requests, complaints, and order-support capture

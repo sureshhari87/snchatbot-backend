@@ -1,0 +1,163 @@
+from models import PhoneAuthIdentity, PhoneOtpChallenge, RefreshToken, User
+
+
+def enable_otp(monkeypatch, otp="123456"):
+    import main
+
+    sent_messages = []
+    monkeypatch.setattr(main, "SMS_OTP_ENABLED", True)
+    monkeypatch.setattr(main, "SMS_PROVIDER", "onhand")
+    monkeypatch.setattr(main, "OTP_EXPIRE_MINUTES", 5)
+    monkeypatch.setattr(main, "OTP_RESEND_COOLDOWN_SECONDS", 60)
+    monkeypatch.setattr(main, "OTP_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(main, "PHONE_AUTH_PEPPER", "test-phone-pepper")
+    monkeypatch.setattr(main, "generate_otp_code", lambda: otp)
+    monkeypatch.setattr(
+        main,
+        "send_otp_sms",
+        lambda phone, code: sent_messages.append((phone, code)) or True,
+    )
+    return sent_messages
+
+
+def test_phone_otp_request_and_verify_creates_customer_session(client, db, monkeypatch):
+    sent_messages = enable_otp(monkeypatch)
+
+    request_response = client.post(
+        "/auth/otp/request",
+        json={"phone": "98765 43210"},
+    )
+
+    assert request_response.status_code == 200
+    body = request_response.json()
+    assert body["message"] == "OTP sent"
+    assert body["phone_masked"].endswith("3210")
+    assert sent_messages == [("+919876543210", "123456")]
+
+    challenge = db.query(PhoneOtpChallenge).one()
+    assert challenge.otp_hash != "123456"
+    assert challenge.status == "sent"
+
+    verify_response = client.post(
+        "/auth/otp/verify",
+        json={"phone": "+91 98765 43210", "otp": "123456"},
+    )
+
+    assert verify_response.status_code == 200
+    tokens = verify_response.json()
+    assert tokens["access_token"]
+    assert tokens["refresh_token"]
+
+    challenge = db.query(PhoneOtpChallenge).one()
+    assert challenge.status == "verified"
+    assert challenge.verified_at is not None
+
+    user = db.query(User).filter(User.email.like("phone_%@phone.sona.invalid")).one()
+    assert user.is_verified is True
+    assert user.is_admin is False
+    assert db.query(PhoneAuthIdentity).filter_by(user_id=user.id).count() == 1
+    assert db.query(RefreshToken).filter_by(user_id=user.id).count() == 1
+
+    me = client.get("/me", headers={"Authorization": f"Bearer {tokens['access_token']}"})
+    assert me.status_code == 200
+    assert me.json()["email"] == user.email
+
+
+def test_phone_otp_reuses_existing_phone_identity(client, db, monkeypatch):
+    enable_otp(monkeypatch)
+
+    assert client.post("/auth/otp/request", json={"phone": "9876543210"}).status_code == 200
+    assert (
+        client.post(
+            "/auth/otp/verify",
+            json={"phone": "9876543210", "otp": "123456"},
+        ).status_code
+        == 200
+    )
+
+    assert client.post("/auth/otp/request", json={"phone": "+919876543210"}).status_code == 200
+    assert (
+        client.post(
+            "/auth/otp/verify",
+            json={"phone": "+919876543210", "otp": "123456"},
+        ).status_code
+        == 200
+    )
+
+    assert db.query(User).filter(User.email.like("phone_%@phone.sona.invalid")).count() == 1
+    assert db.query(PhoneAuthIdentity).count() == 1
+
+
+def test_phone_otp_resend_cooldown(client, monkeypatch):
+    enable_otp(monkeypatch)
+
+    first = client.post("/auth/otp/request", json={"phone": "9876543210"})
+    second = client.post("/auth/otp/request", json={"phone": "9876543210"})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert "wait" in second.json()["detail"].lower()
+
+
+def test_phone_otp_invalid_attempts_lock_challenge(client, db, monkeypatch):
+    enable_otp(monkeypatch)
+    import main
+
+    monkeypatch.setattr(main, "OTP_MAX_ATTEMPTS", 2)
+
+    request_response = client.post("/auth/otp/request", json={"phone": "9876543210"})
+    assert request_response.status_code == 200
+
+    first = client.post("/auth/otp/verify", json={"phone": "9876543210", "otp": "000000"})
+    second = client.post("/auth/otp/verify", json={"phone": "9876543210", "otp": "111111"})
+
+    assert first.status_code == 401
+    assert second.status_code == 401
+    assert db.query(PhoneOtpChallenge).one().status == "locked"
+
+
+def test_phone_otp_requires_enabled_service(client):
+    response = client.post("/auth/otp/request", json={"phone": "9876543210"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Phone OTP login is not enabled"
+
+
+def test_phone_otp_mobile_config_and_dependencies(client, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "SMS_OTP_ENABLED", True)
+    monkeypatch.setattr(main, "SMS_PROVIDER", "onhand")
+    monkeypatch.setattr(main, "ONHANDSMS_API_URL", "https://sms.example.test/send")
+    monkeypatch.setattr(main, "ONHANDSMS_API_KEY", "sms-key")
+    monkeypatch.setattr(main, "ONHANDSMS_SENDER_ID", "SONAJW")
+
+    config_response = client.get("/mobile/config")
+    dependencies_response = client.get("/dependencies")
+
+    assert config_response.status_code == 200
+    assert config_response.json()["capabilities"]["phone_otp_auth"] is True
+    sms_dependency = dependencies_response.json()["dependencies"]["sms_otp"]
+    assert sms_dependency["status"] == "configured"
+    assert sms_dependency["provider"] == "onhand"
+
+
+def test_onhandsms_payload_template(monkeypatch):
+    import main
+
+    monkeypatch.setattr(
+        main,
+        "ONHANDSMS_PAYLOAD_TEMPLATE",
+        '{"mobile":"{phone}","text":"{message}","sender":"{sender_id}","key":"{api_key}"}',
+    )
+    monkeypatch.setattr(main, "ONHANDSMS_SENDER_ID", "SONAJW")
+    monkeypatch.setattr(main, "ONHANDSMS_API_KEY", "sms-key")
+
+    payload = main.render_onhandsms_payload("+919876543210", "Your OTP is 123456", "123456")
+
+    assert payload == {
+        "mobile": "+919876543210",
+        "text": "Your OTP is 123456",
+        "sender": "SONAJW",
+        "key": "sms-key",
+    }

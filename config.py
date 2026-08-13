@@ -157,6 +157,24 @@ class Settings:
     firebase_auth_enabled: bool
     firebase_require_email_verified: bool
     firebase_certs_url: str
+    sms_otp_enabled: bool
+    sms_provider: str
+    sms_timeout_seconds: int
+    otp_expire_minutes: int
+    otp_resend_cooldown_seconds: int
+    otp_max_attempts: int
+    phone_auth_pepper: str
+    onhandsms_api_url: str | None
+    onhandsms_api_key: str | None
+    onhandsms_username: str | None
+    onhandsms_password: str | None
+    onhandsms_sender_id: str | None
+    onhandsms_route: str | None
+    onhandsms_template_id: str | None
+    onhandsms_method: str
+    onhandsms_payload_format: str
+    onhandsms_payload_template: str | None
+    onhandsms_message_template: str
     monitoring_webhook_url: str | None
     monitoring_webhook_timeout_seconds: int
     sentry_dsn: str | None
@@ -303,6 +321,29 @@ def build_settings() -> Settings:
             "https://www.googleapis.com/robot/v1/metadata/x509/"
             "securetoken@system.gserviceaccount.com",
         ),
+        sms_otp_enabled=get_bool("SMS_OTP_ENABLED", False),
+        sms_provider=(get_str("SMS_PROVIDER", "onhand") or "onhand").lower(),
+        sms_timeout_seconds=get_int("SMS_TIMEOUT_SECONDS", 10),
+        otp_expire_minutes=get_int("OTP_EXPIRE_MINUTES", 5),
+        otp_resend_cooldown_seconds=get_int("OTP_RESEND_COOLDOWN_SECONDS", 60),
+        otp_max_attempts=get_int("OTP_MAX_ATTEMPTS", 5),
+        phone_auth_pepper=get_str("PHONE_AUTH_PEPPER", get_str("SECRET_KEY", "")) or "",
+        onhandsms_api_url=get_str("ONHANDSMS_API_URL"),
+        onhandsms_api_key=get_str("ONHANDSMS_API_KEY"),
+        onhandsms_username=get_str("ONHANDSMS_USERNAME"),
+        onhandsms_password=get_str("ONHANDSMS_PASSWORD"),
+        onhandsms_sender_id=get_str("ONHANDSMS_SENDER_ID"),
+        onhandsms_route=get_str("ONHANDSMS_ROUTE", "transactional"),
+        onhandsms_template_id=get_str("ONHANDSMS_TEMPLATE_ID"),
+        onhandsms_method=(get_str("ONHANDSMS_METHOD", "POST") or "POST").upper(),
+        onhandsms_payload_format=(
+            get_str("ONHANDSMS_PAYLOAD_FORMAT", "json") or "json"
+        ).lower(),
+        onhandsms_payload_template=get_str("ONHANDSMS_PAYLOAD_TEMPLATE"),
+        onhandsms_message_template=get_str(
+            "ONHANDSMS_MESSAGE_TEMPLATE",
+            "Your Sona Jewellery login OTP is {otp}. It expires in {minutes} minutes.",
+        ),
         monitoring_webhook_url=get_str("MONITORING_WEBHOOK_URL"),
         monitoring_webhook_timeout_seconds=get_int("MONITORING_WEBHOOK_TIMEOUT_SECONDS", 5),
         sentry_dsn=get_str("SENTRY_DSN"),
@@ -379,6 +420,24 @@ FIREBASE_PROJECT_ID = settings.firebase_project_id
 FIREBASE_AUTH_ENABLED = settings.firebase_auth_enabled
 FIREBASE_REQUIRE_EMAIL_VERIFIED = settings.firebase_require_email_verified
 FIREBASE_CERTS_URL = settings.firebase_certs_url
+SMS_OTP_ENABLED = settings.sms_otp_enabled
+SMS_PROVIDER = settings.sms_provider
+SMS_TIMEOUT_SECONDS = settings.sms_timeout_seconds
+OTP_EXPIRE_MINUTES = settings.otp_expire_minutes
+OTP_RESEND_COOLDOWN_SECONDS = settings.otp_resend_cooldown_seconds
+OTP_MAX_ATTEMPTS = settings.otp_max_attempts
+PHONE_AUTH_PEPPER = settings.phone_auth_pepper
+ONHANDSMS_API_URL = settings.onhandsms_api_url
+ONHANDSMS_API_KEY = settings.onhandsms_api_key
+ONHANDSMS_USERNAME = settings.onhandsms_username
+ONHANDSMS_PASSWORD = settings.onhandsms_password
+ONHANDSMS_SENDER_ID = settings.onhandsms_sender_id
+ONHANDSMS_ROUTE = settings.onhandsms_route
+ONHANDSMS_TEMPLATE_ID = settings.onhandsms_template_id
+ONHANDSMS_METHOD = settings.onhandsms_method
+ONHANDSMS_PAYLOAD_FORMAT = settings.onhandsms_payload_format
+ONHANDSMS_PAYLOAD_TEMPLATE = settings.onhandsms_payload_template
+ONHANDSMS_MESSAGE_TEMPLATE = settings.onhandsms_message_template
 MONITORING_WEBHOOK_URL = settings.monitoring_webhook_url
 MONITORING_WEBHOOK_TIMEOUT_SECONDS = settings.monitoring_webhook_timeout_seconds
 SENTRY_DSN = settings.sentry_dsn

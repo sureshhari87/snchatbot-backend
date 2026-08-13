@@ -82,8 +82,23 @@ from config import (
     OMS_BASE_URL,
     OMS_ENABLED,
     OMS_TIMEOUT_SECONDS,
+    ONHANDSMS_API_KEY,
+    ONHANDSMS_API_URL,
+    ONHANDSMS_MESSAGE_TEMPLATE,
+    ONHANDSMS_METHOD,
+    ONHANDSMS_PASSWORD,
+    ONHANDSMS_PAYLOAD_FORMAT,
+    ONHANDSMS_PAYLOAD_TEMPLATE,
+    ONHANDSMS_ROUTE,
+    ONHANDSMS_SENDER_ID,
+    ONHANDSMS_TEMPLATE_ID,
+    ONHANDSMS_USERNAME,
+    OTP_EXPIRE_MINUTES,
+    OTP_MAX_ATTEMPTS,
+    OTP_RESEND_COOLDOWN_SECONDS,
     PASSWORD_MIN_LENGTH,
     PASSWORD_RESET_EXPIRE_MINUTES,
+    PHONE_AUTH_PEPPER,
     REFRESH_TOKEN_EXPIRE_DAYS,
     RESEND_API_KEY,
     RESEND_API_URL,
@@ -95,6 +110,9 @@ from config import (
     SENTRY_RELEASE,
     SENTRY_SEND_DEFAULT_PII,
     SENTRY_TRACES_SAMPLE_RATE,
+    SMS_OTP_ENABLED,
+    SMS_PROVIDER,
+    SMS_TIMEOUT_SECONDS,
     TRUSTED_HOSTS,
     is_testing,
 )
@@ -120,6 +138,8 @@ from models import (
     OrderSnapshotItem,
     OrderSupportRequest,
     PasswordResetToken,
+    PhoneAuthIdentity,
+    PhoneOtpChallenge,
     Product,
     ProductCategory,
     RefreshToken,
@@ -182,6 +202,9 @@ from schemas import (
     OrderSupportCreate,
     OrderSupportOut,
     OrderSyncRequest,
+    OtpRequestCreate,
+    OtpRequestOut,
+    OtpVerifyRequest,
     ProductCreate,
     ProductOut,
     ProductUpdate,
@@ -229,7 +252,11 @@ SENSITIVE_MONITORING_KEYS = {
     "dsn",
     "email_password",
     "key",
+    "otp",
+    "otp_hash",
     "password",
+    "phone",
+    "phone_number",
     "refresh_token",
     "secret",
     "set-cookie",
@@ -728,6 +755,7 @@ async def request_id_middleware(request: Request, call_next):
             request,
             level=logging.ERROR,
             error_type=exc.__class__.__name__,
+            error_message=str(exc)[:300] if APP_DEBUG or is_testing() else None,
             duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
             sentry_captured=sentry_captured,
         )
@@ -1290,6 +1318,321 @@ def issue_token_pair(db: Session, user: User, request: Request) -> TokenResponse
     store_refresh_token(db, user.id, refresh_token, token_jti, family_id, request)
     db.commit()
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+def normalize_phone_number(phone: str) -> str:
+    raw = re.sub(r"[^\d+]", "", phone.strip())
+    if raw.startswith("00"):
+        raw = f"+{raw[2:]}"
+    if raw.startswith("+"):
+        digits = re.sub(r"\D", "", raw)
+        normalized = f"+{digits}"
+    else:
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) == 10:
+            normalized = f"+91{digits}"
+        elif len(digits) == 12 and digits.startswith("91"):
+            normalized = f"+{digits}"
+        else:
+            normalized = f"+{digits}"
+
+    if not re.fullmatch(r"\+[1-9]\d{7,14}", normalized):
+        raise HTTPException(status_code=422, detail="Enter a valid phone number")
+    return normalized
+
+
+def phone_mask(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) <= 4:
+        return "****"
+    return f"+{digits[:2]}******{digits[-4:]}"
+
+
+def phone_auth_hash(phone: str) -> str:
+    pepper = PHONE_AUTH_PEPPER or SECRET_KEY
+    return hashlib.sha256(f"{pepper}:{phone}".encode("utf-8")).hexdigest()
+
+
+def phone_email_for_number(phone: str) -> str:
+    return f"phone_{phone_auth_hash(phone)[:24]}@phone.sona.invalid"
+
+
+def phone_username_for_number(db: Session, phone: str) -> str:
+    base = f"phone_{phone_auth_hash(phone)[:20]}"
+    if not db.query(User).filter(User.username == base).first():
+        return base
+    for index in range(2, 1000):
+        candidate = f"{base}_{index}"[:64]
+        if not db.query(User).filter(User.username == candidate).first():
+            return candidate
+    return f"phone_{secrets.token_hex(12)}"
+
+
+def generate_otp_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def hash_otp_code(phone_hash: str, otp: str) -> str:
+    return hashlib.sha256(f"{PHONE_AUTH_PEPPER or SECRET_KEY}:{phone_hash}:{otp}".encode()).hexdigest()
+
+
+def onhandsms_is_configured() -> bool:
+    return bool(
+        ONHANDSMS_API_URL
+        and ONHANDSMS_SENDER_ID
+        and (ONHANDSMS_API_KEY or ONHANDSMS_USERNAME or ONHANDSMS_PASSWORD)
+    )
+
+
+def sms_otp_is_configured() -> bool:
+    return SMS_OTP_ENABLED and SMS_PROVIDER == "onhand" and onhandsms_is_configured()
+
+
+def sms_dependency_status() -> dict[str, Any]:
+    if not SMS_OTP_ENABLED:
+        return {"status": "disabled", "critical": False, "provider": SMS_PROVIDER}
+    if SMS_PROVIDER != "onhand":
+        return {
+            "status": "misconfigured",
+            "critical": False,
+            "provider": SMS_PROVIDER,
+            "error": "Unsupported SMS_PROVIDER",
+        }
+    if onhandsms_is_configured():
+        return {
+            "status": "configured",
+            "critical": False,
+            "provider": "onhand",
+            "api_url": ONHANDSMS_API_URL,
+            "sender_id_configured": bool(ONHANDSMS_SENDER_ID),
+            "template_id_configured": bool(ONHANDSMS_TEMPLATE_ID),
+        }
+    return {
+        "status": "misconfigured",
+        "critical": False,
+        "provider": "onhand",
+        "missing": [
+            name
+            for name, configured in {
+                "ONHANDSMS_API_URL": bool(ONHANDSMS_API_URL),
+                "ONHANDSMS_SENDER_ID": bool(ONHANDSMS_SENDER_ID),
+                "ONHANDSMS_API_KEY or ONHANDSMS_USERNAME/PASSWORD": bool(
+                    ONHANDSMS_API_KEY or ONHANDSMS_USERNAME or ONHANDSMS_PASSWORD
+                ),
+            }.items()
+            if not configured
+        ],
+    }
+
+
+def render_otp_message(otp: str) -> str:
+    return (
+        ONHANDSMS_MESSAGE_TEMPLATE.replace("{otp}", otp).replace(
+            "{minutes}", str(OTP_EXPIRE_MINUTES)
+        )
+    )
+
+
+def render_onhandsms_payload(phone: str, message: str, otp: str) -> dict[str, Any]:
+    context = {
+        "phone": phone,
+        "message": message,
+        "otp": otp,
+        "api_key": ONHANDSMS_API_KEY or "",
+        "username": ONHANDSMS_USERNAME or "",
+        "password": ONHANDSMS_PASSWORD or "",
+        "sender_id": ONHANDSMS_SENDER_ID or "",
+        "route": ONHANDSMS_ROUTE or "",
+        "template_id": ONHANDSMS_TEMPLATE_ID or "",
+    }
+    if ONHANDSMS_PAYLOAD_TEMPLATE:
+        rendered = ONHANDSMS_PAYLOAD_TEMPLATE
+        for key, value in context.items():
+            rendered = rendered.replace(f"{{{key}}}", value)
+        try:
+            payload = json.loads(rendered)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("ONHANDSMS_PAYLOAD_TEMPLATE must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("ONHANDSMS_PAYLOAD_TEMPLATE must render a JSON object")
+        return payload
+
+    payload = {
+        "username": ONHANDSMS_USERNAME,
+        "password": ONHANDSMS_PASSWORD,
+        "apikey": ONHANDSMS_API_KEY,
+        "senderid": ONHANDSMS_SENDER_ID,
+        "to": phone,
+        "message": message,
+        "route": ONHANDSMS_ROUTE,
+        "templateid": ONHANDSMS_TEMPLATE_ID,
+    }
+    return {key: value for key, value in payload.items() if value}
+
+
+def urlencoded_http_request(
+    method: str,
+    url: str,
+    payload: dict[str, Any],
+    timeout: int,
+) -> tuple[int, dict[str, Any]]:
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw_body = response.read().decode("utf-8")
+        if not raw_body:
+            return response.status, {}
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError:
+            body = {"raw": raw_body}
+        return response.status, body if isinstance(body, dict) else {"data": body}
+
+
+def query_http_request(url: str, payload: dict[str, Any], timeout: int) -> tuple[int, dict[str, Any]]:
+    separator = "&" if urllib.parse.urlsplit(url).query else "?"
+    request_url = f"{url}{separator}{urllib.parse.urlencode(payload)}"
+    request = urllib.request.Request(
+        request_url,
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw_body = response.read().decode("utf-8")
+        if not raw_body:
+            return response.status, {}
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError:
+            body = {"raw": raw_body}
+        return response.status, body if isinstance(body, dict) else {"data": body}
+
+
+def send_sms_via_onhand(phone: str, message: str, otp: str) -> bool:
+    if not onhandsms_is_configured():
+        return False
+
+    payload = render_onhandsms_payload(phone, message, otp)
+    try:
+        if ONHANDSMS_METHOD == "GET" or ONHANDSMS_PAYLOAD_FORMAT == "query":
+            status_code, response_body = query_http_request(
+                ONHANDSMS_API_URL,
+                payload,
+                SMS_TIMEOUT_SECONDS,
+            )
+        elif ONHANDSMS_PAYLOAD_FORMAT == "form":
+            status_code, response_body = urlencoded_http_request(
+                ONHANDSMS_METHOD,
+                ONHANDSMS_API_URL,
+                payload,
+                SMS_TIMEOUT_SECONDS,
+            )
+        else:
+            status_code, response_body = json_http_request(
+                ONHANDSMS_METHOD,
+                ONHANDSMS_API_URL,
+                payload,
+                timeout=SMS_TIMEOUT_SECONDS,
+            )
+    except Exception as exc:
+        log_event(
+            "sms.send_failed",
+            level=logging.ERROR,
+            provider="onhand",
+            phone_masked=phone_mask(phone),
+            error_type=exc.__class__.__name__,
+            error=str(exc)[:300],
+        )
+        return False
+
+    if 200 <= status_code < 300:
+        log_event(
+            "sms.sent",
+            provider="onhand",
+            phone_masked=phone_mask(phone),
+            status_code=status_code,
+        )
+        return True
+
+    log_event(
+        "sms.send_failed",
+        level=logging.ERROR,
+        provider="onhand",
+        phone_masked=phone_mask(phone),
+        status_code=status_code,
+        response=response_body,
+    )
+    return False
+
+
+def send_otp_sms(phone: str, otp: str) -> bool:
+    if is_testing():
+        log_event("sms.skipped_in_test", provider=SMS_PROVIDER, phone_masked=phone_mask(phone))
+        return True
+    if not sms_otp_is_configured():
+        return False
+    return send_sms_via_onhand(phone, render_otp_message(otp), otp)
+
+
+def latest_phone_otp_challenge(
+    db: Session,
+    phone_hash: str,
+    status_value: str | None = None,
+) -> PhoneOtpChallenge | None:
+    query = db.query(PhoneOtpChallenge).filter(PhoneOtpChallenge.phone_hash == phone_hash)
+    if status_value:
+        query = query.filter(PhoneOtpChallenge.status == status_value)
+    return query.order_by(PhoneOtpChallenge.created_at.desc()).first()
+
+
+def phone_user_for_number(db: Session, phone: str) -> tuple[User, bool]:
+    phone_hash = phone_auth_hash(phone)
+    identity = db.query(PhoneAuthIdentity).filter(PhoneAuthIdentity.phone_hash == phone_hash).first()
+    if identity:
+        user = db.query(User).filter(User.id == identity.user_id).first()
+        if user:
+            identity.last_login_at = utc_now()
+            identity.updated_at = utc_now()
+            if not user.is_verified:
+                user.is_verified = True
+            return user, False
+
+    email = phone_email_for_number(phone)
+    user = db.query(User).filter(User.email == email).first()
+    created = False
+    if user is None:
+        user = User(
+            username=phone_username_for_number(db, phone),
+            email=email,
+            hashed_password=hash_password(generate_opaque_token()),
+            is_verified=True,
+            is_admin=False,
+        )
+        db.add(user)
+        db.flush()
+        created = True
+    elif not user.is_verified:
+        user.is_verified = True
+
+    db.add(
+        PhoneAuthIdentity(
+            user_id=user.id,
+            phone_hash=phone_hash,
+            phone_masked=phone_mask(phone),
+            provider=SMS_PROVIDER,
+            verified_at=utc_now(),
+            last_login_at=utc_now(),
+        )
+    )
+    return user, created
 
 
 def resend_is_configured() -> bool:
@@ -2037,10 +2380,46 @@ def public_config_values(db: Session) -> dict[str, str]:
     return {entry.key: entry.value for entry in entries}
 
 
+def product_metadata_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        loaded = load_json_list(value)
+        if loaded:
+            return [str(item) for item in loaded]
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def product_out(product: Product) -> ProductOut:
+    return ProductOut(
+        id=product.id,
+        name=product.name,
+        description=product.description,
+        sku=product.sku,
+        category=product.category,
+        metal=product.metal,
+        price=product.price,
+        image=product.image,
+        in_stock=product.in_stock,
+        stock_quantity=product.stock_quantity,
+        is_featured=product.is_featured,
+        product_type=product.product_type,
+        audience=product.audience,
+        purity=product.purity,
+        weight=product.weight,
+        tags=product_metadata_list(product.tags),
+        occasion=product_metadata_list(product.occasion),
+        style=product_metadata_list(product.style),
+    )
+
+
 def saved_product_response(item, product: Product) -> SavedProductOut:
     return SavedProductOut(
         id=item.id,
-        product=ProductOut.model_validate(product),
+        product=product_out(product),
         note=item.note,
         created_at=item.created_at,
     )
@@ -2052,7 +2431,7 @@ def back_in_stock_response(
     return BackInStockSubscriptionOut(
         id=subscription.id,
         user_id=subscription.user_id,
-        product=ProductOut.model_validate(product),
+        product=product_out(product),
         email=subscription.email,
         phone=subscription.phone,
         size=subscription.size,
@@ -2630,6 +3009,11 @@ def integration_status() -> dict[str, Any]:
             "enabled": firebase_auth_is_configured(),
             "project_id_configured": bool(FIREBASE_PROJECT_ID),
             "require_email_verified": FIREBASE_REQUIRE_EMAIL_VERIFIED,
+        },
+        "sms_otp": {
+            "enabled": SMS_OTP_ENABLED,
+            "provider": SMS_PROVIDER,
+            "configured": sms_otp_is_configured(),
         },
         "llm": {
             "enabled": LLM_ENABLED and bool(LLM_BASE_URL and LLM_API_KEY),
@@ -3800,6 +4184,7 @@ def dependency_snapshot(db: Session) -> dict[str, Any]:
     dependencies = {
         "database": database_dependency_status(db),
         "email": email_dependency_status(),
+        "sms_otp": sms_dependency_status(),
         "oms": optional_service_status(OMS_ENABLED, bool(OMS_BASE_URL), "oms"),
         "firebase_auth": optional_service_status(
             FIREBASE_AUTH_ENABLED, bool(FIREBASE_PROJECT_ID), "firebase_auth"
@@ -4003,6 +4388,127 @@ async def firebase_auth(
         email=user.email,
         success=True,
         created=created,
+    )
+    return token_response
+
+
+@app.post("/auth/otp/request", response_model=OtpRequestOut)
+@limiter.limit("3/minute")
+async def request_phone_otp(
+    request: Request,
+    payload: OtpRequestCreate,
+    db: Session = Depends(get_db),
+):
+    if not SMS_OTP_ENABLED:
+        raise HTTPException(status_code=503, detail="Phone OTP login is not enabled")
+    if not is_testing() and not sms_otp_is_configured():
+        raise HTTPException(status_code=503, detail="SMS OTP provider is not configured")
+
+    phone = normalize_phone_number(payload.phone)
+    phone_hash = phone_auth_hash(phone)
+    masked = phone_mask(phone)
+    latest = latest_phone_otp_challenge(db, phone_hash, status_value="sent")
+    now = utc_now()
+    if latest and latest.sent_at >= now - timedelta(seconds=OTP_RESEND_COOLDOWN_SECONDS):
+        retry_after = OTP_RESEND_COOLDOWN_SECONDS - int((now - latest.sent_at).total_seconds())
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {max(retry_after, 1)} seconds before requesting another OTP",
+        )
+
+    otp = generate_otp_code()
+    challenge = PhoneOtpChallenge(
+        phone_hash=phone_hash,
+        phone_masked=masked,
+        otp_hash=hash_otp_code(phone_hash, otp),
+        provider=SMS_PROVIDER,
+        purpose="login",
+        status="sent",
+        attempts=0,
+        max_attempts=OTP_MAX_ATTEMPTS,
+        created_ip=client_ip(request),
+        created_user_agent=client_user_agent(request),
+        sent_at=now,
+        expires_at=now + timedelta(minutes=OTP_EXPIRE_MINUTES),
+    )
+    db.add(challenge)
+    db.commit()
+
+    if not send_otp_sms(phone, otp):
+        challenge.status = "send_failed"
+        challenge.updated_at = utc_now()
+        db.commit()
+        log_event("auth.otp_send_failed", request, phone_masked=masked, provider=SMS_PROVIDER)
+        raise HTTPException(status_code=502, detail="Could not send OTP. Try again later.")
+
+    log_event("auth.otp_requested", request, phone_masked=masked, provider=SMS_PROVIDER)
+    return OtpRequestOut(
+        message="OTP sent",
+        phone_masked=masked,
+        expires_in_seconds=OTP_EXPIRE_MINUTES * 60,
+        resend_after_seconds=OTP_RESEND_COOLDOWN_SECONDS,
+    )
+
+
+@app.post("/auth/otp/verify", response_model=TokenResponse)
+@limiter.limit("5/minute")
+async def verify_phone_otp(
+    request: Request,
+    payload: OtpVerifyRequest,
+    db: Session = Depends(get_db),
+):
+    if not SMS_OTP_ENABLED:
+        raise HTTPException(status_code=503, detail="Phone OTP login is not enabled")
+
+    phone = normalize_phone_number(payload.phone)
+    phone_hash = phone_auth_hash(phone)
+    challenge = latest_phone_otp_challenge(db, phone_hash, status_value="sent")
+    if not challenge or challenge.expires_at < utc_now():
+        if challenge and challenge.status == "sent":
+            challenge.status = "expired"
+            challenge.updated_at = utc_now()
+            db.commit()
+        log_event("auth.otp_verify_failed", request, phone_masked=phone_mask(phone), reason="expired")
+        raise HTTPException(status_code=400, detail="OTP expired or not found")
+
+    if challenge.attempts >= challenge.max_attempts:
+        challenge.status = "locked"
+        challenge.updated_at = utc_now()
+        db.commit()
+        raise HTTPException(status_code=429, detail="Too many OTP attempts. Request a new OTP.")
+
+    otp = re.sub(r"\D", "", payload.otp)
+    expected = hash_otp_code(phone_hash, otp)
+    if not secrets.compare_digest(challenge.otp_hash, expected):
+        challenge.attempts += 1
+        if challenge.attempts >= challenge.max_attempts:
+            challenge.status = "locked"
+        challenge.updated_at = utc_now()
+        db.commit()
+        increment_metric("failed_logins")
+        log_event(
+            "auth.otp_verify_failed",
+            request,
+            phone_masked=challenge.phone_masked,
+            reason="invalid_otp",
+            attempts=challenge.attempts,
+        )
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+
+    challenge.status = "verified"
+    challenge.verified_at = utc_now()
+    challenge.verified_ip = client_ip(request)
+    challenge.verified_user_agent = client_user_agent(request)
+    challenge.updated_at = utc_now()
+    user, created = phone_user_for_number(db, phone)
+    token_response = issue_token_pair(db, user, request)
+    log_event(
+        "auth.otp_login_success",
+        request,
+        user_id=user.id,
+        phone_masked=challenge.phone_masked,
+        created=created,
+        success=True,
     )
     return token_response
 
@@ -4427,6 +4933,7 @@ async def subscribe_back_in_stock(
     db.add(subscription)
     db.commit()
     db.refresh(subscription)
+    db.refresh(product)
     log_event(
         "stock_alert.created",
         user_id=current_user.id,
@@ -4599,6 +5106,7 @@ async def mobile_config(db: Session = Depends(get_db)):
             "auth": True,
             "refresh_token_rotation": True,
             "firebase_token_auth": firebase_auth_is_configured(),
+            "phone_otp_auth": SMS_OTP_ENABLED and (sms_otp_is_configured() or is_testing()),
             "chat": True,
             "chat_session_memory": True,
             "product_search": True,

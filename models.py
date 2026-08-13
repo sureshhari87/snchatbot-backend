@@ -257,6 +257,43 @@ class BackInStockSubscription(Base):
     cancelled_at = Column(DateTime, nullable=True)
 
 
+class PhoneAuthIdentity(Base):
+    __tablename__ = "phone_auth_identities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    phone_hash = Column(String, unique=True, nullable=False, index=True)
+    phone_masked = Column(String, nullable=False)
+    provider = Column(String, nullable=False, default="onhand")
+    verified_at = Column(DateTime, nullable=False)
+    last_login_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class PhoneOtpChallenge(Base):
+    __tablename__ = "phone_otp_challenges"
+
+    id = Column(Integer, primary_key=True, index=True)
+    phone_hash = Column(String, nullable=False, index=True)
+    phone_masked = Column(String, nullable=False)
+    otp_hash = Column(String, nullable=False)
+    provider = Column(String, nullable=False, default="onhand", index=True)
+    purpose = Column(String, nullable=False, default="login", index=True)
+    status = Column(String, nullable=False, default="sent", index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+    created_ip = Column(String, nullable=True)
+    created_user_agent = Column(String, nullable=True)
+    verified_ip = Column(String, nullable=True)
+    verified_user_agent = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    sent_at = Column(DateTime, default=utc_now, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    verified_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
 class CallbackRequest(Base):
     __tablename__ = "callback_requests"
 
