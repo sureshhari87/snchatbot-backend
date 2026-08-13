@@ -1,7 +1,25 @@
+import json
 from datetime import datetime
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+
+def normalize_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            decoded = json.loads(stripped)
+        except json.JSONDecodeError:
+            decoded = [item.strip() for item in stripped.split(",")]
+        return normalize_string_list(decoded)
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
 
 
 class ProductOut(BaseModel):
@@ -16,6 +34,18 @@ class ProductOut(BaseModel):
     in_stock: bool
     stock_quantity: int = 0
     is_featured: bool = False
+    product_type: Optional[str] = None
+    audience: Optional[str] = None
+    purity: Optional[str] = None
+    weight: Optional[float] = None
+    tags: List[str] = Field(default_factory=list)
+    occasion: List[str] = Field(default_factory=list)
+    style: List[str] = Field(default_factory=list)
+
+    @field_validator("tags", "occasion", "style", mode="before")
+    @classmethod
+    def normalize_metadata_lists(cls, value: Any) -> list[str]:
+        return normalize_string_list(value)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -31,6 +61,18 @@ class ProductCreate(BaseModel):
     in_stock: bool = True
     stock_quantity: int = Field(default=0, ge=0)
     is_featured: bool = False
+    product_type: Optional[str] = None
+    audience: Optional[str] = None
+    purity: Optional[str] = None
+    weight: Optional[float] = Field(default=None, ge=0)
+    tags: List[str] = Field(default_factory=list)
+    occasion: List[str] = Field(default_factory=list)
+    style: List[str] = Field(default_factory=list)
+
+    @field_validator("tags", "occasion", "style", mode="before")
+    @classmethod
+    def normalize_metadata_lists(cls, value: Any) -> list[str]:
+        return normalize_string_list(value)
 
 
 class ProductUpdate(BaseModel):
@@ -44,6 +86,18 @@ class ProductUpdate(BaseModel):
     in_stock: Optional[bool] = None
     stock_quantity: Optional[int] = Field(default=None, ge=0)
     is_featured: Optional[bool] = None
+    product_type: Optional[str] = None
+    audience: Optional[str] = None
+    purity: Optional[str] = None
+    weight: Optional[float] = Field(default=None, ge=0)
+    tags: Optional[List[str]] = None
+    occasion: Optional[List[str]] = None
+    style: Optional[List[str]] = None
+
+    @field_validator("tags", "occasion", "style", mode="before")
+    @classmethod
+    def normalize_metadata_lists(cls, value: Any) -> list[str] | None:
+        return None if value is None else normalize_string_list(value)
 
 
 class InventoryUpdate(BaseModel):
@@ -280,6 +334,34 @@ class SavedProductOut(BaseModel):
     product: ProductOut
     note: Optional[str] = None
     created_at: datetime
+
+
+class BackInStockSubscribeRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    size: Optional[str] = None
+    variant: Optional[str] = None
+
+
+class BackInStockSubscriptionOut(BaseModel):
+    id: int
+    user_id: int
+    product: ProductOut
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    size: Optional[str] = None
+    variant: Optional[str] = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    notified_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+
+
+class BackInStockNotifyOut(BaseModel):
+    product_id: int
+    notified_count: int
+    message: str
 
 
 class CallbackRequestCreate(BaseModel):

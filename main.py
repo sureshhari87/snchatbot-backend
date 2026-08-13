@@ -28,7 +28,8 @@ from jose import JWTError, jwt
 from pwdlib import PasswordHash
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import inspect, or_, text
+from sqlalchemy import String as SqlString
+from sqlalchemy import cast, inspect, or_, text
 from sqlalchemy.orm import Session
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -102,6 +103,7 @@ from models import (
     AiGeneratedConcept,
     AppConfigEntry,
     AppointmentBooking,
+    BackInStockSubscription,
     CallbackRequest,
     ChatMessage,
     ChatResponseAnalytics,
@@ -137,6 +139,9 @@ from schemas import (
     AppConfigUpdate,
     AppointmentCreate,
     AppointmentOut,
+    BackInStockNotifyOut,
+    BackInStockSubscribeRequest,
+    BackInStockSubscriptionOut,
     CallbackRequestCreate,
     CallbackRequestOut,
     CategoryCreate,
@@ -846,6 +851,13 @@ def seed_products(db: Session):
             in_stock=True,
             stock_quantity=8,
             is_featured=True,
+            product_type="Ring",
+            audience="Women",
+            purity="22K",
+            weight=2.4,
+            tags=["daily wear", "classic", "gift"],
+            occasion=["daily wear", "anniversary", "birthday"],
+            style=["minimal", "classic"],
         ),
         Product(
             name="Rose Gold Diamond Ring",
@@ -858,6 +870,13 @@ def seed_products(db: Session):
             in_stock=True,
             stock_quantity=5,
             is_featured=True,
+            product_type="Ring",
+            audience="Women",
+            purity="18K",
+            weight=2.1,
+            tags=["diamond", "proposal", "premium"],
+            occasion=["engagement", "anniversary", "party wear"],
+            style=["modern", "premium"],
         ),
         Product(
             name="Minimal Gold Necklace",
@@ -870,6 +889,13 @@ def seed_products(db: Session):
             in_stock=True,
             stock_quantity=4,
             is_featured=False,
+            product_type="Necklace",
+            audience="Women",
+            purity="22K",
+            weight=5.8,
+            tags=["daily wear", "lightweight", "gift"],
+            occasion=["daily wear", "wedding", "anniversary"],
+            style=["minimal", "traditional", "premium"],
         ),
         Product(
             name="Pearl Drop Earrings",
@@ -882,6 +908,13 @@ def seed_products(db: Session):
             in_stock=True,
             stock_quantity=10,
             is_featured=False,
+            product_type="Earring",
+            audience="Women",
+            purity="925",
+            weight=1.6,
+            tags=["pearl", "office wear", "gift"],
+            occasion=["party wear", "birthday", "office wear"],
+            style=["soft", "elegant"],
         ),
     ]
     db.add_all(items)
@@ -1917,6 +1950,10 @@ def clamp_limit(limit: int, maximum: int = 50) -> int:
     return max(1, min(limit, maximum))
 
 
+def metadata_text_match(column, value: str):
+    return cast(column, SqlString).ilike(f"%{value.strip()}%")
+
+
 def product_search_query(
     db: Session,
     q: str | None = None,
@@ -1924,6 +1961,14 @@ def product_search_query(
     metal: str | None = None,
     min_price: float | None = None,
     max_price: float | None = None,
+    product_type: str | None = None,
+    audience: str | None = None,
+    purity: str | None = None,
+    min_weight: float | None = None,
+    max_weight: float | None = None,
+    occasion: str | None = None,
+    style: str | None = None,
+    gift_intent: str | None = None,
     in_stock_only: bool = False,
 ):
     query = db.query(Product)
@@ -1937,16 +1982,45 @@ def product_search_query(
                 Product.sku.ilike(search),
                 Product.category.ilike(search),
                 Product.metal.ilike(search),
+                Product.product_type.ilike(search),
+                Product.audience.ilike(search),
+                Product.purity.ilike(search),
+                metadata_text_match(Product.tags, q),
+                metadata_text_match(Product.occasion, q),
+                metadata_text_match(Product.style, q),
             )
         )
     if category:
         query = query.filter(Product.category.ilike(category))
     if metal:
         query = query.filter(Product.metal.ilike(metal))
+    if product_type:
+        query = query.filter(Product.product_type.ilike(product_type))
+    if audience:
+        query = query.filter(Product.audience.ilike(audience))
+    if purity:
+        query = query.filter(Product.purity.ilike(purity))
     if min_price is not None:
         query = query.filter(Product.price >= min_price)
     if max_price is not None:
         query = query.filter(Product.price <= max_price)
+    if min_weight is not None:
+        query = query.filter(Product.weight >= min_weight)
+    if max_weight is not None:
+        query = query.filter(Product.weight <= max_weight)
+    if occasion:
+        query = query.filter(metadata_text_match(Product.occasion, occasion))
+    if style:
+        query = query.filter(metadata_text_match(Product.style, style))
+    if gift_intent:
+        query = query.filter(
+            or_(
+                metadata_text_match(Product.tags, gift_intent),
+                metadata_text_match(Product.occasion, gift_intent),
+                metadata_text_match(Product.style, gift_intent),
+                Product.audience.ilike(f"%{gift_intent.strip()}%"),
+            )
+        )
     if in_stock_only:
         query = query.filter(Product.in_stock == True)
 
@@ -1970,6 +2044,84 @@ def saved_product_response(item, product: Product) -> SavedProductOut:
         note=item.note,
         created_at=item.created_at,
     )
+
+
+def back_in_stock_response(
+    subscription: BackInStockSubscription, product: Product
+) -> BackInStockSubscriptionOut:
+    return BackInStockSubscriptionOut(
+        id=subscription.id,
+        user_id=subscription.user_id,
+        product=ProductOut.model_validate(product),
+        email=subscription.email,
+        phone=subscription.phone,
+        size=subscription.size,
+        variant=subscription.variant,
+        status=subscription.status,
+        created_at=subscription.created_at,
+        updated_at=subscription.updated_at,
+        notified_at=subscription.notified_at,
+        cancelled_at=subscription.cancelled_at,
+    )
+
+
+def active_stock_subscription(
+    db: Session,
+    user_id: int,
+    product_id: int,
+    size: str | None = None,
+    variant: str | None = None,
+) -> BackInStockSubscription | None:
+    return (
+        db.query(BackInStockSubscription)
+        .filter(
+            BackInStockSubscription.user_id == user_id,
+            BackInStockSubscription.product_id == product_id,
+            BackInStockSubscription.status == "active",
+            BackInStockSubscription.size == size,
+            BackInStockSubscription.variant == variant,
+        )
+        .first()
+    )
+
+
+def notify_back_in_stock_subscribers(db: Session, product: Product) -> int:
+    subscriptions = (
+        db.query(BackInStockSubscription)
+        .filter(
+            BackInStockSubscription.product_id == product.id,
+            BackInStockSubscription.status == "active",
+        )
+        .order_by(BackInStockSubscription.created_at.asc())
+        .all()
+    )
+    notified_count = 0
+    for subscription in subscriptions:
+        if subscription.email:
+            send_email(
+                subscription.email,
+                f"{product.name} is back in stock",
+                (
+                    f"Good news. {product.name} is available again.\n\n"
+                    "Open the Sona Jewellery app to view the product or ask Sona AI "
+                    "for similar available options."
+                ),
+            )
+        subscription.status = "notified"
+        subscription.notified_at = utc_now()
+        subscription.updated_at = utc_now()
+        notified_count += 1
+
+    if notified_count:
+        record_integration_event(
+            db,
+            service="stock_alerts",
+            action="back_in_stock_notify",
+            status_value="notified",
+            reference=str(product.id),
+            response_payload={"notified_count": notified_count},
+        )
+    return notified_count
 
 
 BUYING_SUGGESTIONS = [
@@ -2697,6 +2849,13 @@ def llm_product_context(products: list[Product]) -> list[dict[str, Any]]:
             "price": product.price,
             "in_stock": product.in_stock,
             "stock_quantity": product.stock_quantity,
+            "product_type": product.product_type,
+            "audience": product.audience,
+            "purity": product.purity,
+            "weight": product.weight,
+            "tags": product.tags or [],
+            "occasion": product.occasion or [],
+            "style": product.style or [],
         }
         for product in products[:LLM_CONTEXT_PRODUCT_LIMIT]
     ]
@@ -3329,11 +3488,38 @@ def filter_products(
     if filters.get("metal"):
         query = query.filter(Product.metal.ilike(filters["metal"]))
 
+    if filters.get("occasion"):
+        query = query.filter(metadata_text_match(Product.occasion, filters["occasion"]))
+
+    if filters.get("style"):
+        query = query.filter(
+            or_(
+                metadata_text_match(Product.style, filters["style"]),
+                metadata_text_match(Product.tags, filters["style"]),
+            )
+        )
+
+    if filters.get("recipient"):
+        query = query.filter(
+            or_(
+                Product.audience.ilike(f"%{filters['recipient']}%"),
+                metadata_text_match(Product.tags, filters["recipient"]),
+            )
+        )
+
     feature = filters.get("feature")
     if feature == "diamond":
-        query = query.filter(Product.name.ilike("%diamond%"))
+        query = query.filter(
+            or_(Product.name.ilike("%diamond%"), metadata_text_match(Product.tags, "diamond"))
+        )
     elif feature == "pearl":
-        query = query.filter(or_(Product.name.ilike("%pearl%"), Product.metal.ilike("%pearl%")))
+        query = query.filter(
+            or_(
+                Product.name.ilike("%pearl%"),
+                Product.metal.ilike("%pearl%"),
+                metadata_text_match(Product.tags, "pearl"),
+            )
+        )
 
     if filters.get("min_price") is not None:
         query = query.filter(Product.price >= filters["min_price"])
@@ -4172,8 +4358,17 @@ async def list_products(
     q: str | None = None,
     category: str | None = None,
     metal: str | None = None,
+    product_type: str | None = None,
+    audience: str | None = None,
+    gender: str | None = None,
+    purity: str | None = None,
     min_price: float | None = Query(default=None, ge=0),
     max_price: float | None = Query(default=None, ge=0),
+    min_weight: float | None = Query(default=None, ge=0),
+    max_weight: float | None = Query(default=None, ge=0),
+    gift_intent: str | None = None,
+    occasion: str | None = None,
+    style: str | None = None,
     in_stock_only: bool = False,
     limit: int = Query(default=20, ge=1, le=50),
     db: Session = Depends(get_db),
@@ -4185,9 +4380,108 @@ async def list_products(
         metal=metal,
         min_price=min_price,
         max_price=max_price,
+        product_type=product_type,
+        audience=audience or gender,
+        purity=purity,
+        min_weight=min_weight,
+        max_weight=max_weight,
+        occasion=occasion,
+        style=style,
+        gift_intent=gift_intent,
         in_stock_only=in_stock_only,
     )
     return query.order_by(Product.price.asc(), Product.id.asc()).limit(clamp_limit(limit)).all()
+
+
+@app.post("/products/{product_id}/back-in-stock", response_model=BackInStockSubscriptionOut)
+async def subscribe_back_in_stock(
+    product_id: int,
+    payload: BackInStockSubscribeRequest | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    if product.in_stock and product.stock_quantity > 0:
+        raise HTTPException(status_code=400, detail="Product is already in stock")
+
+    payload = payload or BackInStockSubscribeRequest()
+    existing = active_stock_subscription(
+        db,
+        current_user.id,
+        product.id,
+        payload.size,
+        payload.variant,
+    )
+    if existing:
+        return back_in_stock_response(existing, product)
+
+    subscription = BackInStockSubscription(
+        user_id=current_user.id,
+        product_id=product.id,
+        email=str(payload.email) if payload.email else current_user.email,
+        phone=payload.phone,
+        size=payload.size,
+        variant=payload.variant,
+        status="active",
+    )
+    db.add(subscription)
+    db.commit()
+    db.refresh(subscription)
+    log_event(
+        "stock_alert.created",
+        user_id=current_user.id,
+        product_id=product.id,
+        size=payload.size,
+        variant=payload.variant,
+    )
+    return back_in_stock_response(subscription, product)
+
+
+@app.get("/back-in-stock/my", response_model=list[BackInStockSubscriptionOut])
+async def list_my_back_in_stock_alerts(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(BackInStockSubscription)
+        .filter(BackInStockSubscription.user_id == current_user.id)
+        .order_by(BackInStockSubscription.created_at.desc())
+        .all()
+    )
+    product_ids = {row.product_id for row in rows}
+    products = {
+        product.id: product
+        for product in db.query(Product).filter(Product.id.in_(product_ids)).all()
+    }
+    return [
+        back_in_stock_response(row, products[row.product_id])
+        for row in rows
+        if row.product_id in products
+    ]
+
+
+@app.delete("/back-in-stock/{subscription_id}", response_model=MessageResponse)
+async def cancel_back_in_stock_alert(
+    subscription_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    subscription = (
+        db.query(BackInStockSubscription)
+        .filter(
+            BackInStockSubscription.id == subscription_id,
+            BackInStockSubscription.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Stock alert not found")
+
+    subscription.status = "cancelled"
+    subscription.cancelled_at = utc_now()
+    subscription.updated_at = utc_now()
+    db.commit()
+    return MessageResponse(message="Stock alert cancelled")
 
 
 @app.get("/products/{product_id}/similar", response_model=list[ProductOut])
@@ -4308,6 +4602,8 @@ async def mobile_config(db: Session = Depends(get_db)):
             "chat": True,
             "chat_session_memory": True,
             "product_search": True,
+            "product_metadata": True,
+            "back_in_stock_alerts": True,
             "ai_search": True,
             "ai_recommendations": True,
             "personalized_recommendations": True,
@@ -4411,6 +4707,8 @@ async def admin_update_inventory(
     if not updates:
         raise HTTPException(status_code=400, detail="No inventory updates provided")
 
+    was_available = product.in_stock and product.stock_quantity > 0
+
     if "stock_quantity" in updates:
         product.stock_quantity = updates["stock_quantity"]
         if "in_stock" not in updates:
@@ -4418,10 +4716,35 @@ async def admin_update_inventory(
     if "in_stock" in updates:
         product.in_stock = updates["in_stock"]
 
+    became_available = not was_available and product.in_stock and product.stock_quantity > 0
+    if became_available:
+        notify_back_in_stock_subscribers(db, product)
+
     db.commit()
     db.refresh(product)
     log_admin_action(request, admin_user, "update_inventory", "product", product.id)
     return product
+
+
+@app.post(
+    "/admin/products/{product_id}/back-in-stock/notify",
+    response_model=BackInStockNotifyOut,
+)
+async def admin_notify_back_in_stock(
+    product_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("products:manage")),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    notified_count = notify_back_in_stock_subscribers(db, product)
+    db.commit()
+    log_admin_action(request, admin_user, "notify_back_in_stock", "product", product.id)
+    return BackInStockNotifyOut(
+        product_id=product.id,
+        notified_count=notified_count,
+        message=f"Notified {notified_count} back-in-stock subscribers",
+    )
 
 
 @app.delete("/admin/products/{product_id}", response_model=MessageResponse)

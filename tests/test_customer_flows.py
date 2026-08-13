@@ -1,4 +1,4 @@
-from models import AiGeneratedConcept, LeadCapture, Product
+from models import AiGeneratedConcept, BackInStockSubscription, LeadCapture, Product
 
 
 def test_wishlist_flow(client, auth_headers, db):
@@ -53,6 +53,63 @@ def test_save_for_later_flow(client, auth_headers, db):
     )
 
     assert delete_response.status_code == 200
+
+
+def test_back_in_stock_alert_flow(client, auth_headers, admin_headers, db):
+    product = db.query(Product).filter(Product.category == "Ring").first()
+    product.in_stock = False
+    product.stock_quantity = 0
+    db.commit()
+
+    subscribe_response = client.post(
+        f"/products/{product.id}/back-in-stock",
+        headers=auth_headers,
+        json={"size": "12", "variant": "rose"},
+    )
+
+    assert subscribe_response.status_code == 200
+    alert = subscribe_response.json()
+    assert alert["product"]["id"] == product.id
+    assert alert["status"] == "active"
+    assert alert["email"].endswith("@example.com")
+
+    duplicate_response = client.post(
+        f"/products/{product.id}/back-in-stock",
+        headers=auth_headers,
+        json={"size": "12", "variant": "rose"},
+    )
+
+    assert duplicate_response.status_code == 200
+    assert duplicate_response.json()["id"] == alert["id"]
+
+    list_response = client.get("/back-in-stock/my", headers=auth_headers)
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["id"] == alert["id"]
+
+    inventory_response = client.patch(
+        f"/admin/products/{product.id}/inventory",
+        headers=admin_headers,
+        json={"stock_quantity": 5},
+    )
+
+    assert inventory_response.status_code == 200
+    subscription = db.query(BackInStockSubscription).filter_by(id=alert["id"]).first()
+    assert subscription.status == "notified"
+    assert subscription.notified_at is not None
+
+    product.in_stock = False
+    product.stock_quantity = 0
+    second_subscribe = client.post(
+        f"/products/{product.id}/back-in-stock",
+        headers=auth_headers,
+        json={},
+    )
+    assert second_subscribe.status_code == 200
+    cancel_response = client.delete(
+        f"/back-in-stock/{second_subscribe.json()['id']}",
+        headers=auth_headers,
+    )
+    assert cancel_response.status_code == 200
 
 
 def test_request_callback_flow(client, auth_headers):

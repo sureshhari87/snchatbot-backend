@@ -35,6 +35,22 @@ def test_public_mobile_catalog_contracts(client, db):
     assert products_response.status_code == 200
     products = products_response.json()
     assert products[0]["name"] == "Classic Gold Ring"
+    assert products[0]["tags"] == ["daily wear", "classic", "gift"]
+    assert products[0]["occasion"] == ["daily wear", "anniversary", "birthday"]
+
+    gift_response = client.get(
+        "/products",
+        params={"gift_intent": "gift", "occasion": "birthday", "in_stock_only": True},
+    )
+    assert gift_response.status_code == 200
+    assert any(item["name"] == "Classic Gold Ring" for item in gift_response.json())
+
+    audience_response = client.get(
+        "/products",
+        params={"gender": "Women", "product_type": "Ring", "purity": "22K"},
+    )
+    assert audience_response.status_code == 200
+    assert audience_response.json()[0]["product_type"] == "Ring"
 
     detail_response = client.get(f"/products/{product.id}")
     assert detail_response.status_code == 200
@@ -103,6 +119,8 @@ def test_admin_knowledge_and_mobile_public_config(client, admin_headers, db):
     mobile_config = mobile_response.json()
     assert mobile_config["capabilities"]["chat"] is True
     assert mobile_config["capabilities"]["admin"] is False
+    assert mobile_config["capabilities"]["product_metadata"] is True
+    assert mobile_config["capabilities"]["back_in_stock_alerts"] is True
     assert mobile_config["public_config"]["android_min_version"] == "1"
 
     config_entry = db.query(AppConfigEntry).filter(AppConfigEntry.key == "android_min_version").first()

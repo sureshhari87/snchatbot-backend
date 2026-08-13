@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.sql import func
 
 from database import Base
@@ -73,6 +73,13 @@ class Product(Base):
     in_stock = Column(Boolean, default=True)
     stock_quantity = Column(Integer, nullable=False, default=0)
     is_featured = Column(Boolean, nullable=False, default=False)
+    product_type = Column(String, nullable=True, index=True)
+    audience = Column(String, nullable=True, index=True)
+    purity = Column(String, nullable=True, index=True)
+    weight = Column(Float, nullable=True)
+    tags = Column(JSON, nullable=True)
+    occasion = Column(JSON, nullable=True)
+    style = Column(JSON, nullable=True)
 
 
 class ProductCategory(Base):
@@ -231,6 +238,23 @@ class SaveForLaterItem(Base):
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class BackInStockSubscription(Base):
+    __tablename__ = "back_in_stock_subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    email = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    size = Column(String, nullable=True)
+    variant = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="active", index=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+    notified_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
 
 
 class CallbackRequest(Base):

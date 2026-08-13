@@ -30,6 +30,13 @@ def test_admin_product_crud_and_inventory(client, admin_headers):
             "price": 32999,
             "stock_quantity": 3,
             "in_stock": True,
+            "product_type": "Ring",
+            "audience": "Women",
+            "purity": "22K",
+            "weight": 3.2,
+            "tags": ["emerald", "occasion wear"],
+            "occasion": ["wedding", "party wear"],
+            "style": ["premium", "traditional"],
         },
     )
 
@@ -37,6 +44,8 @@ def test_admin_product_crud_and_inventory(client, admin_headers):
     product = create_response.json()
     assert product["id"]
     assert product["sku"] == "RING-EMERALD-999"
+    assert product["tags"] == ["emerald", "occasion wear"]
+    assert product["occasion"] == ["wedding", "party wear"]
 
     inventory_response = client.patch(
         f"/admin/products/{product['id']}/inventory",
@@ -51,12 +60,13 @@ def test_admin_product_crud_and_inventory(client, admin_headers):
     update_response = client.patch(
         f"/admin/products/{product['id']}",
         headers=admin_headers,
-        json={"price": 29999, "is_featured": True},
+        json={"price": 29999, "is_featured": True, "style": ["premium", "gift"]},
     )
 
     assert update_response.status_code == 200
     assert update_response.json()["price"] == 29999
     assert update_response.json()["is_featured"] is True
+    assert update_response.json()["style"] == ["premium", "gift"]
 
     delete_response = client.delete(
         f"/admin/products/{product['id']}",
