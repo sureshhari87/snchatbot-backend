@@ -1430,12 +1430,21 @@ def render_otp_message(otp: str) -> str:
         ONHANDSMS_MESSAGE_TEMPLATE.replace("{otp}", otp).replace(
             "{minutes}", str(OTP_EXPIRE_MINUTES)
         )
+        .replace("\\n", "\n")
     )
 
 
 def render_onhandsms_payload(phone: str, message: str, otp: str) -> dict[str, Any]:
+    phone_digits = re.sub(r"\D", "", phone)
+    phone_local = (
+        phone_digits[2:]
+        if phone_digits.startswith("91") and len(phone_digits) == 12
+        else phone_digits
+    )
     context = {
         "phone": phone,
+        "phone_digits": phone_digits,
+        "phone_local": phone_local,
         "message": message,
         "otp": otp,
         "api_key": ONHANDSMS_API_KEY or "",
@@ -1542,6 +1551,18 @@ def send_sms_via_onhand(phone: str, message: str, otp: str) -> bool:
                 payload,
                 timeout=SMS_TIMEOUT_SECONDS,
             )
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        log_event(
+            "sms.send_failed",
+            level=logging.ERROR,
+            provider="onhand",
+            phone_masked=phone_mask(phone),
+            status_code=exc.code,
+            error_type=exc.__class__.__name__,
+            error_body=error_body[:500],
+        )
+        return False
     except Exception as exc:
         log_event(
             "sms.send_failed",

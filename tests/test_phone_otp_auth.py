@@ -148,16 +148,41 @@ def test_onhandsms_payload_template(monkeypatch):
     monkeypatch.setattr(
         main,
         "ONHANDSMS_PAYLOAD_TEMPLATE",
-        '{"mobile":"{phone}","text":"{message}","sender":"{sender_id}","key":"{api_key}"}',
+        (
+            '{"username":"{username}","password":"{password}","senderid":"{sender_id}",'
+            '"number":"{phone_local}","istamil":"0","dlttemplateid":"{template_id}",'
+            '"message":"{message}"}'
+        ),
     )
-    monkeypatch.setattr(main, "ONHANDSMS_SENDER_ID", "SONAJW")
-    monkeypatch.setattr(main, "ONHANDSMS_API_KEY", "sms-key")
+    monkeypatch.setattr(main, "ONHANDSMS_USERNAME", "9944117857")
+    monkeypatch.setattr(main, "ONHANDSMS_PASSWORD", "secret")
+    monkeypatch.setattr(main, "ONHANDSMS_SENDER_ID", "SONAJS")
+    monkeypatch.setattr(main, "ONHANDSMS_TEMPLATE_ID", "1707173372695978586")
 
     payload = main.render_onhandsms_payload("+919876543210", "Your OTP is 123456", "123456")
 
     assert payload == {
-        "mobile": "+919876543210",
-        "text": "Your OTP is 123456",
-        "sender": "SONAJW",
-        "key": "sms-key",
+        "username": "9944117857",
+        "password": "secret",
+        "senderid": "SONAJS",
+        "number": "9876543210",
+        "istamil": "0",
+        "dlttemplateid": "1707173372695978586",
+        "message": "Your OTP is 123456",
     }
+
+
+def test_otp_message_template_supports_hugging_face_escaped_newlines(monkeypatch):
+    import main
+
+    monkeypatch.setattr(
+        main,
+        "ONHANDSMS_MESSAGE_TEMPLATE",
+        "Dear User,\\nYour mobile verification code is {otp}\\nPlease don't share this.",
+    )
+
+    assert main.render_otp_message("123456") == (
+        "Dear User,\n"
+        "Your mobile verification code is 123456\n"
+        "Please don't share this."
+    )

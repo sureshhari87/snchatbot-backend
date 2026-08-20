@@ -198,15 +198,19 @@ Production Hugging Face secrets:
 SMS_OTP_ENABLED=1
 SMS_PROVIDER=onhand
 PHONE_AUTH_PEPPER=replace-with-long-stable-secret
-ONHANDSMS_API_URL=https://your-onhandsms-api-url
-ONHANDSMS_API_KEY=your-onhandsms-key
-ONHANDSMS_SENDER_ID=your-approved-sender-id
-ONHANDSMS_ROUTE=transactional
-ONHANDSMS_TEMPLATE_ID=your-approved-otp-template-id
-ONHANDSMS_METHOD=POST
-ONHANDSMS_PAYLOAD_FORMAT=json
-ONHANDSMS_MESSAGE_TEMPLATE=Your Sona Jewellery login OTP is {otp}. It expires in {minutes} minutes.
+ONHANDSMS_API_URL=http://api.onhandsms.com/api/v2/sendsms
+ONHANDSMS_USERNAME=9944117857
+ONHANDSMS_PASSWORD=replace-with-onhandsms-password
+ONHANDSMS_SENDER_ID=SONAJS
+ONHANDSMS_TEMPLATE_ID=1707173372695978586
+ONHANDSMS_METHOD=GET
+ONHANDSMS_PAYLOAD_FORMAT=query
+ONHANDSMS_MESSAGE_TEMPLATE=Dear User,\nYour mobile verification code is {otp}\nPlease don't share this.\nThanks,\nSONA JEWELLERS
+ONHANDSMS_PAYLOAD_TEMPLATE={"username":"{username}","password":"{password}","senderid":"{sender_id}","number":"{phone_local}","istamil":"0","dlttemplateid":"{template_id}","message":"{message}"}
 ```
+
+If your OnhandSMS account supports HTTPS for the same endpoint, prefer the `https://` URL. The backend URL-encodes `message`, line breaks, and spaces before calling OnhandSMS.
+For your own live test, call `/auth/otp/request` with `{"phone":"9944117857"}`. Keep `"number":"{phone_local}"` in the payload template so real customer OTPs go to the customer-entered phone number.
 
 If OnhandSMS gives different API field names, set `ONHANDSMS_PAYLOAD_TEMPLATE` as a JSON string, for example:
 
