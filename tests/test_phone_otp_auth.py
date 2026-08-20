@@ -215,6 +215,45 @@ def test_onhandsms_send_handles_bad_payload_template(monkeypatch):
     assert main.send_sms_via_onhand("+919944117857", "OTP 123456", "123456") is False
 
 
+def test_onhandsms_query_request_uses_configured_user_agent(monkeypatch):
+    import main
+
+    captured = {}
+
+    class DummyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return b'{"ok":true}'
+
+    def fake_urlopen(request, timeout):
+        captured["headers"] = dict(request.header_items())
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        return DummyResponse()
+
+    monkeypatch.setattr(main, "SMS_HTTP_USER_AGENT", "SonaTestClient/1.0")
+    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+
+    status_code, body = main.query_http_request(
+        "https://sms.example.test/send",
+        {"number": "9944117857"},
+        timeout=7,
+    )
+
+    assert status_code == 200
+    assert body == {"ok": True}
+    assert captured["url"].endswith("?number=9944117857")
+    assert captured["timeout"] == 7
+    assert captured["headers"]["User-agent"] == "SonaTestClient/1.0"
+
+
 def test_otp_message_template_supports_hugging_face_escaped_newlines(monkeypatch):
     import main
 

@@ -160,6 +160,7 @@ class Settings:
     sms_otp_enabled: bool
     sms_provider: str
     sms_timeout_seconds: int
+    sms_http_user_agent: str
     otp_expire_minutes: int
     otp_resend_cooldown_seconds: int
     otp_max_attempts: int
@@ -324,6 +325,11 @@ def build_settings() -> Settings:
         sms_otp_enabled=get_bool("SMS_OTP_ENABLED", False),
         sms_provider=(get_str("SMS_PROVIDER", "onhand") or "onhand").lower(),
         sms_timeout_seconds=get_int("SMS_TIMEOUT_SECONDS", 10),
+        sms_http_user_agent=get_str(
+            "SMS_HTTP_USER_AGENT",
+            "SonaJewelleryChatbot/1.0",
+        )
+        or "SonaJewelleryChatbot/1.0",
         otp_expire_minutes=get_int("OTP_EXPIRE_MINUTES", 5),
         otp_resend_cooldown_seconds=get_int("OTP_RESEND_COOLDOWN_SECONDS", 60),
         otp_max_attempts=get_int("OTP_MAX_ATTEMPTS", 5),
@@ -423,6 +429,7 @@ FIREBASE_CERTS_URL = settings.firebase_certs_url
 SMS_OTP_ENABLED = settings.sms_otp_enabled
 SMS_PROVIDER = settings.sms_provider
 SMS_TIMEOUT_SECONDS = settings.sms_timeout_seconds
+SMS_HTTP_USER_AGENT = settings.sms_http_user_agent
 OTP_EXPIRE_MINUTES = settings.otp_expire_minutes
 OTP_RESEND_COOLDOWN_SECONDS = settings.otp_resend_cooldown_seconds
 OTP_MAX_ATTEMPTS = settings.otp_max_attempts

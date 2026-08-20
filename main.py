@@ -110,6 +110,7 @@ from config import (
     SENTRY_RELEASE,
     SENTRY_SEND_DEFAULT_PII,
     SENTRY_TRACES_SAMPLE_RATE,
+    SMS_HTTP_USER_AGENT,
     SMS_OTP_ENABLED,
     SMS_PROVIDER,
     SMS_TIMEOUT_SECONDS,
@@ -453,6 +454,16 @@ def json_http_request(
         except json.JSONDecodeError:
             body = {"raw": raw_body}
         return response.status, body if isinstance(body, dict) else {"data": body}
+
+
+def sms_http_headers(content_type: str | None = None) -> dict[str, str]:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": SMS_HTTP_USER_AGENT,
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
 
 
 def send_monitoring_alert(
@@ -1490,10 +1501,7 @@ def urlencoded_http_request(
     request = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers=sms_http_headers("application/x-www-form-urlencoded"),
         method=method,
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -1512,7 +1520,7 @@ def query_http_request(url: str, payload: dict[str, Any], timeout: int) -> tuple
     request_url = f"{url}{separator}{urllib.parse.urlencode(payload)}"
     request = urllib.request.Request(
         request_url,
-        headers={"Accept": "application/json"},
+        headers=sms_http_headers(),
         method="GET",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -1550,6 +1558,7 @@ def send_sms_via_onhand(phone: str, message: str, otp: str) -> bool:
                 ONHANDSMS_METHOD,
                 ONHANDSMS_API_URL,
                 payload,
+                headers=sms_http_headers(),
                 timeout=SMS_TIMEOUT_SECONDS,
             )
     except urllib.error.HTTPError as exc:
@@ -1561,7 +1570,7 @@ def send_sms_via_onhand(phone: str, message: str, otp: str) -> bool:
             phone_masked=phone_mask(phone),
             status_code=exc.code,
             error_type=exc.__class__.__name__,
-            error_body=error_body[:500],
+            error_body=error_body[:1200],
         )
         return False
     except Exception as exc:

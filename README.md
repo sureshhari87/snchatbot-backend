@@ -197,6 +197,7 @@ Production Hugging Face secrets:
 ```env
 SMS_OTP_ENABLED=1
 SMS_PROVIDER=onhand
+SMS_HTTP_USER_AGENT=SonaJewelleryChatbot/1.0
 PHONE_AUTH_PEPPER=replace-with-long-stable-secret
 ONHANDSMS_API_URL=http://api.onhandsms.com/api/v2/sendsms
 ONHANDSMS_USERNAME=9944117857
@@ -211,6 +212,7 @@ ONHANDSMS_PAYLOAD_TEMPLATE={"username":"{username}","password":"{password}","sen
 
 If your OnhandSMS account supports HTTPS for the same endpoint, prefer the `https://` URL. The backend URL-encodes `message`, line breaks, and spaces before calling OnhandSMS.
 For your own live test, call `/auth/otp/request` with `{"phone":"9944117857"}`. Keep `"number":"{phone_local}"` in the payload template so real customer OTPs go to the customer-entered phone number.
+If OnhandSMS returns a Cloudflare `403 Attention Required` page, ask Onhand support to allow your hosted backend/API traffic or provide their direct server-to-server API URL. You can also set `SMS_HTTP_USER_AGENT` to the exact value they approve.
 
 If OnhandSMS gives different API field names, set `ONHANDSMS_PAYLOAD_TEMPLATE` as a JSON string, for example:
 
