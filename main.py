@@ -1457,7 +1457,8 @@ def render_onhandsms_payload(phone: str, message: str, otp: str) -> dict[str, An
     if ONHANDSMS_PAYLOAD_TEMPLATE:
         rendered = ONHANDSMS_PAYLOAD_TEMPLATE
         for key, value in context.items():
-            rendered = rendered.replace(f"{{{key}}}", value)
+            escaped_value = json.dumps(value)[1:-1]
+            rendered = rendered.replace(f"{{{key}}}", escaped_value)
         try:
             payload = json.loads(rendered)
         except json.JSONDecodeError as exc:
@@ -1529,8 +1530,8 @@ def send_sms_via_onhand(phone: str, message: str, otp: str) -> bool:
     if not onhandsms_is_configured():
         return False
 
-    payload = render_onhandsms_payload(phone, message, otp)
     try:
+        payload = render_onhandsms_payload(phone, message, otp)
         if ONHANDSMS_METHOD == "GET" or ONHANDSMS_PAYLOAD_FORMAT == "query":
             status_code, response_body = query_http_request(
                 ONHANDSMS_API_URL,
