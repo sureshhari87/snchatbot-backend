@@ -1384,7 +1384,9 @@ def generate_otp_code() -> str:
 
 
 def hash_otp_code(phone_hash: str, otp: str) -> str:
-    return hashlib.sha256(f"{PHONE_AUTH_PEPPER or SECRET_KEY}:{phone_hash}:{otp}".encode()).hexdigest()
+    return hashlib.sha256(
+        f"{PHONE_AUTH_PEPPER or SECRET_KEY}:{phone_hash}:{otp}".encode()
+    ).hexdigest()
 
 
 def onhandsms_is_configured() -> bool:
@@ -1438,9 +1440,8 @@ def sms_dependency_status() -> dict[str, Any]:
 
 def render_otp_message(otp: str) -> str:
     return (
-        ONHANDSMS_MESSAGE_TEMPLATE.replace("{otp}", otp).replace(
-            "{minutes}", str(OTP_EXPIRE_MINUTES)
-        )
+        ONHANDSMS_MESSAGE_TEMPLATE.replace("{otp}", otp)
+        .replace("{minutes}", str(OTP_EXPIRE_MINUTES))
         .replace("\\n", "\n")
     )
 
@@ -1515,7 +1516,9 @@ def urlencoded_http_request(
         return response.status, body if isinstance(body, dict) else {"data": body}
 
 
-def query_http_request(url: str, payload: dict[str, Any], timeout: int) -> tuple[int, dict[str, Any]]:
+def query_http_request(
+    url: str, payload: dict[str, Any], timeout: int
+) -> tuple[int, dict[str, Any]]:
     separator = "&" if urllib.parse.urlsplit(url).query else "?"
     request_url = f"{url}{separator}{urllib.parse.urlencode(payload)}"
     request = urllib.request.Request(
@@ -1626,7 +1629,9 @@ def latest_phone_otp_challenge(
 
 def phone_user_for_number(db: Session, phone: str) -> tuple[User, bool]:
     phone_hash = phone_auth_hash(phone)
-    identity = db.query(PhoneAuthIdentity).filter(PhoneAuthIdentity.phone_hash == phone_hash).first()
+    identity = (
+        db.query(PhoneAuthIdentity).filter(PhoneAuthIdentity.phone_hash == phone_hash).first()
+    )
     if identity:
         user = db.query(User).filter(User.id == identity.user_id).first()
         if user:
@@ -2600,7 +2605,20 @@ LEAD_INTENT_KEYWORDS = {
     "gift": GIFT_KEYWORDS,
     "store_visit": ["store visit", "visit store", "appointment", "book visit"],
     "callback": ["call me", "callback", "phone call", "talk to support", "human support"],
-    "order_status": ["order status", "track order", "delivery status", "where is my order"],
+    "order_status": [
+        "order status",
+        "track order",
+        "delivery status",
+        "where is my order",
+        "delivery",
+        "shipping",
+        "shipment",
+        "order help",
+        "order support",
+        "help with order",
+        "help me with order",
+        "help with an order",
+    ],
     "return_refund": ["return", "refund", "cancel", "cancellation"],
     "complaint": ["complaint", "problem", "issue", "damaged", "wrong item"],
 }
@@ -2695,6 +2713,110 @@ def create_chat_lead(
     db.add(lead)
     db.flush()
     return lead
+
+
+ORDER_REFERENCE_STOPWORDS = {
+    "support",
+    "status",
+    "help",
+    "delivery",
+    "shipping",
+    "shipment",
+    "cancellation",
+    "cancel",
+    "return",
+    "refund",
+}
+
+
+def extract_order_reference(message: str) -> str | None:
+    direct_match = re.search(r"\b(?:ord|order|pay|razorpay)[-_][a-zA-Z0-9_.:-]{3,80}\b", message)
+    if direct_match:
+        return direct_match.group(0).strip(".,;: ")
+
+    contextual_match = re.search(
+        r"\border(?:\s+(?:id|reference|number|no))?\s*[:#-]?\s+([a-zA-Z0-9][a-zA-Z0-9_.:-]{3,80})",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not contextual_match:
+        return None
+
+    candidate = contextual_match.group(1).strip(".,;: ")
+    if candidate.lower() in ORDER_REFERENCE_STOPWORDS:
+        return None
+    return candidate
+
+
+def detect_order_support_request_type(message: str) -> str:
+    msg = message.lower()
+    requested_actions = []
+    if message_has_any(msg, ["cancel", "cancellation"]):
+        requested_actions.append("cancel")
+    if message_has_any(msg, ["return"]):
+        requested_actions.append("return")
+    if message_has_any(msg, ["refund"]):
+        requested_actions.append("refund")
+    if message_has_any(msg, ["delivery", "shipping", "shipment"]):
+        requested_actions.append("delivery")
+    if message_has_any(msg, ["order status", "track order", "where is my order"]):
+        requested_actions.append("status")
+
+    unique_actions = list(dict.fromkeys(requested_actions))
+    if len(unique_actions) == 1:
+        return unique_actions[0]
+    if unique_actions:
+        return "other"
+    return "status"
+
+
+def create_chat_order_support_request(
+    db: Session,
+    user: User,
+    message: str,
+) -> OrderSupportRequest | None:
+    if not message_has_any(
+        message.lower(),
+        [
+            "order",
+            "delivery",
+            "shipping",
+            "shipment",
+            "cancel",
+            "cancellation",
+            "return",
+            "refund",
+        ],
+    ):
+        return None
+
+    order_reference = extract_order_reference(message)
+    request_type = detect_order_support_request_type(message)
+    support_request = OrderSupportRequest(
+        user_id=user.id,
+        order_reference=order_reference,
+        request_type=request_type,
+        message=message,
+        status="received",
+    )
+    db.add(support_request)
+    db.flush()
+    return support_request
+
+
+def build_order_support_reply(
+    order_reference: str | None,
+    request_type: str,
+) -> str:
+    if order_reference:
+        return (
+            f"I captured your {request_type.replace('_', ' ')} support request for "
+            f"order {order_reference}. Our team can now review it from the admin panel."
+        )
+    return (
+        "I can help with delivery, cancellation, return, refund, or order-status support. "
+        "Please share your order ID so the team can trace it quickly."
+    )
 
 
 def create_customer_action_lead(
@@ -3452,6 +3574,8 @@ def detect_chat_intent(message: str, filters: dict[str, Any], lead_intent: str |
 
 
 def is_unmatched_query(intent: str, result_count: int, filters: dict[str, Any]) -> bool:
+    if intent in {"order_status", "return_refund", "complaint"}:
+        return False
     return intent == "unmatched" or (result_count == 0 and not has_product_search_signal(filters))
 
 
@@ -4499,7 +4623,9 @@ async def verify_phone_otp(
             challenge.status = "expired"
             challenge.updated_at = utc_now()
             db.commit()
-        log_event("auth.otp_verify_failed", request, phone_masked=phone_mask(phone), reason="expired")
+        log_event(
+            "auth.otp_verify_failed", request, phone_masked=phone_mask(phone), reason="expired"
+        )
         raise HTTPException(status_code=400, detail="OTP expired or not found")
 
     if challenge.attempts >= challenge.max_attempts:
@@ -6680,6 +6806,7 @@ async def chat(
     lead_intent = detect_lead_intent(req.message.lower(), filters)
     handoff = None
     lead_captured = False
+    order_support_request = None
     if should_offer_handoff(req.message.lower(), lead_intent):
         lead = create_chat_lead(
             db,
@@ -6693,6 +6820,26 @@ async def chat(
 
     response_id = str(uuid4())
     chat_intent = detect_chat_intent(req.message, filters, lead_intent)
+    if chat_intent in {"order_status", "return_refund", "complaint"}:
+        products = []
+        result_count = 0
+        order_support_request = create_chat_order_support_request(
+            db,
+            current_user,
+            req.message,
+        )
+        if order_support_request:
+            reply = build_order_support_reply(
+                order_support_request.order_reference,
+                order_support_request.request_type,
+            )
+            fallback_reply = reply
+            suggested_next_questions = [
+                "Book a support callback",
+                "Check delivery status",
+                "Request cancellation help",
+                "Start a return or refund request",
+            ]
     if chat_intent not in {"order_status", "return_refund", "complaint"} and not lead_captured:
         reply, llm_source, llm_tool_calls = try_llm_reply(
             db,
@@ -6751,6 +6898,8 @@ async def chat(
         tool_calls.append("catalog_search")
     if lead_captured:
         tool_calls.append("lead_capture")
+    if order_support_request:
+        tool_calls.append("order_support_capture")
     tool_calls.extend(llm_tool_calls)
     answer_source = answer_source_for_chat(chat_intent, result_count, lead_captured)
     if not lead_captured and llm_source != "rules":

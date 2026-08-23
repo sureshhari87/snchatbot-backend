@@ -1,4 +1,10 @@
-from models import AiGeneratedConcept, BackInStockSubscription, LeadCapture, Product
+from models import (
+    AiGeneratedConcept,
+    BackInStockSubscription,
+    LeadCapture,
+    OrderSupportRequest,
+    Product,
+)
 
 
 def test_wishlist_flow(client, auth_headers, db):
@@ -239,6 +245,37 @@ def test_chat_captures_gift_lead(auth_client, db):
 
     lead = db.query(LeadCapture).filter(LeadCapture.session_id == "gift-lead-session").first()
     assert lead.intent == "gift"
+
+
+def test_chat_order_help_creates_order_support_request(auth_client, db):
+    response = auth_client.post(
+        "/chat",
+        json={
+            "message": (
+                "Help me with order ORD-FLUTTER-1001. Current status is placed. "
+                "I need delivery, cancellation, return, refund, or support help."
+            ),
+            "session_id": "flutter-order-help-session",
+        },
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["intent"] == "order_status"
+    assert "order_support_capture" in body["tool_calls"]
+    assert body["products"] == []
+    assert "ORD-FLUTTER-1001" in body["reply"]
+    assert body["suggested_next_questions"] == [
+        "Book a support callback",
+        "Check delivery status",
+        "Request cancellation help",
+        "Start a return or refund request",
+    ]
+
+    support_request = db.query(OrderSupportRequest).one()
+    assert support_request.order_reference == "ORD-FLUTTER-1001"
+    assert support_request.request_type == "other"
+    assert support_request.status == "received"
 
 
 def test_admin_can_view_and_update_leads(auth_client, admin_headers, client, db):
