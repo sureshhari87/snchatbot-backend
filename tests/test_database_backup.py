@@ -1,10 +1,24 @@
 import sqlite3
+import tempfile
+from pathlib import Path
 
 from scripts import backup_database
 
 
-def test_sqlite_backup_creates_database_copy_and_manifest(tmp_path):
-    source = tmp_path / "source.db"
+def test_sqlite_backup_creates_database_copy_and_manifest():
+    repo_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(
+        prefix="database-backup-test-",
+        dir=repo_root,
+    ) as temp_dir:
+        workspace = Path(temp_dir)
+        source = workspace / "source.db"
+        backup_dir = workspace / "backups"
+
+        run_sqlite_backup_assertions(source, backup_dir)
+
+
+def run_sqlite_backup_assertions(source: Path, backup_dir: Path):
     connection = sqlite3.connect(source)
     try:
         connection.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
@@ -15,7 +29,7 @@ def test_sqlite_backup_creates_database_copy_and_manifest(tmp_path):
 
     backup_file, manifest_path = backup_database.backup_sqlite(
         f"sqlite:///{source}",
-        tmp_path / "backups",
+        backup_dir,
         "pre customer launch",
     )
 
