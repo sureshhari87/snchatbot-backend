@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import html
 import json
 import logging
@@ -99,6 +100,9 @@ from config import (
     PASSWORD_MIN_LENGTH,
     PASSWORD_RESET_EXPIRE_MINUTES,
     PHONE_AUTH_PEPPER,
+    RAZORPAY_KEY_ID,
+    RAZORPAY_KEY_SECRET,
+    RAZORPAY_WEBHOOK_SECRET,
     REFRESH_TOKEN_EXPIRE_DAYS,
     RESEND_API_KEY,
     RESEND_API_URL,
@@ -258,6 +262,8 @@ SENSITIVE_MONITORING_KEYS = {
     "password",
     "phone",
     "phone_number",
+    "razorpay_key_secret",
+    "razorpay_webhook_secret",
     "refresh_token",
     "secret",
     "set-cookie",
@@ -3147,6 +3153,160 @@ def upsert_local_order_snapshot(
     return order
 
 
+def razorpay_webhook_is_configured() -> bool:
+    return bool(RAZORPAY_WEBHOOK_SECRET)
+
+
+def razorpay_checkout_is_configured() -> bool:
+    return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+
+
+def razorpay_dependency_status() -> dict[str, Any]:
+    webhook_configured = razorpay_webhook_is_configured()
+    checkout_configured = razorpay_checkout_is_configured()
+    if webhook_configured or checkout_configured:
+        return {
+            "status": "configured",
+            "critical": False,
+            "provider": "razorpay",
+            "webhook_configured": webhook_configured,
+            "checkout_api_configured": checkout_configured,
+        }
+    return {
+        "status": "disabled",
+        "critical": False,
+        "provider": "razorpay",
+        "webhook_configured": False,
+        "checkout_api_configured": False,
+    }
+
+
+def razorpay_signature_is_valid(raw_body: bytes, signature: str | None) -> bool:
+    if not RAZORPAY_WEBHOOK_SECRET or not signature:
+        return False
+    expected_signature = hmac.new(
+        RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    return secrets.compare_digest(signature, expected_signature)
+
+
+def razorpay_entity(payload: dict[str, Any], kind: str) -> dict[str, Any]:
+    envelope = payload.get("payload")
+    if not isinstance(envelope, dict):
+        return {}
+    resource = envelope.get(kind)
+    if not isinstance(resource, dict):
+        return {}
+    entity = resource.get("entity")
+    return entity if isinstance(entity, dict) else {}
+
+
+def find_order_by_razorpay_ids(
+    db: Session,
+    razorpay_order_id: str | None,
+    payment_id: str | None,
+) -> OrderSnapshot | None:
+    filters = []
+    if razorpay_order_id:
+        filters.append(OrderSnapshot.order_reference == razorpay_order_id)
+    if payment_id:
+        filters.append(OrderSnapshot.payment_reference == payment_id)
+    if not filters:
+        return None
+    return (
+        db.query(OrderSnapshot)
+        .filter(or_(*filters))
+        .order_by(OrderSnapshot.updated_at.desc(), OrderSnapshot.id.desc())
+        .first()
+    )
+
+
+def razorpay_payment_status(event_name: str, payment: dict[str, Any]) -> str | None:
+    payment_state = str(payment.get("status") or "").lower()
+    if event_name == "payment.captured" or payment_state == "captured":
+        return "verified"
+    if event_name == "payment.authorized" or payment_state == "authorized":
+        return "authorized"
+    if event_name == "payment.failed" or payment_state == "failed":
+        return "failed"
+    if event_name == "refund.processed":
+        return "refunded"
+    if event_name == "refund.failed":
+        return "refund_failed"
+    if event_name == "refund.created":
+        return "refund_pending"
+    return None
+
+
+def apply_razorpay_webhook(
+    db: Session,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    event_name = str(payload.get("event") or "unknown")
+    payment = razorpay_entity(payload, "payment")
+    refund = razorpay_entity(payload, "refund")
+    order_entity = razorpay_entity(payload, "order")
+    payment_id = str(payment.get("id") or refund.get("payment_id") or "").strip()
+    razorpay_order_id = str(
+        payment.get("order_id") or order_entity.get("id") or ""
+    ).strip()
+    amount = payment.get("amount") or refund.get("amount")
+    currency = payment.get("currency")
+    audit_payload = {
+        "event": event_name,
+        "payment_id": payment_id or None,
+        "razorpay_order_id": razorpay_order_id or None,
+        "payment_status": payment.get("status") or None,
+        "amount": amount,
+        "currency": currency,
+    }
+    order = find_order_by_razorpay_ids(db, razorpay_order_id, payment_id)
+    response_payload: dict[str, Any] = {}
+    status_value = "unmatched"
+
+    if order is not None:
+        status_value = "received"
+        normalized_payment_status = razorpay_payment_status(event_name, payment)
+        if normalized_payment_status:
+            order.payment_status = normalized_payment_status
+            status_value = "updated"
+        if payment_id:
+            order.payment_reference = payment_id
+        if event_name == "payment.captured" and order.status in {
+            "",
+            "created",
+            "payment_pending",
+            "pending_payment",
+        }:
+            order.status = "placed"
+        order.raw_payload = dump_json_object({"last_razorpay_webhook": audit_payload})
+        order.updated_at = utc_now()
+        response_payload = {
+            "order_snapshot_id": order.id,
+            "order_reference": order.order_reference,
+            "payment_status": order.payment_status,
+        }
+
+    record_integration_event(
+        db,
+        service="razorpay",
+        action=event_name,
+        status_value=status_value,
+        user_id=order.user_id if order else None,
+        reference=razorpay_order_id or payment_id or None,
+        request_payload=audit_payload,
+        response_payload=response_payload,
+    )
+    return {
+        "event": event_name,
+        "status": status_value,
+        "order_reference": razorpay_order_id or None,
+        "payment_id": payment_id or None,
+    }
+
+
 def integration_status() -> dict[str, Any]:
     return {
         "order_backend": {
@@ -3167,6 +3327,10 @@ def integration_status() -> dict[str, Any]:
             "enabled": SMS_OTP_ENABLED,
             "provider": SMS_PROVIDER,
             "configured": sms_otp_is_configured(),
+        },
+        "razorpay": {
+            "webhook_configured": razorpay_webhook_is_configured(),
+            "checkout_api_configured": razorpay_checkout_is_configured(),
         },
         "llm": {
             "enabled": LLM_ENABLED and bool(LLM_BASE_URL and LLM_API_KEY),
@@ -4341,6 +4505,7 @@ def dependency_snapshot(db: Session) -> dict[str, Any]:
         "email": email_dependency_status(),
         "sms_otp": sms_dependency_status(),
         "oms": optional_service_status(OMS_ENABLED, bool(OMS_BASE_URL), "oms"),
+        "razorpay": razorpay_dependency_status(),
         "firebase_auth": optional_service_status(
             FIREBASE_AUTH_ENABLED, bool(FIREBASE_PROJECT_ID), "firebase_auth"
         ),
@@ -6443,6 +6608,41 @@ async def list_my_complaints(
         .order_by(ComplaintTicket.created_at.desc())
         .all()
     )
+
+
+@app.post("/payments/razorpay/webhook", response_model=MessageResponse)
+async def receive_razorpay_webhook(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not razorpay_webhook_is_configured():
+        raise HTTPException(status_code=503, detail="Razorpay webhook is not configured")
+
+    raw_body = await request.body()
+    signature = request.headers.get("x-razorpay-signature")
+    if not razorpay_signature_is_valid(raw_body, signature):
+        log_event("payments.razorpay_invalid_signature", request, level=logging.WARNING)
+        raise HTTPException(status_code=401, detail="Invalid Razorpay signature")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook payload")
+
+    result = apply_razorpay_webhook(db, payload)
+    increment_metric("razorpay_webhooks")
+    db.commit()
+    log_event(
+        "payments.razorpay_webhook_received",
+        request,
+        event_name=result["event"],
+        status_value=result["status"],
+        order_reference=result["order_reference"],
+        payment_id=result["payment_id"],
+    )
+    return MessageResponse(message="ok")
 
 
 @app.post("/orders/sync", response_model=OrderSnapshotOut)

@@ -147,6 +147,9 @@ class Settings:
     oms_api_key: str | None
     oms_timeout_seconds: int
     oms_enabled: bool
+    razorpay_key_id: str | None
+    razorpay_key_secret: str | None
+    razorpay_webhook_secret: str | None
     llm_enabled: bool
     llm_base_url: str | None
     llm_api_key: str | None
@@ -308,6 +311,9 @@ def build_settings() -> Settings:
         oms_api_key=get_str("OMS_API_KEY"),
         oms_timeout_seconds=get_int("OMS_TIMEOUT_SECONDS", 10),
         oms_enabled=get_bool("OMS_ENABLED", False),
+        razorpay_key_id=get_str("RAZORPAY_KEY_ID"),
+        razorpay_key_secret=get_str("RAZORPAY_KEY_SECRET"),
+        razorpay_webhook_secret=get_str("RAZORPAY_WEBHOOK_SECRET"),
         llm_enabled=get_bool("LLM_ENABLED", bool(llm_api_key)),
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
@@ -416,6 +422,9 @@ OMS_BASE_URL = settings.oms_base_url
 OMS_API_KEY = settings.oms_api_key
 OMS_TIMEOUT_SECONDS = settings.oms_timeout_seconds
 OMS_ENABLED = settings.oms_enabled
+RAZORPAY_KEY_ID = settings.razorpay_key_id
+RAZORPAY_KEY_SECRET = settings.razorpay_key_secret
+RAZORPAY_WEBHOOK_SECRET = settings.razorpay_webhook_secret
 LLM_ENABLED = settings.llm_enabled
 LLM_BASE_URL = settings.llm_base_url
 LLM_API_KEY = settings.llm_api_key

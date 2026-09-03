@@ -1,4 +1,14 @@
+import hashlib
+import hmac
+import json
+
 from models import ExternalIntegrationEvent, OrderSnapshot
+
+
+def razorpay_signature(payload: dict, secret: str) -> tuple[bytes, str]:
+    raw_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return raw_body, signature
 
 
 def test_local_order_sync_lookup_support_action_and_admin_update(
@@ -104,3 +114,85 @@ def test_local_order_sync_lookup_support_action_and_admin_update(
     events = db.query(ExternalIntegrationEvent).all()
     assert {event.service for event in events} >= {"order_backend", "oms"}
     assert {event.status for event in events} >= {"synced", "local"}
+
+
+def test_razorpay_webhook_updates_matching_order_snapshot(
+    client,
+    auth_headers,
+    db,
+    monkeypatch,
+):
+    import main
+
+    monkeypatch.setattr(main, "RAZORPAY_WEBHOOK_SECRET", "test_webhook_secret")
+    payload = {
+        "order_reference": "order_test_1001",
+        "status": "payment_pending",
+        "total": 24500,
+        "currency": "INR",
+        "payment_status": "pending",
+        "source": "android_app",
+        "items": [
+            {
+                "product_id": "snchatbot_1",
+                "backend_product_id": 1,
+                "name": "Gold Ring",
+                "qty": 1,
+                "price": 24500,
+            }
+        ],
+    }
+    sync_response = client.post("/orders/sync", headers=auth_headers, json=payload)
+    assert sync_response.status_code == 200
+
+    webhook_payload = {
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_test_1001",
+                    "order_id": "order_test_1001",
+                    "status": "captured",
+                    "amount": 2450000,
+                    "currency": "INR",
+                }
+            }
+        },
+    }
+    raw_body, signature = razorpay_signature(webhook_payload, "test_webhook_secret")
+
+    response = client.post(
+        "/payments/razorpay/webhook",
+        content=raw_body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Razorpay-Signature": signature,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "ok"
+
+    order = db.query(OrderSnapshot).filter_by(order_reference="order_test_1001").one()
+    assert order.payment_status == "verified"
+    assert order.payment_reference == "pay_test_1001"
+    assert order.status == "placed"
+
+    event = db.query(ExternalIntegrationEvent).filter_by(service="razorpay").one()
+    assert event.action == "payment.captured"
+    assert event.status == "updated"
+    assert event.reference == "order_test_1001"
+
+
+def test_razorpay_webhook_rejects_invalid_signature(client, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "RAZORPAY_WEBHOOK_SECRET", "test_webhook_secret")
+    response = client.post(
+        "/payments/razorpay/webhook",
+        json={"event": "payment.captured"},
+        headers={"X-Razorpay-Signature": "bad-signature"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid Razorpay signature"

@@ -130,6 +130,9 @@ Production integration secrets:
 - `OMS_BASE_URL` base URL for your order-management API
 - `OMS_API_KEY` bearer token for the OMS API
 - `OMS_TIMEOUT_SECONDS` default: `10`
+- `RAZORPAY_WEBHOOK_SECRET` verifies Razorpay webhook signatures for `POST /payments/razorpay/webhook`
+- `RAZORPAY_KEY_ID` Razorpay checkout key ID for future Hugging Face payment-order creation
+- `RAZORPAY_KEY_SECRET` Razorpay server key secret for future Hugging Face payment verification
 - `OPENAI_API_KEY` simple Hugging Face secret for OpenAI; do not put this in GitHub or Android
 - `OPENAI_BASE_URL` optional, default: `https://api.openai.com/v1`
 - `OPENAI_MODEL` optional, default: `gpt-4o-mini`
@@ -409,11 +412,32 @@ Important mobile flows:
 - Chat: `POST /chat` returns `intent`, `confidence`, `answer_source`, `tool_calls`, `guardrails`, `applied_filters`, `result_count`, `suggested_next_questions`, `lead_captured`, and optional `handoff`
 - Customer actions: wishlist, save-for-later, callback requests, appointments, custom-order requests, complaints, and order-support capture
 - Orders: `GET /orders/{order_reference}` and cancel/return/refund endpoints call the configured OMS when enabled
+- Payments: Razorpay can call `POST /payments/razorpay/webhook` on Hugging Face to verify payment events and update matching order snapshots
 - Feedback: `POST /feedback` stores thumbs-up, thumbs-down, not-helpful, rating, and comments against a `response_id`
 
 Order support is capture-only until `OMS_ENABLED=1` and `OMS_BASE_URL` are configured. After that, lookup, cancel, return, refund, and `/orders/support` requests are sent to your OMS and audited in `external_integration_events`. See [docs/oms-integration.md](docs/oms-integration.md) for the required OMS API contract and Android handling notes.
 
 The LLM layer is optional. When Hugging Face has `OPENAI_API_KEY` and `LLM_ENABLED=1` or no explicit `LLM_ENABLED=0`, `/chat` sends a grounded catalog prompt to the OpenAI chat-completions endpoint. If the LLM fails, the backend falls back to the existing deterministic catalog reply.
+
+## Razorpay webhook on Hugging Face
+
+Use Hugging Face for the webhook when Firebase Functions are not available on your Firebase plan.
+
+Webhook URL:
+
+```text
+https://sureshhari-snchatbot-backend.hf.space/payments/razorpay/webhook
+```
+
+Configure these Hugging Face Space secrets:
+
+```text
+RAZORPAY_WEBHOOK_SECRET=replace-with-same-secret-entered-in-razorpay-webhook-settings
+RAZORPAY_KEY_ID=replace-with-your-razorpay-key-id
+RAZORPAY_KEY_SECRET=replace-with-your-razorpay-key-secret
+```
+
+The webhook route validates Razorpay's `X-Razorpay-Signature` header using the raw request body before it updates any local order snapshot. Enable the `payment.captured` event in Razorpay.
 
 Admin production operations:
 
