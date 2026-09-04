@@ -520,6 +520,48 @@ class OrderSyncRequest(BaseModel):
     raw_payload: Optional[dict[str, Any]] = None
 
 
+class RazorpayOrderCreate(BaseModel):
+    amount: int = Field(..., ge=100)
+    currency: str = Field(default="INR", min_length=3, max_length=3)
+    receipt: Optional[str] = Field(default=None, max_length=40)
+    notes: dict[str, Any] = Field(default_factory=dict)
+    items: List[OrderItemSync] = Field(default_factory=list)
+    customer_name: Optional[str] = None
+    customer_email: Optional[EmailStr] = None
+    customer_phone: Optional[str] = None
+    delivery_address: Optional[dict[str, Any]] = None
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_currency(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("receipt")
+    @classmethod
+    def normalize_receipt(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+class RazorpayOrderOut(BaseModel):
+    key_id: str
+    order_id: str
+    order_reference: str
+    local_order_id: int
+    amount: int
+    currency: str
+    receipt: Optional[str] = None
+    status: str
+
+
+class RazorpayPaymentVerifyRequest(BaseModel):
+    razorpay_order_id: str = Field(..., min_length=1)
+    razorpay_payment_id: str = Field(..., min_length=1)
+    razorpay_signature: str = Field(..., min_length=1)
+
+
 class OrderItemOut(BaseModel):
     id: int
     product_reference: Optional[str] = None
@@ -552,6 +594,13 @@ class OrderSnapshotOut(BaseModel):
     items: List[OrderItemOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class RazorpayPaymentVerifyOut(BaseModel):
+    message: str
+    verified: bool
+    payment_id: str
+    order: OrderSnapshotOut
 
 
 class OrderStatusUpdate(BaseModel):

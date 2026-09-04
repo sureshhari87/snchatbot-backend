@@ -2,7 +2,81 @@
 
 The backend now supports a local Postgres-backed order source for the Android app. This works even before a separate external OMS is configured.
 
-## Android Checkout Sync
+## Android Razorpay Checkout
+
+For production payments, Android should create Razorpay orders through FastAPI instead of creating them in Firebase Functions or in the app.
+
+```http
+POST /payments/razorpay/orders
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "amount": 2450000,
+  "currency": "INR",
+  "receipt": "sona-cart-1001",
+  "notes": {
+    "cart_id": "cart-1001"
+  },
+  "customer_name": "Customer Name",
+  "customer_email": "customer@example.com",
+  "customer_phone": "9876543210",
+  "delivery_address": {
+    "line1": "12 Market Street",
+    "city": "Natham",
+    "postal_code": "624401"
+  },
+  "items": [
+    {
+      "product_id": "snchatbot_1",
+      "backend_product_id": 1,
+      "name": "Gold Ring",
+      "qty": 1,
+      "price": 24500,
+      "image": "https://example.com/ring.jpg"
+    }
+  ]
+}
+```
+
+`amount` is in Razorpay's smallest currency unit. For INR, send paise, so Rs. 24500 becomes `2450000`.
+
+Response:
+
+```json
+{
+  "key_id": "rzp_live_xxx",
+  "order_id": "order_xxx",
+  "order_reference": "order_xxx",
+  "local_order_id": 123,
+  "amount": 2450000,
+  "currency": "INR",
+  "receipt": "sona-cart-1001",
+  "status": "created"
+}
+```
+
+Use `key_id`, `order_id`, `amount`, and `currency` to open Razorpay Checkout. After Checkout success, verify on the backend:
+
+```http
+POST /payments/razorpay/verify
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "razorpay_order_id": "order_xxx",
+  "razorpay_payment_id": "pay_xxx",
+  "razorpay_signature": "signature_from_checkout"
+}
+```
+
+A valid signature updates the local order snapshot to `status=placed` and `payment_status=verified`.
+
+## Legacy Checkout Sync
 
 After Firebase/Razorpay checkout finalizes an order, sync a copy to FastAPI:
 

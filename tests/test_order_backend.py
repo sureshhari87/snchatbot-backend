@@ -184,6 +184,180 @@ def test_razorpay_webhook_updates_matching_order_snapshot(
     assert event.reference == "order_test_1001"
 
 
+def test_razorpay_order_create_persists_checkout_order(
+    client,
+    auth_headers,
+    db,
+    monkeypatch,
+):
+    import main
+
+    captured = {}
+
+    def fake_call_razorpay(method, path, payload):
+        captured["method"] = method
+        captured["path"] = path
+        captured["payload"] = payload
+        return 200, {
+            "id": "order_flutter_1001",
+            "amount": payload["amount"],
+            "currency": payload["currency"],
+            "receipt": payload["receipt"],
+            "status": "created",
+        }
+
+    monkeypatch.setattr(main, "RAZORPAY_KEY_ID", "rzp_test_key")
+    monkeypatch.setattr(main, "RAZORPAY_KEY_SECRET", "rzp_test_secret")
+    monkeypatch.setattr(main, "call_razorpay", fake_call_razorpay)
+
+    response = client.post(
+        "/payments/razorpay/orders",
+        headers=auth_headers,
+        json={
+            "amount": 2450000,
+            "currency": "INR",
+            "receipt": "sona-test-1001",
+            "notes": {"cart_id": "cart-1001"},
+            "customer_name": "Test Customer",
+            "customer_email": "customer@example.com",
+            "customer_phone": "9876543210",
+            "items": [
+                {
+                    "product_id": "snchatbot_1",
+                    "backend_product_id": 1,
+                    "name": "Gold Ring",
+                    "qty": 1,
+                    "price": 24500,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["key_id"] == "rzp_test_key"
+    assert data["order_id"] == "order_flutter_1001"
+    assert data["amount"] == 2450000
+    assert captured["method"] == "POST"
+    assert captured["path"] == "orders"
+    assert captured["payload"]["notes"]["cart_id"] == "cart-1001"
+
+    order = db.query(OrderSnapshot).filter_by(order_reference="order_flutter_1001").one()
+    assert order.status == "payment_pending"
+    assert order.payment_status == "pending"
+    assert order.total == 24500
+    assert order.source == "razorpay_checkout"
+
+    event = (
+        db.query(ExternalIntegrationEvent)
+        .filter_by(service="razorpay", action="create_order")
+        .one()
+    )
+    assert event.status == "created"
+    assert event.reference == "order_flutter_1001"
+
+
+def test_razorpay_payment_verify_marks_order_paid(
+    client,
+    auth_headers,
+    db,
+    monkeypatch,
+):
+    import main
+
+    monkeypatch.setattr(main, "RAZORPAY_KEY_ID", "rzp_test_key")
+    monkeypatch.setattr(main, "RAZORPAY_KEY_SECRET", "rzp_test_secret")
+
+    sync_response = client.post(
+        "/orders/sync",
+        headers=auth_headers,
+        json={
+            "order_reference": "order_flutter_1002",
+            "status": "payment_pending",
+            "total": 12500,
+            "currency": "INR",
+            "payment_status": "pending",
+            "source": "razorpay_checkout",
+            "items": [
+                {
+                    "product_id": "snchatbot_2",
+                    "backend_product_id": 2,
+                    "name": "Gold Chain",
+                    "qty": 1,
+                    "price": 12500,
+                }
+            ],
+        },
+    )
+    assert sync_response.status_code == 200
+
+    payment_id = "pay_flutter_1002"
+    signature = hmac.new(
+        b"rzp_test_secret",
+        f"order_flutter_1002|{payment_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    response = client.post(
+        "/payments/razorpay/verify",
+        headers=auth_headers,
+        json={
+            "razorpay_order_id": "order_flutter_1002",
+            "razorpay_payment_id": payment_id,
+            "razorpay_signature": signature,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["verified"] is True
+    assert data["payment_id"] == payment_id
+    assert data["order"]["status"] == "placed"
+    assert data["order"]["payment_status"] == "verified"
+
+    order = db.query(OrderSnapshot).filter_by(order_reference="order_flutter_1002").one()
+    assert order.status == "placed"
+    assert order.payment_status == "verified"
+    assert order.payment_reference == payment_id
+
+
+def test_razorpay_payment_verify_rejects_bad_signature(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    import main
+
+    monkeypatch.setattr(main, "RAZORPAY_KEY_ID", "rzp_test_key")
+    monkeypatch.setattr(main, "RAZORPAY_KEY_SECRET", "rzp_test_secret")
+
+    sync_response = client.post(
+        "/orders/sync",
+        headers=auth_headers,
+        json={
+            "order_reference": "order_flutter_1003",
+            "status": "payment_pending",
+            "total": 1000,
+            "currency": "INR",
+            "payment_status": "pending",
+        },
+    )
+    assert sync_response.status_code == 200
+
+    response = client.post(
+        "/payments/razorpay/verify",
+        headers=auth_headers,
+        json={
+            "razorpay_order_id": "order_flutter_1003",
+            "razorpay_payment_id": "pay_flutter_1003",
+            "razorpay_signature": "bad-signature",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid Razorpay payment signature"
+
+
 def test_razorpay_webhook_rejects_invalid_signature(client, monkeypatch):
     import main
 

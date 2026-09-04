@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import html
@@ -213,6 +214,10 @@ from schemas import (
     ProductCreate,
     ProductOut,
     ProductUpdate,
+    RazorpayOrderCreate,
+    RazorpayOrderOut,
+    RazorpayPaymentVerifyOut,
+    RazorpayPaymentVerifyRequest,
     RefreshTokenRequest,
     ResendVerificationRequest,
     ResetPasswordRequest,
@@ -3161,6 +3166,24 @@ def razorpay_checkout_is_configured() -> bool:
     return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
 
 
+def razorpay_api_headers() -> dict[str, str]:
+    credentials = f"{RAZORPAY_KEY_ID}:{RAZORPAY_KEY_SECRET}".encode("utf-8")
+    token = base64.b64encode(credentials).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
+def call_razorpay(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if not razorpay_checkout_is_configured():
+        raise RuntimeError("Razorpay checkout API is not configured")
+    url = f"https://api.razorpay.com/v1/{path.lstrip('/')}"
+    increment_metric("razorpay_requests")
+    return json_http_request(method, url, payload, razorpay_api_headers(), timeout=15)
+
+
 def razorpay_dependency_status() -> dict[str, Any]:
     webhook_configured = razorpay_webhook_is_configured()
     checkout_configured = razorpay_checkout_is_configured()
@@ -3181,6 +3204,42 @@ def razorpay_dependency_status() -> dict[str, Any]:
     }
 
 
+def razorpay_order_total(amount: int) -> float:
+    return round(amount / 100, 2)
+
+
+def razorpay_checkout_notes(payload: RazorpayOrderCreate, user: User) -> dict[str, str]:
+    notes: dict[str, str] = {}
+    for key, value in (payload.notes or {}).items():
+        if len(notes) >= 12:
+            break
+        key_text = str(key).strip()[:256]
+        if not key_text or value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            value_text = json.dumps(value, ensure_ascii=True, default=str)
+        else:
+            value_text = str(value)
+        notes[key_text] = value_text[:256]
+
+    notes.setdefault("source", "sona_flutter")
+    notes.setdefault("user_id", str(user.id))
+    notes.setdefault("environment", APP_ENV)
+    return dict(list(notes.items())[:15])
+
+
+def razorpay_order_request_payload(
+    payload: RazorpayOrderCreate,
+    user: User,
+) -> dict[str, Any]:
+    return {
+        "amount": payload.amount,
+        "currency": payload.currency,
+        "receipt": payload.receipt or f"sona-{uuid4().hex[:20]}",
+        "notes": razorpay_checkout_notes(payload, user),
+    }
+
+
 def razorpay_signature_is_valid(raw_body: bytes, signature: str | None) -> bool:
     if not RAZORPAY_WEBHOOK_SECRET or not signature:
         return False
@@ -3190,6 +3249,31 @@ def razorpay_signature_is_valid(raw_body: bytes, signature: str | None) -> bool:
         hashlib.sha256,
     ).hexdigest()
     return secrets.compare_digest(signature, expected_signature)
+
+
+def razorpay_checkout_signature_is_valid(
+    order_id: str,
+    payment_id: str,
+    signature: str,
+) -> bool:
+    if not RAZORPAY_KEY_SECRET:
+        return False
+    expected_signature = hmac.new(
+        RAZORPAY_KEY_SECRET.encode("utf-8"),
+        f"{order_id}|{payment_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return secrets.compare_digest(signature, expected_signature)
+
+
+def append_order_raw_payload(
+    order: OrderSnapshot,
+    key: str,
+    payload: dict[str, Any],
+) -> None:
+    raw_payload = load_json_object(order.raw_payload)
+    raw_payload[key] = payload
+    order.raw_payload = dump_json_object(raw_payload)
 
 
 def razorpay_entity(payload: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -6607,6 +6691,233 @@ async def list_my_complaints(
         .filter(ComplaintTicket.user_id == current_user.id)
         .order_by(ComplaintTicket.created_at.desc())
         .all()
+    )
+
+
+@app.post("/payments/razorpay/orders", response_model=RazorpayOrderOut)
+async def create_razorpay_checkout_order(
+    request: Request,
+    payload: RazorpayOrderCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not razorpay_checkout_is_configured():
+        raise HTTPException(status_code=503, detail="Razorpay checkout API is not configured")
+
+    request_payload = razorpay_order_request_payload(payload, current_user)
+    try:
+        status_code, razorpay_response = call_razorpay("POST", "orders", request_payload)
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="create_order",
+            status_value="failed",
+            user_id=current_user.id,
+            request_payload=request_payload,
+            response_payload={"error_body": error_body[:1200]},
+            status_code=exc.code,
+            error=f"Razorpay returned {exc.code}",
+        )
+        db.commit()
+        log_event(
+            "payments.razorpay_order_create_failed",
+            request,
+            level=logging.ERROR,
+            status_code=exc.code,
+            error_body=error_body[:500],
+        )
+        raise HTTPException(status_code=502, detail="Could not create Razorpay order") from exc
+    except Exception as exc:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="create_order",
+            status_value="failed",
+            user_id=current_user.id,
+            request_payload=request_payload,
+            error=exc.__class__.__name__,
+        )
+        db.commit()
+        log_event(
+            "payments.razorpay_order_create_failed",
+            request,
+            level=logging.ERROR,
+            error_type=exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=502, detail="Could not create Razorpay order") from exc
+
+    razorpay_order_id = str(razorpay_response.get("id") or "").strip()
+    if not razorpay_order_id:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="create_order",
+            status_value="failed",
+            user_id=current_user.id,
+            request_payload=request_payload,
+            response_payload=razorpay_response,
+            status_code=status_code,
+            error="Missing Razorpay order id",
+        )
+        db.commit()
+        raise HTTPException(status_code=502, detail="Razorpay order response was invalid")
+
+    amount = int(razorpay_response.get("amount") or payload.amount)
+    currency = str(razorpay_response.get("currency") or payload.currency).upper()
+    order_payload = OrderSyncRequest(
+        order_reference=razorpay_order_id,
+        status="payment_pending",
+        total=razorpay_order_total(amount),
+        currency=currency,
+        items=payload.items,
+        customer_name=payload.customer_name,
+        customer_email=payload.customer_email,
+        customer_phone=payload.customer_phone,
+        delivery_address=payload.delivery_address,
+        payment_status="pending",
+        source="razorpay_checkout",
+        raw_payload={
+            "razorpay_create_request": request_payload,
+            "razorpay_order": razorpay_response,
+        },
+    )
+    order = upsert_local_order_snapshot(db, current_user, order_payload)
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="create_order",
+        status_value="created",
+        user_id=current_user.id,
+        reference=razorpay_order_id,
+        request_payload=request_payload,
+        response_payload=razorpay_response,
+        status_code=status_code,
+    )
+    increment_metric("razorpay_order_creates")
+    db.commit()
+    db.refresh(order)
+    log_event(
+        "payments.razorpay_order_created",
+        request,
+        order_reference=razorpay_order_id,
+        amount=amount,
+        currency=currency,
+    )
+    return RazorpayOrderOut(
+        key_id=RAZORPAY_KEY_ID or "",
+        order_id=razorpay_order_id,
+        order_reference=razorpay_order_id,
+        local_order_id=order.id,
+        amount=amount,
+        currency=currency,
+        receipt=razorpay_response.get("receipt") or request_payload["receipt"],
+        status=str(razorpay_response.get("status") or "created"),
+    )
+
+
+@app.post("/payments/razorpay/verify", response_model=RazorpayPaymentVerifyOut)
+async def verify_razorpay_checkout_payment(
+    request: Request,
+    payload: RazorpayPaymentVerifyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not razorpay_checkout_is_configured():
+        raise HTTPException(status_code=503, detail="Razorpay checkout API is not configured")
+
+    order = local_order_for_user(db, current_user.id, payload.razorpay_order_id)
+    if order is None:
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="verify_payment",
+            status_value="missing_order",
+            user_id=current_user.id,
+            reference=payload.razorpay_order_id,
+            request_payload=payload.model_dump(),
+            error="Order does not belong to current user or was not created by backend",
+        )
+        db.commit()
+        raise HTTPException(status_code=404, detail="Razorpay order was not found")
+
+    if not razorpay_checkout_signature_is_valid(
+        payload.razorpay_order_id,
+        payload.razorpay_payment_id,
+        payload.razorpay_signature,
+    ):
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="verify_payment",
+            status_value="invalid_signature",
+            user_id=current_user.id,
+            reference=payload.razorpay_order_id,
+            request_payload={
+                "razorpay_order_id": payload.razorpay_order_id,
+                "razorpay_payment_id": payload.razorpay_payment_id,
+            },
+            error="Invalid Razorpay payment signature",
+        )
+        db.commit()
+        log_event(
+            "payments.razorpay_checkout_invalid_signature",
+            request,
+            level=logging.WARNING,
+            order_reference=payload.razorpay_order_id,
+            payment_id=payload.razorpay_payment_id,
+        )
+        raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
+
+    order.payment_status = "verified"
+    order.payment_reference = payload.razorpay_payment_id
+    if order.status in {"", "created", "payment_pending", "pending_payment"}:
+        order.status = "placed"
+    order.updated_at = utc_now()
+    append_order_raw_payload(
+        order,
+        "razorpay_checkout_verification",
+        {
+            "razorpay_order_id": payload.razorpay_order_id,
+            "razorpay_payment_id": payload.razorpay_payment_id,
+            "verified_at": order.updated_at.isoformat(),
+        },
+    )
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="verify_payment",
+        status_value="verified",
+        user_id=current_user.id,
+        reference=payload.razorpay_order_id,
+        request_payload={
+            "razorpay_order_id": payload.razorpay_order_id,
+            "razorpay_payment_id": payload.razorpay_payment_id,
+        },
+        response_payload={
+            "order_snapshot_id": order.id,
+            "payment_status": order.payment_status,
+        },
+    )
+    increment_metric("razorpay_payment_verifications")
+    db.commit()
+    db.refresh(order)
+    log_event(
+        "payments.razorpay_checkout_verified",
+        request,
+        order_reference=payload.razorpay_order_id,
+        payment_id=payload.razorpay_payment_id,
+    )
+    return RazorpayPaymentVerifyOut(
+        message="Payment verified",
+        verified=True,
+        payment_id=payload.razorpay_payment_id,
+        order=serialize_order_snapshot(db, order),
     )
 
 

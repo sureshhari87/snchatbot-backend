@@ -131,8 +131,8 @@ Production integration secrets:
 - `OMS_API_KEY` bearer token for the OMS API
 - `OMS_TIMEOUT_SECONDS` default: `10`
 - `RAZORPAY_WEBHOOK_SECRET` verifies Razorpay webhook signatures for `POST /payments/razorpay/webhook`
-- `RAZORPAY_KEY_ID` Razorpay checkout key ID for future Hugging Face payment-order creation
-- `RAZORPAY_KEY_SECRET` Razorpay server key secret for future Hugging Face payment verification
+- `RAZORPAY_KEY_ID` Razorpay checkout key ID returned to Android by `POST /payments/razorpay/orders`
+- `RAZORPAY_KEY_SECRET` Razorpay server key secret used to create orders and verify checkout signatures
 - `OPENAI_API_KEY` simple Hugging Face secret for OpenAI; do not put this in GitHub or Android
 - `OPENAI_BASE_URL` optional, default: `https://api.openai.com/v1`
 - `OPENAI_MODEL` optional, default: `gpt-4o-mini`
@@ -412,7 +412,7 @@ Important mobile flows:
 - Chat: `POST /chat` returns `intent`, `confidence`, `answer_source`, `tool_calls`, `guardrails`, `applied_filters`, `result_count`, `suggested_next_questions`, `lead_captured`, and optional `handoff`
 - Customer actions: wishlist, save-for-later, callback requests, appointments, custom-order requests, complaints, and order-support capture
 - Orders: `GET /orders/{order_reference}` and cancel/return/refund endpoints call the configured OMS when enabled
-- Payments: Razorpay can call `POST /payments/razorpay/webhook` on Hugging Face to verify payment events and update matching order snapshots
+- Payments: Android calls `POST /payments/razorpay/orders`, opens Razorpay Checkout with the returned `order_id` and `key_id`, then calls `POST /payments/razorpay/verify`; Razorpay also calls `POST /payments/razorpay/webhook` on Hugging Face for async payment events
 - Feedback: `POST /feedback` stores thumbs-up, thumbs-down, not-helpful, rating, and comments against a `response_id`
 
 Order support is capture-only until `OMS_ENABLED=1` and `OMS_BASE_URL` are configured. After that, lookup, cancel, return, refund, and `/orders/support` requests are sent to your OMS and audited in `external_integration_events`. See [docs/oms-integration.md](docs/oms-integration.md) for the required OMS API contract and Android handling notes.
@@ -422,6 +422,13 @@ The LLM layer is optional. When Hugging Face has `OPENAI_API_KEY` and `LLM_ENABL
 ## Razorpay webhook on Hugging Face
 
 Use Hugging Face for the webhook when Firebase Functions are not available on your Firebase plan.
+
+Android checkout flow:
+
+1. Call `POST /payments/razorpay/orders` with `amount` in paise, `currency`, cart `items`, and customer/address details.
+2. Open Razorpay Checkout in Flutter using response fields `key_id`, `order_id`, `amount`, and `currency`.
+3. After Checkout success, call `POST /payments/razorpay/verify` with `razorpay_order_id`, `razorpay_payment_id`, and `razorpay_signature`.
+4. Read `order.status` and `order.payment_status` from the verify response. A valid payment becomes `status=placed` and `payment_status=verified`.
 
 Webhook URL:
 

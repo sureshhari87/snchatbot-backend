@@ -137,12 +137,23 @@ Use these from high-intent chat moments such as availability, discount, gifts, c
 
 Wire:
 
+- `POST /payments/razorpay/orders`
+- `POST /payments/razorpay/verify`
+- `POST /orders/sync` only as a legacy fallback if checkout was completed outside FastAPI
+- `GET /orders/my`
 - `GET /orders/{order_reference}`
 - `POST /orders/{order_reference}/cancel`
 - `POST /orders/{order_reference}/return`
 - `POST /orders/{order_reference}/refund`
 - `POST /orders/support`
 - `GET /orders/support/my`
+
+Razorpay flow:
+
+1. Send cart total as paise to `POST /payments/razorpay/orders`.
+2. Open Razorpay Checkout with `key_id`, `order_id`, `amount`, and `currency`.
+3. Send Checkout success fields to `POST /payments/razorpay/verify`.
+4. Show success only when backend returns `verified=true`.
 
 Until real OMS is enabled, order endpoints may return `capture_only`. Show this as "Request received" rather than "Order updated".
 
