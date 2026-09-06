@@ -510,13 +510,14 @@ class OrderSyncRequest(BaseModel):
     customer_name: Optional[str] = None
     customer_email: Optional[EmailStr] = None
     customer_phone: Optional[str] = None
-    delivery_address: Optional[dict[str, Any]] = None
+    delivery_address: Optional[dict[str, Any] | str] = None
     payment_status: Optional[str] = None
     payment_reference: Optional[str] = None
     tracking_number: Optional[str] = None
     tracking_url: Optional[str] = None
     expected_delivery: Optional[str] = None
     source: str = "android_app"
+    metadata: Optional[dict[str, Any]] = None
     raw_payload: Optional[dict[str, Any]] = None
 
 
@@ -547,13 +548,19 @@ class RazorpayOrderCreate(BaseModel):
 
 class RazorpayOrderOut(BaseModel):
     key_id: str
+    keyId: str
     order_id: str
+    razorpayOrderId: str
     order_reference: str
     local_order_id: int
     amount: int
     currency: str
     receipt: Optional[str] = None
     status: str
+    payable_total: float
+    payableTotal: float
+    coupon_discount: float = 0
+    couponDiscount: float = 0
 
 
 class RazorpayPaymentVerifyRequest(BaseModel):
@@ -591,6 +598,8 @@ class OrderSnapshotOut(BaseModel):
     tracking_url: Optional[str] = None
     expected_delivery: Optional[str] = None
     source: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    delivery_promises: List[dict[str, Any]] = Field(default_factory=list)
     items: List[OrderItemOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -600,6 +609,16 @@ class RazorpayPaymentVerifyOut(BaseModel):
     message: str
     verified: bool
     payment_id: str
+    paymentId: str
+    order_reference: str
+    orderId: str
+    status: str
+    payment_status: str
+    paymentStatus: str
+    total: float
+    currency: str
+    items: List[OrderItemOut] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     order: OrderSnapshotOut
 
 

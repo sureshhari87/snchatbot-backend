@@ -3002,6 +3002,15 @@ def dump_json_object(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True)
 
 
+def normalize_delivery_address(value: dict[str, Any] | str | None) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    text_value = value.strip()
+    return {"formatted": text_value} if text_value else {}
+
+
 def load_json_list(raw_value: str | None) -> list[Any]:
     if not raw_value:
         return []
@@ -3076,6 +3085,11 @@ def serialize_order_item(item: OrderSnapshotItem) -> dict[str, Any]:
 
 
 def serialize_order_snapshot(db: Session, order: OrderSnapshot) -> dict[str, Any]:
+    raw_payload = load_json_object(order.raw_payload)
+    metadata = raw_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    delivery_promises = metadata.get("delivery_promises")
+    delivery_promises = delivery_promises if isinstance(delivery_promises, list) else []
     return {
         "id": order.id,
         "user_id": order.user_id,
@@ -3093,10 +3107,17 @@ def serialize_order_snapshot(db: Session, order: OrderSnapshot) -> dict[str, Any
         "tracking_url": order.tracking_url,
         "expected_delivery": order.expected_delivery,
         "source": order.source,
+        "metadata": metadata,
+        "delivery_promises": delivery_promises,
         "items": [serialize_order_item(item) for item in local_order_items(db, order.id)],
         "created_at": order.created_at,
         "updated_at": order.updated_at,
     }
+
+
+def order_snapshot_metadata(order: OrderSnapshot) -> dict[str, Any]:
+    metadata = load_json_object(order.raw_payload).get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
 
 
 def local_order_lookup_data(db: Session, order: OrderSnapshot) -> dict[str, Any]:
@@ -3131,7 +3152,7 @@ def upsert_local_order_snapshot(
     order.customer_name = payload.customer_name
     order.customer_email = str(payload.customer_email) if payload.customer_email else None
     order.customer_phone = payload.customer_phone
-    order.delivery_address = dump_json_object(payload.delivery_address or {})
+    order.delivery_address = dump_json_object(normalize_delivery_address(payload.delivery_address))
     order.payment_status = payload.payment_status
     order.payment_reference = payload.payment_reference
     order.tracking_number = payload.tracking_number
@@ -5530,6 +5551,8 @@ async def mobile_config(db: Session = Depends(get_db)):
             "order_sync": True,
             "order_backend_lookup": True,
             "oms_order_lookup": True,
+            "razorpay_checkout": razorpay_checkout_is_configured(),
+            "razorpay_webhook": razorpay_webhook_is_configured(),
             "llm_grounded_answers": llm_is_configured(),
             "addresses": True,
             "notification_settings": True,
@@ -6810,13 +6833,17 @@ async def create_razorpay_checkout_order(
     )
     return RazorpayOrderOut(
         key_id=RAZORPAY_KEY_ID or "",
+        keyId=RAZORPAY_KEY_ID or "",
         order_id=razorpay_order_id,
+        razorpayOrderId=razorpay_order_id,
         order_reference=razorpay_order_id,
         local_order_id=order.id,
         amount=amount,
         currency=currency,
         receipt=razorpay_response.get("receipt") or request_payload["receipt"],
         status=str(razorpay_response.get("status") or "created"),
+        payable_total=order.total,
+        payableTotal=order.total,
     )
 
 
@@ -6917,6 +6944,16 @@ async def verify_razorpay_checkout_payment(
         message="Payment verified",
         verified=True,
         payment_id=payload.razorpay_payment_id,
+        paymentId=payload.razorpay_payment_id,
+        order_reference=order.order_reference,
+        orderId=order.order_reference,
+        status=order.status,
+        payment_status=order.payment_status or "verified",
+        paymentStatus=order.payment_status or "verified",
+        total=order.total,
+        currency=order.currency,
+        items=[serialize_order_item(item) for item in local_order_items(db, order.id)],
+        metadata=order_snapshot_metadata(order),
         order=serialize_order_snapshot(db, order),
     )
 

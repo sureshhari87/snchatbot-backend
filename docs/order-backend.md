@@ -58,6 +58,8 @@ Response:
 }
 ```
 
+For Flutter compatibility, the response also includes camelCase aliases such as `keyId`, `razorpayOrderId`, and `payableTotal`.
+
 Use `key_id`, `order_id`, `amount`, and `currency` to open Razorpay Checkout. After Checkout success, verify on the backend:
 
 ```http
@@ -75,6 +77,7 @@ Content-Type: application/json
 ```
 
 A valid signature updates the local order snapshot to `status=placed` and `payment_status=verified`.
+The verify response includes both a nested `order` object and top-level fields such as `order_reference`, `status`, `payment_status`, `total`, `currency`, and `items` for payment recovery screens.
 
 ## Legacy Checkout Sync
 

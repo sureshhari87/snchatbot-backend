@@ -36,6 +36,15 @@ def test_local_order_sync_lookup_support_action_and_admin_update(
             "city": "Natham",
             "postal_code": "624401",
         },
+        "metadata": {
+            "delivery_promises": [
+                {
+                    "product_id": "snchatbot_1",
+                    "earliest_date": "2026-07-28",
+                    "latest_date": "2026-07-30",
+                }
+            ]
+        },
         "payment_status": "paid",
         "payment_reference": "pay_local_1001",
         "source": "android_app",
@@ -57,6 +66,8 @@ def test_local_order_sync_lookup_support_action_and_admin_update(
     assert synced["order_reference"] == "ORD-LOCAL-1001"
     assert synced["items"][0]["name"] == "Gold Ring"
     assert synced["delivery_address"]["city"] == "Natham"
+    assert synced["metadata"]["delivery_promises"][0]["product_id"] == "snchatbot_1"
+    assert synced["delivery_promises"][0]["latest_date"] == "2026-07-30"
 
     my_orders = client.get("/orders/my", headers=auth_headers)
     assert my_orders.status_code == 200
@@ -114,6 +125,26 @@ def test_local_order_sync_lookup_support_action_and_admin_update(
     events = db.query(ExternalIntegrationEvent).all()
     assert {event.service for event in events} >= {"order_backend", "oms"}
     assert {event.status for event in events} >= {"synced", "local"}
+
+
+def test_order_sync_accepts_flutter_formatted_delivery_address(client, auth_headers):
+    response = client.post(
+        "/orders/sync",
+        headers=auth_headers,
+        json={
+            "order_reference": "ORD-FORMATTED-1001",
+            "status": "placed",
+            "total": 15000,
+            "currency": "INR",
+            "delivery_address": "12 Market Street, Natham, Tamil Nadu, 624401",
+            "payment_status": "paid",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["delivery_address"] == {
+        "formatted": "12 Market Street, Natham, Tamil Nadu, 624401"
+    }
 
 
 def test_razorpay_webhook_updates_matching_order_snapshot(
@@ -236,8 +267,11 @@ def test_razorpay_order_create_persists_checkout_order(
     assert response.status_code == 200
     data = response.json()
     assert data["key_id"] == "rzp_test_key"
+    assert data["keyId"] == "rzp_test_key"
     assert data["order_id"] == "order_flutter_1001"
+    assert data["razorpayOrderId"] == "order_flutter_1001"
     assert data["amount"] == 2450000
+    assert data["payableTotal"] == 24500
     assert captured["method"] == "POST"
     assert captured["path"] == "orders"
     assert captured["payload"]["notes"]["cart_id"] == "cart-1001"
@@ -312,6 +346,12 @@ def test_razorpay_payment_verify_marks_order_paid(
     data = response.json()
     assert data["verified"] is True
     assert data["payment_id"] == payment_id
+    assert data["paymentId"] == payment_id
+    assert data["order_reference"] == "order_flutter_1002"
+    assert data["orderId"] == "order_flutter_1002"
+    assert data["status"] == "placed"
+    assert data["payment_status"] == "verified"
+    assert data["paymentStatus"] == "verified"
     assert data["order"]["status"] == "placed"
     assert data["order"]["payment_status"] == "verified"
 

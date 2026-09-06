@@ -73,7 +73,7 @@ def test_public_mobile_catalog_contracts(client, db):
     assert any(category["slug"] == "ring" for category in categories_response.json())
 
 
-def test_admin_knowledge_and_mobile_public_config(client, admin_headers, db):
+def test_admin_knowledge_and_mobile_public_config(client, admin_headers, db, monkeypatch):
     faq_response = client.post(
         "/admin/knowledge-base",
         headers=admin_headers,
@@ -114,6 +114,12 @@ def test_admin_knowledge_and_mobile_public_config(client, admin_headers, db):
     )
     assert config_response.status_code == 200
 
+    import main
+
+    monkeypatch.setattr(main, "RAZORPAY_KEY_ID", "rzp_test_key")
+    monkeypatch.setattr(main, "RAZORPAY_KEY_SECRET", "rzp_test_secret")
+    monkeypatch.setattr(main, "RAZORPAY_WEBHOOK_SECRET", "test_webhook_secret")
+
     mobile_response = client.get("/mobile/config")
     assert mobile_response.status_code == 200
     mobile_config = mobile_response.json()
@@ -121,6 +127,8 @@ def test_admin_knowledge_and_mobile_public_config(client, admin_headers, db):
     assert mobile_config["capabilities"]["admin"] is False
     assert mobile_config["capabilities"]["product_metadata"] is True
     assert mobile_config["capabilities"]["back_in_stock_alerts"] is True
+    assert mobile_config["capabilities"]["razorpay_checkout"] is True
+    assert mobile_config["capabilities"]["razorpay_webhook"] is True
     assert mobile_config["public_config"]["android_min_version"] == "1"
 
     config_entry = db.query(AppConfigEntry).filter(AppConfigEntry.key == "android_min_version").first()
