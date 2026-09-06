@@ -148,6 +148,81 @@ def test_chat_cheaper_followup_reduces_previous_budget(auth_client):
     assert body["products"][0]["name"] == "Classic Gold Ring"
 
 
+def test_chat_fresh_category_search_clears_stale_session_filters(auth_client):
+    session_id = "fresh-category-search"
+    auth_client.post(
+        "/chat",
+        json={
+            "message": "show me silver diamond rings under 20000 for daily wear gift",
+            "session_id": session_id,
+        },
+    )
+
+    response = auth_client.post(
+        "/chat",
+        json={
+            "message": "rings",
+            "session_id": session_id,
+        },
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["applied_filters"] == {"category": "Ring"}
+    assert body["result_count"] == 2
+    assert {product["category"] for product in body["products"]} == {"Ring"}
+
+
+def test_chat_under_budget_search_does_not_keep_previous_min_price(auth_client):
+    session_id = "fresh-budget-search"
+    auth_client.post(
+        "/chat",
+        json={
+            "message": "show me silver diamond rings between 20000 and 30000 for daily wear gift",
+            "session_id": session_id,
+        },
+    )
+
+    response = auth_client.post(
+        "/chat",
+        json={
+            "message": "good rings under 20000",
+            "session_id": session_id,
+        },
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["applied_filters"] == {"max_price": 20000, "category": "Ring"}
+    assert body["result_count"] == 2
+    assert all(product["price"] <= 20000 for product in body["products"])
+
+
+def test_chat_fresh_metal_category_search_clears_gift_and_feature_context(auth_client):
+    session_id = "fresh-metal-category-search"
+    auth_client.post(
+        "/chat",
+        json={
+            "message": "show me silver diamond rings under 20000 for daily wear gift",
+            "session_id": session_id,
+        },
+    )
+
+    response = auth_client.post(
+        "/chat",
+        json={
+            "message": "show me silver chain",
+            "session_id": session_id,
+        },
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["applied_filters"] == {"metal": "Silver", "category": "Necklace"}
+    assert "gift_intent" not in body["applied_filters"]
+    assert "feature" not in body["applied_filters"]
+
+
 def test_chat_saves_session_preferences(auth_client, db):
     response = auth_client.post(
         "/chat",

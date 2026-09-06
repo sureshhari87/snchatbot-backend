@@ -2361,25 +2361,34 @@ def product_search_query(
     gift_intent: str | None = None,
     in_stock_only: bool = False,
 ):
-    query = db.query(Product)
+    query = db.query(Product).filter(Product.price > 0)
 
     if q:
-        search = f"%{q.strip()}%"
-        query = query.filter(
-            or_(
-                Product.name.ilike(search),
-                Product.description.ilike(search),
-                Product.sku.ilike(search),
-                Product.category.ilike(search),
-                Product.metal.ilike(search),
-                Product.product_type.ilike(search),
-                Product.audience.ilike(search),
-                Product.purity.ilike(search),
-                metadata_text_match(Product.tags, q),
-                metadata_text_match(Product.occasion, q),
-                metadata_text_match(Product.style, q),
+        q_value = q.strip()
+        q_message = q_value.lower()
+        if category is None:
+            category = detect_category(q_message)
+        if metal is None:
+            metal = detect_metal(q_message)
+
+        text_search = product_query_text_search(q_value, category, metal)
+        if text_search:
+            search = f"%{text_search}%"
+            query = query.filter(
+                or_(
+                    Product.name.ilike(search),
+                    Product.description.ilike(search),
+                    Product.sku.ilike(search),
+                    Product.category.ilike(search),
+                    Product.metal.ilike(search),
+                    Product.product_type.ilike(search),
+                    Product.audience.ilike(search),
+                    Product.purity.ilike(search),
+                    metadata_text_match(Product.tags, text_search),
+                    metadata_text_match(Product.occasion, text_search),
+                    metadata_text_match(Product.style, text_search),
+                )
             )
-        )
     if category:
         query = query.filter(Product.category.ilike(category))
     if metal:
@@ -2688,6 +2697,25 @@ FILTER_KEYS = {
 
 def message_has_any(message: str, keywords: list[str]) -> bool:
     return any(re.search(rf"\b{re.escape(keyword)}\b", message) for keyword in keywords)
+
+
+def product_query_text_search(q: str, category: str | None, metal: str | None) -> str:
+    text = q.lower()
+    if category:
+        for keyword in CATEGORY_KEYWORDS.get(category, []):
+            text = re.sub(rf"\b{re.escape(keyword)}\b", " ", text)
+    if metal:
+        for keyword in METAL_KEYWORDS.get(metal, []):
+            text = re.sub(rf"\b{re.escape(keyword)}\b", " ", text)
+
+    text = re.sub(PRICE_AMOUNT_PATTERN, " ", text)
+    text = re.sub(
+        r"\b(show|find|search|suggest|recommend|good|best|me|for|under|below|within|"
+        r"upto|up|to|rs|inr|jewellery|jewelry|items|options|products|pieces)\b",
+        " ",
+        text,
+    )
+    return " ".join(text.split())
 
 
 def detect_lead_intent(message: str, filters: dict[str, Any] | None = None) -> str | None:
@@ -4177,6 +4205,71 @@ def should_reset_filters(message: str) -> bool:
     )
 
 
+REFERENTIAL_FOLLOWUP_KEYWORDS = [
+    "same",
+    "similar",
+    "these",
+    "those",
+    "them",
+    "ones",
+    "another",
+    "different",
+    "show more",
+    "more like",
+    "like this",
+    "like these",
+]
+
+
+def is_referential_filter_followup(
+    message: str,
+    updates: dict[str, Any],
+    relative_price: str | None,
+) -> bool:
+    if relative_price:
+        return True
+    if message_has_any(message, REFERENTIAL_FOLLOWUP_KEYWORDS):
+        return True
+    if message.startswith(("only ", "just ")):
+        refinement_keys = {"metal", "in_stock_only"}
+        return bool(updates) and set(updates).issubset(refinement_keys)
+    return False
+
+
+def should_start_new_search_frame(
+    message: str,
+    updates: dict[str, Any],
+    reset_filters: bool,
+    relative_price: str | None,
+) -> bool:
+    if reset_filters:
+        return True
+    if is_referential_filter_followup(message, updates, relative_price):
+        return False
+    if "category" in updates:
+        return True
+    if {"min_price", "max_price"} & set(updates) and (
+        {"metal", "gift_intent", "occasion", "style", "recipient", "feature"} & set(updates)
+    ):
+        return True
+    if message.startswith(
+        (
+            "show ",
+            "find ",
+            "search ",
+            "suggest ",
+            "recommend ",
+            "i want ",
+            "i need ",
+            "need ",
+            "looking for ",
+        )
+    ):
+        meaningful_keys = set(updates) - {"in_stock_only"}
+        return bool(meaningful_keys)
+    return False
+
+
 def parse_filter_updates(message: str) -> tuple[dict[str, Any], set[str], bool, str | None]:
     msg = message.lower()
     updates: dict[str, Any] = {}
@@ -4190,7 +4283,7 @@ def parse_filter_updates(message: str) -> tuple[dict[str, Any], set[str], bool, 
     metal = detect_metal(msg)
     if metal:
         updates["metal"] = metal
-    elif message_has_any(msg, ["any metal", "all metals"]):
+    elif message_has_any(msg, ["any metal", "all metals", "another metal", "different metal"]):
         clear_keys.add("metal")
 
     price_range = extract_price_range(msg)
@@ -4210,7 +4303,7 @@ def parse_filter_updates(message: str) -> tuple[dict[str, Any], set[str], bool, 
 
     if message_has_any(msg, ["cheaper", "lower price", "less expensive"]):
         relative_price = "cheaper"
-    elif message_has_any(msg, ["more expensive", "higher price", "premium", "luxury"]):
+    elif message_has_any(msg, ["more expensive", "higher price", "higher budget", "premium", "luxury"]):
         relative_price = "premium"
 
     if message_has_any(msg, ["in stock", "available", "ready to ship"]):
@@ -4249,10 +4342,22 @@ def cheaper_price_limit(current_limit: float | None) -> float:
 
 def merge_filter_state(previous_filters: dict[str, Any], message: str) -> dict[str, Any]:
     updates, clear_keys, reset_filters, relative_price = parse_filter_updates(message)
-    filters = empty_filter_state() if reset_filters else normalize_filters(previous_filters)
+    msg = message.lower()
+    starts_new_search = should_start_new_search_frame(
+        msg,
+        updates,
+        reset_filters,
+        relative_price,
+    )
+    filters = empty_filter_state() if starts_new_search else normalize_filters(previous_filters)
 
     for key in clear_keys:
         filters[key] = False if key in {"gift_intent", "in_stock_only"} else None
+
+    if "max_price" in updates and "min_price" not in updates:
+        filters["min_price"] = None
+    if "min_price" in updates and "max_price" not in updates:
+        filters["max_price"] = None
 
     filters.update(updates)
 
@@ -4287,7 +4392,7 @@ def filter_products(
     filters: dict[str, Any],
     limit: int = 5,
 ) -> tuple[List[Product], int]:
-    query = db.query(Product)
+    query = db.query(Product).filter(Product.price > 0)
 
     categories = category_options_for_filters(filters)
     if categories:

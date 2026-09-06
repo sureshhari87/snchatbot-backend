@@ -73,6 +73,15 @@ def test_public_mobile_catalog_contracts(client, db):
     assert any(category["slug"] == "ring" for category in categories_response.json())
 
 
+def test_public_mobile_catalog_query_infers_category_without_substring_leaks(client):
+    response = client.get("/products", params={"q": "rings"})
+
+    assert response.status_code == 200
+    products = response.json()
+    assert products
+    assert {product["category"] for product in products} == {"Ring"}
+
+
 def test_admin_knowledge_and_mobile_public_config(client, admin_headers, db, monkeypatch):
     faq_response = client.post(
         "/admin/knowledge-base",

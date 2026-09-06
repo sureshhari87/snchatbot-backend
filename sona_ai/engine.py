@@ -16,8 +16,16 @@ PRICE_OVER = re.compile(
     r"(?:over|above|from)\D{0,12}([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?",
     re.I,
 )
-KNOWN_METALS = ("gold", "rose gold", "white gold", "silver", "platinum", "diamond")
-KNOWN_CATEGORIES = ("ring", "necklace", "earring", "bracelet", "bangle", "pendant", "chain")
+KNOWN_METALS = ("rose gold", "white gold", "gold", "silver", "platinum", "diamond")
+CATEGORY_ALIASES = {
+    "ring": ("ring", "rings"),
+    "necklace": ("necklace", "necklaces", "chain", "chains", "choker", "mangalsutra"),
+    "earring": ("earring", "earrings", "stud", "studs", "hoop", "hoops", "jhumka", "jhumkas"),
+    "bracelet": ("bracelet", "bracelets"),
+    "bangle": ("bangle", "bangles", "kada"),
+    "pendant": ("pendant", "pendants"),
+}
+KNOWN_CATEGORIES = tuple(CATEGORY_ALIASES)
 STOP_WORDS = {"a", "an", "and", "for", "me", "show", "find", "jewellery", "jewelry", "the", "with"}
 
 
@@ -25,12 +33,33 @@ def _words(value: str) -> set[str]:
     return {word for word in re.findall(r"[a-z0-9]+", value.lower()) if word not in STOP_WORDS}
 
 
+def _has_phrase(value: str, phrase: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(phrase.lower())}\b", value.lower()))
+
+
+def _category_from_query(query: str) -> str | None:
+    for category, aliases in CATEGORY_ALIASES.items():
+        if any(_has_phrase(query, alias) for alias in aliases):
+            return category
+    return None
+
+
+def _category_matches(filter_category: str, product_category: str) -> bool:
+    product_words = _words(product_category)
+    aliases = CATEGORY_ALIASES.get(filter_category.lower(), (filter_category.lower(),))
+    return any(alias in product_words or _has_phrase(product_category, alias) for alias in aliases)
+
+
+def _has_customer_price(product: Product) -> bool:
+    return product.price > 0
+
+
 def parse_query(request: SearchRequest) -> dict[str, Any]:
     query = request.query.lower()
     under = PRICE_UNDER.search(query)
     over = PRICE_OVER.search(query)
-    category = request.category or next((x for x in KNOWN_CATEGORIES if x in query), None)
-    metal = request.metal or next((x for x in KNOWN_METALS if x in query), None)
+    category = request.category or _category_from_query(query)
+    metal = request.metal or next((x for x in KNOWN_METALS if _has_phrase(query, x)), None)
     return {
         "category": category,
         "metal": metal,
@@ -61,9 +90,11 @@ def search_catalog(request: SearchRequest) -> tuple[list[Product], dict[str, Any
     query_words = _words(request.query)
     scored: list[tuple[float, Product]] = []
     for product in request.products:
+        if not _has_customer_price(product):
+            continue
         if filters["in_stock_only"] and not product.in_stock:
             continue
-        if filters["category"] and filters["category"].lower() not in product.category.lower():
+        if filters["category"] and not _category_matches(filters["category"], product.category):
             continue
         if filters["metal"] and filters["metal"].lower() not in product.metal.lower():
             continue
@@ -84,6 +115,8 @@ def recommend(products: list[Product], seed: Product | None, occasion: str | Non
     ranked: list[tuple[float, Product, str]] = []
     for product in products:
         if seed and str(product.id) == str(seed.id):
+            continue
+        if not _has_customer_price(product):
             continue
         if not product.in_stock or (budget is not None and product.price > budget):
             continue
@@ -128,6 +161,8 @@ def personalize(products: list[Product], events: list[Any], categories: list[str
         metal_affinity[value.lower()] += 4
     ranked = []
     for product in products:
+        if not _has_customer_price(product):
+            continue
         if str(product.id) in seen or not product.in_stock or (budget and product.price > budget):
             continue
         score = category_affinity[product.category.lower()] + metal_affinity[product.metal.lower()]

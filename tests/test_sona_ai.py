@@ -40,6 +40,32 @@ CATALOG = [
     },
 ]
 
+CATALOG_WITH_PLACEHOLDERS = [
+    *CATALOG,
+    {
+        "id": "zero-earring",
+        "name": "Gold Earrings Placeholder",
+        "description": "Imported catalogue item without final price",
+        "category": "Earring",
+        "metal": "Gold",
+        "price": 0,
+        "image": "https://example.com/zero-earring.jpg",
+        "in_stock": True,
+        "stock_quantity": 10,
+    },
+    {
+        "id": "priced-earring",
+        "name": "Enchanting Crafted Studs",
+        "description": "Gold studs for daily wear",
+        "category": "Earring",
+        "metal": "Gold",
+        "price": 15500,
+        "image": "https://example.com/gold-studs.jpg",
+        "in_stock": True,
+        "stock_quantity": 3,
+    },
+]
+
 
 def test_sona_ai_routes_require_authentication(client):
     requests = {
@@ -72,6 +98,25 @@ def test_ai_search_matches_flutter_contract_and_parses_lakh(auth_client):
     assert body["answer_source"] in {"ai", "rules"}
 
 
+def test_ai_search_ignores_zero_price_and_distinguishes_earrings(auth_client):
+    response = auth_client.post(
+        "/sona/ai/search",
+        json={
+            "query": "Gold earrings",
+            "products": CATALOG_WITH_PLACEHOLDERS,
+            "limit": 12,
+            "in_stock_only": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied_filters"]["category"] == "earring"
+    assert body["applied_filters"]["metal"] == "gold"
+    assert [product["id"] for product in body["products"]] == ["priced-earring"]
+    assert all(product["price"] > 0 for product in body["products"])
+
+
 def test_ai_requests_reject_invalid_or_unknown_fields(auth_client):
     assert auth_client.post("/sona/ai/recommendations", json={"products": []}).status_code == 422
     assert (
@@ -100,6 +145,23 @@ def test_recommendation_contract(auth_client):
     assert body["strategy"] == "content-and-occasion"
 
 
+def test_recommendations_ignore_zero_price_catalogue_items(auth_client):
+    response = auth_client.post(
+        "/sona/ai/recommendations",
+        json={
+            "products": CATALOG_WITH_PLACEHOLDERS,
+            "occasion": "daily wear",
+            "budget": 20000,
+            "limit": 5,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "zero-earring" not in {product["id"] for product in body["products"]}
+    assert all(product["price"] > 0 for product in body["products"])
+
+
 def test_personalized_recommendations_prioritize_preferences(auth_client):
     response = auth_client.post(
         "/sona/ai/recommendations/personalized",
@@ -115,6 +177,24 @@ def test_personalized_recommendations_prioritize_preferences(auth_client):
     body = response.json()
     assert body["products"][0]["id"] == 1
     assert body["strategy"] == "privacy-preserving-session-affinity"
+
+
+def test_personalized_recommendations_ignore_zero_price_catalogue_items(auth_client):
+    response = auth_client.post(
+        "/sona/ai/recommendations/personalized",
+        json={
+            "products": CATALOG_WITH_PLACEHOLDERS,
+            "preferred_categories": ["Earring"],
+            "preferred_metals": ["Gold"],
+            "events": [],
+            "limit": 5,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["products"][0]["id"] == "priced-earring"
+    assert "zero-earring" not in {product["id"] for product in body["products"]}
 
 
 def test_concept_template_contract(auth_client):
