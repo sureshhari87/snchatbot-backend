@@ -208,6 +208,40 @@ def test_llm_grounded_chat_layer_uses_configured_provider(auth_client, db, monke
     assert event.status == "synced"
 
 
+def test_openai_llm_layer_uses_responses_api_for_latest_model(auth_client, db, monkeypatch):
+    def fake_json_http_request(method, url, payload=None, headers=None, timeout=10):
+        assert method == "POST"
+        assert url == "https://api.openai.com/v1/responses"
+        assert headers["Authorization"] == "Bearer openai-key"
+        assert payload["model"] == "gpt-6-astra"
+        assert payload["max_output_tokens"] == 350
+        assert payload["reasoning"] == {"effort": "low"}
+        assert "temperature" not in payload
+        assert "messages" not in payload
+        assert "catalog_products" in payload["input"]
+        return 200, {"output_text": "The Classic Gold Ring is a strong match under 20000."}
+
+    monkeypatch.setattr(main, "LLM_ENABLED", True)
+    monkeypatch.setattr(main, "LLM_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr(main, "LLM_API_KEY", "openai-key")
+    monkeypatch.setattr(main, "LLM_MODEL", "gpt-6-astra")
+    monkeypatch.setattr(main, "json_http_request", fake_json_http_request)
+
+    response = auth_client.post(
+        "/chat",
+        json={"message": "show gold rings under 20000", "session_id": "openai-llm-session"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reply"] == "The Classic Gold Ring is a strong match under 20000."
+    assert body["answer_source"] == "llm_grounded_catalog"
+
+    event = db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "llm").first()
+    assert event is not None
+    assert event.action == "responses"
+
+
 def test_llm_grounded_chat_layer_includes_relevant_knowledge(auth_client, db, monkeypatch):
     db.add(
         KnowledgeBaseItem(

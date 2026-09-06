@@ -135,7 +135,7 @@ Production integration secrets:
 - `RAZORPAY_KEY_SECRET` Razorpay server key secret used to create orders and verify checkout signatures
 - `OPENAI_API_KEY` simple Hugging Face secret for OpenAI; do not put this in GitHub or Android
 - `OPENAI_BASE_URL` optional, default: `https://api.openai.com/v1`
-- `OPENAI_MODEL` optional, default: `gpt-4o-mini`
+- `OPENAI_MODEL` optional, default: `gpt-6-astra`
 - `LLM_ENABLED` enables grounded LLM replies when `1`; if unset, an OpenAI key enables the LLM automatically
 - `LLM_BASE_URL` OpenAI-compatible provider URL; overrides `OPENAI_BASE_URL` when present
 - `LLM_API_KEY` generic provider key; overrides `OPENAI_API_KEY` when present
@@ -303,7 +303,7 @@ Before real customers use the app, follow [docs/database-backup-plan.md](docs/da
 
 The chatbot works with catalogue/rule-based answers by default. For Hugging Face OpenAI setup,
 store `OPENAI_API_KEY` as a Space secret and set `LLM_ENABLED=1` if that variable exists. The
-backend defaults to `https://api.openai.com/v1` and `gpt-4o-mini`. Advanced OpenAI-compatible
+backend defaults to `https://api.openai.com/v1` and `gpt-6-astra`. Advanced OpenAI-compatible
 providers can still use `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
 
 It sends only filtered catalogue and FAQ/policy context to the provider, validates the reply, and
@@ -417,7 +417,7 @@ Important mobile flows:
 
 Order support is capture-only until `OMS_ENABLED=1` and `OMS_BASE_URL` are configured. After that, lookup, cancel, return, refund, and `/orders/support` requests are sent to your OMS and audited in `external_integration_events`. See [docs/oms-integration.md](docs/oms-integration.md) for the required OMS API contract and Android handling notes.
 
-The LLM layer is optional. When Hugging Face has `OPENAI_API_KEY` and `LLM_ENABLED=1` or no explicit `LLM_ENABLED=0`, `/chat` sends a grounded catalog prompt to the OpenAI chat-completions endpoint. If the LLM fails, the backend falls back to the existing deterministic catalog reply.
+The LLM layer is optional. When Hugging Face has `OPENAI_API_KEY` and `LLM_ENABLED=1` or no explicit `LLM_ENABLED=0`, `/chat` sends a grounded catalog prompt to OpenAI's Responses API. If the LLM fails, the backend falls back to the existing deterministic catalog reply.
 
 ## Razorpay webhook on Hugging Face
 

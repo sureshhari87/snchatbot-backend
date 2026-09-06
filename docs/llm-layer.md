@@ -1,7 +1,7 @@
 # LLM Layer
 
 The chatbot works without an LLM. When LLM variables are present, the backend adds a guarded
-OpenAI-compatible chat-completions layer on top of the existing catalogue/rules engine.
+OpenAI-compatible generation layer on top of the existing catalogue/rules engine.
 
 ## Runtime Flow
 
@@ -21,7 +21,7 @@ not put it in the Android app.
 
 ```env
 OPENAI_API_KEY=replace-with-openai-api-key
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-6-astra
 LLM_ENABLED=1
 LLM_TIMEOUT_SECONDS=20
 LLM_MAX_TOKENS=350
@@ -42,7 +42,8 @@ LLM_MODEL=provider-model
 ```
 
 `LLM_BASE_URL` can be either the provider base URL or the full `/chat/completions` URL. The
-backend normalizes both forms.
+backend normalizes both forms. When the base URL is OpenAI's `https://api.openai.com/v1`, the
+backend uses the modern `/responses` endpoint for the latest OpenAI models.
 
 For MVP production, keep these off until you have budget limits and provider billing alerts:
 

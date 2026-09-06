@@ -38,7 +38,7 @@ async def root() -> dict:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "ai_configured": ai.enabled}
+    return {"status": "ok", "ai_configured": ai.enabled, "model": settings.openai_model}
 
 
 @app.get("/mobile/config")

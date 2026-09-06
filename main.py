@@ -3602,8 +3602,21 @@ def llm_is_configured() -> bool:
     return LLM_ENABLED and bool(LLM_BASE_URL and LLM_API_KEY)
 
 
+def normalized_llm_base_url() -> str:
+    return LLM_BASE_URL.rstrip("/") if LLM_BASE_URL else ""
+
+
+def llm_uses_openai_responses_api() -> bool:
+    base_url = normalized_llm_base_url().lower()
+    return "api.openai.com" in base_url and not base_url.endswith("/chat/completions")
+
+
 def llm_endpoint_url() -> str:
-    base_url = LLM_BASE_URL.rstrip("/") if LLM_BASE_URL else ""
+    base_url = normalized_llm_base_url()
+    if llm_uses_openai_responses_api():
+        if base_url.endswith("/responses"):
+            return base_url
+        return f"{base_url}/responses"
     if base_url.endswith("/chat/completions"):
         return base_url
     return f"{base_url}/chat/completions"
@@ -3620,6 +3633,13 @@ LLM_UNSAFE_REPLY_PATTERNS = [
     r"\b(?:upi|bank account|credit card|debit card)\b",
     r"https?://",
 ]
+LLM_SYSTEM_INSTRUCTIONS = (
+    "You are a jewellery ecommerce assistant. Answer only from the supplied catalog, FAQ, "
+    "and policy context. Do not invent stock, pricing, discounts, certification, warranty, "
+    "medical claims, investment guarantees, payment links, or order actions. Keep the answer "
+    "under 120 words. If the context is insufficient, ask one short follow-up or suggest "
+    "human support."
+)
 
 
 def tokenize_for_relevance(value: str | None) -> set[str]:
@@ -3731,6 +3751,25 @@ def build_llm_prompt(
 ) -> dict[str, Any]:
     product_context = llm_product_context(products)
     knowledge_context = llm_knowledge_context(knowledge_items)
+    grounded_context = {
+        "customer_message": message,
+        "applied_filters": compact_filters(filters),
+        "catalog_products": product_context,
+        "knowledge_context": knowledge_context,
+        "fallback_reply": fallback_reply,
+    }
+
+    if llm_uses_openai_responses_api():
+        payload: dict[str, Any] = {
+            "model": LLM_MODEL,
+            "instructions": LLM_SYSTEM_INSTRUCTIONS,
+            "input": json.dumps(grounded_context, default=str),
+            "max_output_tokens": LLM_MAX_TOKENS,
+        }
+        if LLM_MODEL.startswith("gpt-6"):
+            payload["reasoning"] = {"effort": "low"}
+        return payload
+
     return {
         "model": LLM_MODEL,
         "temperature": 0.2,
@@ -3738,29 +3777,41 @@ def build_llm_prompt(
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a jewellery ecommerce assistant. Answer only from the supplied "
-                    "catalog, FAQ, and policy context. Do not invent stock, pricing, discounts, "
-                    "certification, warranty, medical claims, investment guarantees, payment links, "
-                    "or order actions. Keep the answer under 120 words. If the context is "
-                    "insufficient, ask one short follow-up or suggest human support."
-                ),
+                "content": LLM_SYSTEM_INSTRUCTIONS,
             },
             {
                 "role": "user",
-                "content": json.dumps(
-                    {
-                        "customer_message": message,
-                        "applied_filters": compact_filters(filters),
-                        "catalog_products": product_context,
-                        "knowledge_context": knowledge_context,
-                        "fallback_reply": fallback_reply,
-                    },
-                    default=str,
-                ),
+                "content": json.dumps(grounded_context, default=str),
             },
         ],
     }
+
+
+def extract_llm_generated_text(body: dict[str, Any]) -> str:
+    output_text = body.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    output = body.get("output", [])
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content_items = item.get("content", [])
+            if not isinstance(content_items, list):
+                continue
+            for content in content_items:
+                if not isinstance(content, dict):
+                    continue
+                text = content.get("text") or content.get("output_text")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+
+    choices = body.get("choices", [])
+    if choices:
+        message_body = choices[0].get("message", {})
+        return str(message_body.get("content") or "").strip()
+    return ""
 
 
 def try_llm_reply(
@@ -3785,16 +3836,12 @@ def try_llm_reply(
             {"Authorization": f"Bearer {LLM_API_KEY}"},
             LLM_TIMEOUT_SECONDS,
         )
-        choices = body.get("choices", [])
-        generated = ""
-        if choices:
-            message_body = choices[0].get("message", {})
-            generated = str(message_body.get("content") or "").strip()
+        generated = extract_llm_generated_text(body)
         generated = validate_llm_reply(generated, fallback_reply)
         record_integration_event(
             db,
             service="llm",
-            action="chat_completion",
+            action="responses" if llm_uses_openai_responses_api() else "chat_completion",
             status_value="synced",
             user_id=user.id,
             request_payload={
@@ -3815,7 +3862,7 @@ def try_llm_reply(
         record_integration_event(
             db,
             service="llm",
-            action="chat_completion",
+            action="responses" if llm_uses_openai_responses_api() else "chat_completion",
             status_value="failed",
             user_id=user.id,
             request_payload={

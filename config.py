@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+OPENAI_DEFAULT_MODEL = "gpt-6-astra"
+
 
 def load_env_file(path: str = ".env") -> None:
     env_path = Path(path)
@@ -247,9 +250,9 @@ def build_settings() -> Settings:
     llm_base_url = (
         get_str("LLM_BASE_URL")
         or get_str("OPENAI_BASE_URL")
-        or ("https://api.openai.com/v1" if llm_api_key else None)
+        or (OPENAI_DEFAULT_BASE_URL if llm_api_key else None)
     )
-    llm_model = get_str("LLM_MODEL") or get_str("OPENAI_MODEL", "gpt-4o-mini")
+    llm_model = get_str("LLM_MODEL") or get_str("OPENAI_MODEL", OPENAI_DEFAULT_MODEL)
     firebase_project_id = get_str("FIREBASE_PROJECT_ID")
     frontend_reset_url = get_str("FRONTEND_RESET_URL", "http://localhost:3000/reset-password")
     frontend_verify_url = get_str("FRONTEND_VERIFY_URL", "http://localhost:3000/verify-email")

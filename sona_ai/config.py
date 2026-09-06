@@ -5,8 +5,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     openai_api_key: str | None = None
-    openai_model: str = "gpt-4.1-mini"
+    openai_model: str = "gpt-6-astra"
     openai_image_model: str = "gpt-image-1"
+    openai_max_output_tokens: int = 700
+    openai_reasoning_effort: str = "low"
     allowed_origins: str = "*"
     max_catalog_items: int = 500
     secret_key: str | None = None

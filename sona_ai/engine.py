@@ -181,6 +181,10 @@ class OpenAIClient:
     def enabled(self) -> bool:
         return bool(self.settings.openai_api_key)
 
+    @property
+    def model_uses_reasoning(self) -> bool:
+        return self.settings.openai_model.startswith("gpt-6")
+
     async def json_response(self, instructions: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         if not self.enabled:
             return None
@@ -189,8 +193,11 @@ class OpenAIClient:
             "model": self.settings.openai_model,
             "instructions": instructions,
             "input": json.dumps(payload, ensure_ascii=False),
+            "max_output_tokens": self.settings.openai_max_output_tokens,
             "text": {"format": {"type": "json_object"}},
         }
+        if self.model_uses_reasoning:
+            body["reasoning"] = {"effort": self.settings.openai_reasoning_effort}
         async with httpx.AsyncClient(timeout=35) as client:
             response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=body)
             response.raise_for_status()

@@ -1,6 +1,8 @@
 import importlib
 from unittest.mock import AsyncMock
 
+from sona_ai.config import Settings
+
 ai_main = importlib.import_module("sona_ai.main")
 
 
@@ -76,6 +78,22 @@ def test_sona_ai_routes_require_authentication(client):
     }
     for path, payload in requests.items():
         assert client.post(path, json=payload).status_code == 401
+
+
+def test_sona_ai_default_openai_model_is_latest(monkeypatch):
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    settings = Settings()
+
+    assert settings.openai_model == "gpt-6-astra"
+    assert settings.openai_reasoning_effort == "low"
+
+
+def test_sona_ai_health_exposes_non_secret_model_name(client):
+    response = client.get("/sona/health")
+
+    assert response.status_code == 200
+    assert response.json()["model"] == ai_main.settings.openai_model
 
 
 def test_ai_search_matches_flutter_contract_and_parses_lakh(auth_client):

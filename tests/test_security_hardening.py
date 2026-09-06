@@ -39,7 +39,7 @@ def test_openai_api_key_enables_default_llm_settings(monkeypatch):
     assert settings.llm_enabled is True
     assert settings.llm_api_key == "openai-test-key"
     assert settings.llm_base_url == "https://api.openai.com/v1"
-    assert settings.llm_model == "gpt-4o-mini"
+    assert settings.llm_model == "gpt-6-astra"
 
 
 def test_llm_enabled_can_disable_openai_alias(monkeypatch):
