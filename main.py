@@ -4,6 +4,7 @@ import hmac
 import html
 import json
 import logging
+import os
 import re
 import secrets
 import smtplib
@@ -36,6 +37,15 @@ from sqlalchemy.orm import Session
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials as firebase_credentials
+    from firebase_admin import firestore as firebase_firestore
+except Exception:  # pragma: no cover - optional production integration
+    firebase_admin = None
+    firebase_credentials = None
+    firebase_firestore = None
+
 from config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     ADMIN_BOOTSTRAP_EMAIL,
@@ -66,6 +76,17 @@ from config import (
     FIREBASE_CERTS_URL,
     FIREBASE_PROJECT_ID,
     FIREBASE_REQUIRE_EMAIL_VERIFIED,
+    FIREBASE_SERVICE_ACCOUNT_JSON,
+    FIREBASE_SERVICE_ACCOUNT_PATH,
+    FIRESTORE_COMMERCE_ENABLED,
+    FIRESTORE_COUPONS_COLLECTION,
+    FIRESTORE_GIFT_VOUCHERS_COLLECTION,
+    FIRESTORE_GOLD_RATES_COLLECTION,
+    FIRESTORE_GOLD_RATES_DOCUMENT,
+    FIRESTORE_ORDERS_COLLECTION,
+    FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION,
+    FIRESTORE_PRODUCTS_COLLECTION,
+    FIRESTORE_USERS_COLLECTION,
     FRONTEND_RESET_URL,
     FRONTEND_VERIFY_URL,
     HTTPS_REDIRECT,
@@ -101,13 +122,16 @@ from config import (
     PASSWORD_MIN_LENGTH,
     PASSWORD_RESET_EXPIRE_MINUTES,
     PHONE_AUTH_PEPPER,
+    PURCHASE_REWARD_RUPEES_PER_POINT,
     RAZORPAY_KEY_ID,
     RAZORPAY_KEY_SECRET,
     RAZORPAY_WEBHOOK_SECRET,
+    REFERRAL_REWARD_POINTS,
     REFRESH_TOKEN_EXPIRE_DAYS,
     RESEND_API_KEY,
     RESEND_API_URL,
     RESEND_VERIFICATION_COOLDOWN_SECONDS,
+    REWARD_POINT_VALUE_RUPEES,
     RUN_MIGRATIONS_ON_STARTUP,
     SECRET_KEY,
     SENTRY_DSN,
@@ -202,6 +226,7 @@ from schemas import (
     NotificationSettingsUpdate,
     OrderActionOut,
     OrderActionRequest,
+    OrderItemSync,
     OrderLookupOut,
     OrderSnapshotOut,
     OrderStatusUpdate,
@@ -3257,7 +3282,951 @@ def razorpay_order_total(amount: int) -> float:
     return round(amount / 100, 2)
 
 
-def razorpay_checkout_notes(payload: RazorpayOrderCreate, user: User) -> dict[str, str]:
+def parse_optional_int(value: Any, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_optional_float(value: Any, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def request_coupon_code(payload: RazorpayOrderCreate) -> str | None:
+    value = payload.coupon_code or (payload.notes or {}).get("coupon_code")
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def request_gift_voucher_code(payload: RazorpayOrderCreate) -> str | None:
+    value = payload.gift_voucher_code or (payload.notes or {}).get("gift_voucher_code")
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def request_reward_points(payload: RazorpayOrderCreate) -> int:
+    note_value = (payload.notes or {}).get("reward_points_requested")
+    legacy_note_value = (payload.notes or {}).get("reward_points_used")
+    return max(
+        int(payload.reward_points_requested or 0),
+        parse_optional_int(note_value),
+        parse_optional_int(legacy_note_value),
+    )
+
+
+def client_coupon_discount(payload: RazorpayOrderCreate) -> float:
+    return parse_optional_float((payload.notes or {}).get("coupon_discount"))
+
+
+_FIRESTORE_CLIENT: Any | None = None
+
+
+def firestore_commerce_credentials_configured() -> bool:
+    return bool(
+        FIREBASE_SERVICE_ACCOUNT_JSON
+        or FIREBASE_SERVICE_ACCOUNT_PATH
+        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    )
+
+
+def firestore_admin_available() -> bool:
+    return bool(firebase_admin and firebase_credentials and firebase_firestore)
+
+
+def firestore_commerce_is_configured() -> bool:
+    return (
+        FIRESTORE_COMMERCE_ENABLED
+        and bool(FIREBASE_PROJECT_ID)
+        and firestore_commerce_credentials_configured()
+        and firestore_admin_available()
+    )
+
+
+def firestore_commerce_dependency_status() -> dict[str, Any]:
+    if not FIRESTORE_COMMERCE_ENABLED:
+        return {"status": "disabled", "critical": False, "service": "firestore_commerce"}
+    if not FIREBASE_PROJECT_ID:
+        return {
+            "status": "misconfigured",
+            "critical": True,
+            "service": "firestore_commerce",
+            "reason": "missing_firebase_project_id",
+        }
+    if not firestore_commerce_credentials_configured():
+        return {
+            "status": "misconfigured",
+            "critical": True,
+            "service": "firestore_commerce",
+            "reason": "missing_service_account",
+        }
+    if not firestore_admin_available():
+        return {
+            "status": "dependency_missing",
+            "critical": True,
+            "service": "firestore_commerce",
+            "reason": "firebase_admin_not_installed",
+        }
+    return {
+        "status": "configured",
+        "critical": False,
+        "service": "firestore_commerce",
+        "project_id_configured": True,
+        "products_collection": FIRESTORE_PRODUCTS_COLLECTION,
+        "orders_collection": FIRESTORE_ORDERS_COLLECTION,
+    }
+
+
+def get_firestore_client() -> Any:
+    global _FIRESTORE_CLIENT
+    if _FIRESTORE_CLIENT is not None:
+        return _FIRESTORE_CLIENT
+    if not firestore_admin_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase Admin SDK is not installed for Firestore checkout",
+        )
+    if not FIREBASE_PROJECT_ID:
+        raise HTTPException(status_code=503, detail="FIREBASE_PROJECT_ID is not configured")
+    if not firestore_commerce_credentials_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase service account is not configured for Firestore checkout",
+        )
+
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        if FIREBASE_SERVICE_ACCOUNT_JSON:
+            service_account = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
+            credential = firebase_credentials.Certificate(service_account)
+        elif FIREBASE_SERVICE_ACCOUNT_PATH:
+            credential = firebase_credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_PATH)
+        else:
+            credential = firebase_credentials.ApplicationDefault()
+        firebase_admin.initialize_app(credential, {"projectId": FIREBASE_PROJECT_ID})
+
+    _FIRESTORE_CLIENT = firebase_firestore.client()
+    return _FIRESTORE_CLIENT
+
+
+def firestore_server_timestamp() -> Any:
+    return getattr(firebase_firestore, "SERVER_TIMESTAMP", utc_now())
+
+
+def firestore_increment(amount: int | float) -> Any:
+    increment = getattr(firebase_firestore, "Increment", None)
+    return increment(amount) if increment else amount
+
+
+def firestore_snapshot_dict(snapshot: Any) -> dict[str, Any]:
+    if not snapshot or not getattr(snapshot, "exists", False):
+        return {}
+    data = snapshot.to_dict() or {}
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def firestore_document_id(snapshot: Any, fallback: str) -> str:
+    return str(getattr(snapshot, "id", None) or fallback)
+
+
+def firestore_get(ref: Any, transaction: Any | None = None) -> Any:
+    try:
+        if transaction is not None:
+            return ref.get(transaction=transaction)
+    except TypeError:
+        pass
+    return ref.get()
+
+
+def firestore_stream_first(query: Any, transaction: Any | None = None) -> Any | None:
+    try:
+        iterator = query.limit(1).stream(transaction=transaction)
+    except TypeError:
+        iterator = query.limit(1).stream()
+    for snapshot in iterator:
+        return snapshot
+    return None
+
+
+def firestore_query_equal(collection: Any, field: str, value: Any) -> Any:
+    try:
+        return collection.where(field, "==", value)
+    except TypeError:
+        return collection.where(filter=(field, "==", value))
+
+
+def firestore_first_value(data: dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def firestore_to_float(value: Any) -> float:
+    if value is None or value == "":
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def firestore_to_int(value: Any) -> int:
+    if value is None or value == "":
+        return 0
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def firestore_to_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "yes", "1", "active", "available"}:
+        return True
+    if normalized in {"false", "no", "0", "inactive", "unavailable"}:
+        return False
+    return None
+
+
+def firestore_to_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    to_datetime = getattr(value, "to_datetime", None)
+    if callable(to_datetime):
+        return to_datetime()
+    return None
+
+
+def firestore_is_expired(value: Any) -> bool:
+    expires_at = firestore_to_datetime(value)
+    if expires_at is None:
+        return False
+    if expires_at.tzinfo is not None:
+        expires_at = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return expires_at < utc_now()
+
+
+def firestore_normalize_metal(value: Any) -> str:
+    metal = str(value or "").strip().lower()
+    if re.search(r"\bsilver\b", metal):
+        return "silver"
+    if re.search(r"\bgold\b", metal):
+        return "gold"
+    return metal
+
+
+def firestore_normalize_purity(value: Any) -> str:
+    purity = str(value or "22K").strip().upper()
+    if purity == "24KT":
+        return "24K"
+    if purity == "22KT":
+        return "22K"
+    if purity == "18KT":
+        return "18K"
+    if purity in {"80%", "80% HUID", "800 HUID", "SILVER 800"}:
+        return "800"
+    return purity or "22K"
+
+
+def firestore_product_has_dynamic_pricing(product: dict[str, Any]) -> bool:
+    metal_type = firestore_normalize_metal(
+        firestore_first_value(product, ["metalType", "metal_type", "metal", "category"])
+    )
+    has_supported_metal = metal_type in {"gold", "silver"}
+    has_weight = (
+        firestore_to_float(
+            firestore_first_value(
+                product,
+                ["metalWeight", "metal_weight", "netWeight", "net_weight", "weight"],
+            )
+        )
+        > 0
+    )
+    dynamic_pricing = firestore_first_value(product, ["useDynamicPricing", "use_dynamic_pricing"])
+    return has_supported_metal and has_weight and (
+        dynamic_pricing is None or firestore_to_bool(dynamic_pricing) is True
+    )
+
+
+def firestore_metal_rate(
+    metal_type: str,
+    purity: str,
+    rates: dict[str, Any],
+    fallback: float,
+) -> float:
+    if metal_type == "silver":
+        return firestore_to_float(rates.get("silver")) or fallback
+    if purity == "18K":
+        explicit_18k = firestore_to_float(rates.get("gold18k"))
+        if explicit_18k > 0:
+            return explicit_18k
+        gold_24k = firestore_to_float(rates.get("gold24k"))
+        if gold_24k > 0:
+            return gold_24k * 18 / 24
+        gold_22k = firestore_to_float(rates.get("gold22k"))
+        if gold_22k > 0:
+            return gold_22k * 18 / 22
+        return fallback
+    if purity == "24K":
+        return firestore_to_float(rates.get("gold24k")) or fallback
+    return firestore_to_float(rates.get("gold22k")) or fallback
+
+
+def firestore_product_price(product: dict[str, Any], rates: dict[str, Any]) -> float:
+    fallback_price = firestore_to_float(
+        firestore_first_value(product, ["price", "sellingPrice", "selling_price", "salePrice"])
+    )
+    if not firestore_product_has_dynamic_pricing(product):
+        return fallback_price
+
+    metal_type = firestore_normalize_metal(
+        firestore_first_value(product, ["metalType", "metal_type", "metal", "category"])
+    )
+    purity = firestore_normalize_purity(
+        firestore_first_value(product, ["purity", "metalPurity", "metal_purity"])
+    )
+    metal_rate = firestore_metal_rate(metal_type, purity, rates, fallback_price)
+    metal_weight = firestore_to_float(
+        firestore_first_value(
+            product,
+            ["metalWeight", "metal_weight", "netWeight", "net_weight", "weight"],
+        )
+    )
+    if metal_rate <= 0 or metal_weight <= 0:
+        return fallback_price
+
+    metal_value = metal_rate * metal_weight
+    wastage_percent = firestore_to_float(
+        firestore_first_value(product, ["wastagePercent", "wastage_percent"])
+    )
+    making_charge = firestore_to_float(
+        firestore_first_value(product, ["makingCharge", "making_charge"])
+    )
+    stone_charge = firestore_to_float(firestore_first_value(product, ["stoneCharge", "stone_charge"]))
+    diamond_charge = firestore_to_float(
+        firestore_first_value(product, ["diamondCharge", "diamond_charge"])
+    )
+    shipping_charge = firestore_to_float(
+        firestore_first_value(product, ["shippingCharge", "shipping_charge"])
+    )
+    gst_percent = firestore_to_float(firestore_first_value(product, ["gstPercent", "gst_percent"]))
+    gst_percent = gst_percent if gst_percent > 0 else 3.0
+    wastage_amount = metal_value * wastage_percent / 100
+    taxable_total = (
+        metal_value
+        + wastage_amount
+        + making_charge
+        + stone_charge
+        + diamond_charge
+        + shipping_charge
+    )
+    return taxable_total + (taxable_total * gst_percent / 100)
+
+
+def firestore_product_stock(product: dict[str, Any]) -> int:
+    return firestore_to_int(
+        firestore_first_value(product, ["stock_quantity", "stockQuantity", "stock", "quantity"])
+    )
+
+
+def firestore_product_active(product: dict[str, Any]) -> bool:
+    active = firestore_to_bool(firestore_first_value(product, ["active", "isActive"]))
+    deleted = firestore_to_bool(firestore_first_value(product, ["deleted", "isDeleted"]))
+    return (active is not False) and deleted is not True
+
+
+def firestore_product_collection(client: Any) -> Any:
+    return client.collection(FIRESTORE_PRODUCTS_COLLECTION)
+
+
+def firestore_find_product(
+    client: Any,
+    reference: str,
+    transaction: Any | None = None,
+) -> tuple[Any, Any, dict[str, Any]] | None:
+    products = firestore_product_collection(client)
+    snapshot = firestore_get(products.document(reference), transaction=transaction)
+    data = firestore_snapshot_dict(snapshot)
+    if data:
+        return products.document(reference), snapshot, data
+
+    for field_name in ["productId", "sku"]:
+        query = firestore_query_equal(products, field_name, reference)
+        snapshot = firestore_stream_first(query, transaction=transaction)
+        data = firestore_snapshot_dict(snapshot)
+        if data:
+            return products.document(firestore_document_id(snapshot, reference)), snapshot, data
+    return None
+
+
+def firestore_read_rates(client: Any) -> dict[str, Any]:
+    snapshot = (
+        client.collection(FIRESTORE_GOLD_RATES_COLLECTION)
+        .document(FIRESTORE_GOLD_RATES_DOCUMENT)
+        .get()
+    )
+    return firestore_snapshot_dict(snapshot)
+
+
+def firestore_user_document(client: Any, uid: str) -> Any:
+    return client.collection(FIRESTORE_USERS_COLLECTION).document(uid)
+
+
+def firestore_uid_for_user(db: Session, user: User, client: Any) -> str | None:
+    firebase_uid = str(getattr(user, "firebase_uid", "") or "").strip()
+    if firebase_uid:
+        return firebase_uid
+
+    email = str(user.email or "").strip().lower()
+    if not email or email.endswith("@phone.sona.invalid"):
+        return None
+
+    query = firestore_query_equal(client.collection(FIRESTORE_USERS_COLLECTION), "email", email)
+    snapshot = firestore_stream_first(query)
+    if not snapshot:
+        return None
+
+    firebase_uid = firestore_document_id(snapshot, "")
+    if firebase_uid:
+        user.firebase_uid = firebase_uid
+        user.auth_provider = "firebase"
+        db.flush()
+    return firebase_uid or None
+
+
+def hydrate_payment_firebase_identity(
+    db: Session,
+    user: User,
+    payload: RazorpayOrderCreate,
+) -> None:
+    if not payload.firebase_id_token:
+        return
+
+    firebase_payload = verify_firebase_id_token(payload.firebase_id_token)
+    email = firebase_email_for_identity(firebase_payload)
+    firebase_uid = str(firebase_payload["sub"])
+    if email != str(user.email or "").lower():
+        raise HTTPException(status_code=403, detail="Firebase token does not match this account")
+    if user.firebase_uid and user.firebase_uid != firebase_uid:
+        raise HTTPException(status_code=409, detail="Firebase identity does not match this user")
+
+    user.firebase_uid = firebase_uid
+    user.auth_provider = "firebase"
+    user.is_verified = True
+    db.flush()
+
+
+def firestore_coupon_reference(client: Any, code: str | None) -> tuple[Any | None, str | None]:
+    normalized = str(code or "").strip().upper()
+    if not normalized:
+        return None, None
+    return client.collection(FIRESTORE_COUPONS_COLLECTION).document(normalized), normalized
+
+
+def firestore_coupon_discount(
+    coupon_data: dict[str, Any],
+    subtotal_rupees: float,
+) -> float:
+    flat_discount = firestore_to_float(coupon_data.get("discount"))
+    discount_percent = firestore_to_float(coupon_data.get("discountPercent"))
+    max_discount = firestore_to_float(coupon_data.get("maxDiscount"))
+    discount = flat_discount
+    if discount_percent > 0:
+        discount = subtotal_rupees * discount_percent / 100
+        if max_discount > 0:
+            discount = min(discount, max_discount)
+    return round(max(min(discount, subtotal_rupees), 0), 2)
+
+
+def firestore_validate_coupon(
+    client: Any,
+    coupon_code: str | None,
+    subtotal_rupees: float,
+    transaction: Any | None = None,
+) -> dict[str, Any]:
+    coupon_ref, normalized_code = firestore_coupon_reference(client, coupon_code)
+    if not coupon_ref or not normalized_code:
+        return {"code": None, "discount": 0.0, "status": "not_requested"}
+
+    coupon_data = firestore_snapshot_dict(firestore_get(coupon_ref, transaction=transaction))
+    if not coupon_data or firestore_to_bool(coupon_data.get("active")) is not True:
+        raise HTTPException(status_code=409, detail="Coupon is invalid or expired")
+    if firestore_is_expired(coupon_data.get("expiresAt")):
+        raise HTTPException(status_code=409, detail="Coupon is invalid or expired")
+
+    min_order = firestore_to_float(coupon_data.get("minOrderAmount"))
+    if min_order > 0 and subtotal_rupees < min_order:
+        raise HTTPException(status_code=409, detail="Minimum order amount is not met for coupon")
+
+    discount = firestore_coupon_discount(coupon_data, subtotal_rupees)
+    if discount <= 0:
+        raise HTTPException(status_code=409, detail="Coupon discount is not valid")
+
+    return {
+        "code": normalized_code,
+        "discount": discount,
+        "status": "applied",
+        "ref": coupon_ref,
+    }
+
+
+def firestore_validate_gift_voucher(
+    client: Any,
+    gift_voucher_code: str | None,
+    remaining_rupees: float,
+    transaction: Any | None = None,
+) -> dict[str, Any]:
+    normalized = str(gift_voucher_code or "").strip().upper()
+    if not normalized:
+        return {"code": None, "redeemed": 0.0, "status": "not_requested"}
+
+    voucher_ref = client.collection(FIRESTORE_GIFT_VOUCHERS_COLLECTION).document(normalized)
+    voucher_data = firestore_snapshot_dict(firestore_get(voucher_ref, transaction=transaction))
+    if not voucher_data or firestore_to_bool(voucher_data.get("active")) is not True:
+        raise HTTPException(status_code=409, detail="Gift voucher is invalid or expired")
+    if firestore_is_expired(voucher_data.get("expiresAt")):
+        raise HTTPException(status_code=409, detail="Gift voucher is invalid or expired")
+
+    balance = firestore_to_float(
+        firestore_first_value(voucher_data, ["balance", "balanceAmount", "remainingBalance"])
+    )
+    if balance <= 0:
+        raise HTTPException(status_code=409, detail="Gift voucher has no remaining balance")
+    redeemed = round(min(balance, max(remaining_rupees, 0)), 2)
+    return {
+        "code": normalized,
+        "redeemed": redeemed,
+        "status": "applied" if redeemed > 0 else "not_applied",
+        "ref": voucher_ref,
+    }
+
+
+def firestore_order_item_payload(
+    document_id: str,
+    product: dict[str, Any],
+    quantity: int,
+    unit_price: float,
+    item: Any,
+) -> dict[str, Any]:
+    product_reference = str(
+        firestore_first_value(product, ["productId", "sku"]) or document_id
+    ).strip()
+    return {
+        "product_id": product_reference,
+        "firestore_product_id": document_id,
+        "cart_item_id": payment_item_cart_reference(item),
+        "name": str(firestore_first_value(product, ["name", "title"]) or product_reference),
+        "qty": quantity,
+        "price": round(unit_price, 2),
+        "image": str(firestore_first_value(product, ["imageUrl", "image"]) or ""),
+        "category": str(
+            firestore_first_value(product, ["subCategory", "productType", "category"]) or ""
+        ),
+        "metal": str(
+            firestore_first_value(product, ["metalType", "metal_type", "metal"]) or ""
+        ),
+    }
+
+
+def firestore_checkout_calculation(
+    db: Session,
+    payload: RazorpayOrderCreate,
+    user: User,
+) -> dict[str, Any] | None:
+    if not FIRESTORE_COMMERCE_ENABLED:
+        return None
+    if not firestore_commerce_is_configured():
+        status_data = firestore_commerce_dependency_status()
+        reason = status_data.get("reason") or status_data.get("status")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Firestore checkout is not configured: {reason}",
+        )
+
+    client = get_firestore_client()
+    firebase_uid = firestore_uid_for_user(db, user, client)
+    if not firebase_uid:
+        raise HTTPException(
+            status_code=409,
+            detail="Reconnect the app login before checkout so Firestore cart ownership can be verified",
+        )
+
+    if not payload.items:
+        raise HTTPException(status_code=422, detail="Checkout cart is empty")
+
+    rates = firestore_read_rates(client)
+    currency = (payload.currency or "INR").upper()
+    order_items: list[OrderItemSync] = []
+    source_items: list[dict[str, Any]] = []
+    cart_item_ids: list[str] = []
+    subtotal_paise = 0
+
+    for item in payload.items:
+        reference = payment_item_reference(item)
+        if not reference:
+            raise HTTPException(status_code=422, detail="Cart item must include a product_id")
+        product_match = firestore_find_product(client, reference)
+        if product_match is None:
+            raise HTTPException(status_code=422, detail=f"Product {reference} was not found")
+        _, snapshot, product = product_match
+        document_id = firestore_document_id(snapshot, reference)
+        if not firestore_product_active(product):
+            raise HTTPException(status_code=409, detail=f"Product {reference} is not available")
+
+        quantity = max(parse_optional_int(getattr(item, "qty", 1), default=1), 1)
+        stock = firestore_product_stock(product)
+        if stock < quantity:
+            product_name = str(firestore_first_value(product, ["name", "title"]) or reference)
+            raise HTTPException(
+                status_code=409,
+                detail=f"{product_name} does not have enough stock for checkout",
+            )
+
+        unit_price = firestore_product_price(product, rates)
+        unit_amount = int(round(unit_price * 100))
+        if unit_amount <= 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Product {reference} does not have valid live pricing",
+            )
+        subtotal_paise += unit_amount * quantity
+        item_payload = firestore_order_item_payload(document_id, product, quantity, unit_price, item)
+        order_items.append(
+            OrderItemSync(
+                product_id=item_payload["product_id"],
+                backend_product_id=None,
+                name=item_payload["name"],
+                qty=quantity,
+                price=item_payload["price"],
+                image=item_payload["image"],
+            )
+        )
+        source_items.append(
+            {
+                **item_payload,
+                "requested_product_id": reference,
+                "selected_size": getattr(item, "selected_size", None),
+                "selected_variant": getattr(item, "selected_variant", None),
+                "unit_amount": unit_amount,
+            }
+        )
+        cart_reference = item_payload.get("cart_item_id") or reference
+        if cart_reference:
+            cart_item_ids.append(str(cart_reference))
+
+    if subtotal_paise < 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Checkout total must be at least Rs. 1. Refresh product pricing.",
+        )
+
+    subtotal_rupees = razorpay_order_total(subtotal_paise)
+    coupon = firestore_validate_coupon(client, request_coupon_code(payload), subtotal_rupees)
+    after_coupon = max(subtotal_rupees - coupon["discount"], 0)
+    gift_voucher = firestore_validate_gift_voucher(
+        client,
+        request_gift_voucher_code(payload),
+        after_coupon,
+    )
+    after_voucher = max(after_coupon - gift_voucher["redeemed"], 0)
+
+    user_snapshot = firestore_user_document(client, firebase_uid).get()
+    user_data = firestore_snapshot_dict(user_snapshot)
+    available_points = max(firestore_to_int(user_data.get("rewardPoints")), 0)
+    requested_points = request_reward_points(payload)
+    reward_points_used = min(requested_points, available_points)
+    reward_discount = min(
+        reward_points_used * REWARD_POINT_VALUE_RUPEES,
+        after_voucher,
+    )
+    amount = int(round((after_voucher - reward_discount) * 100))
+    if amount < 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Checkout payable amount must be at least Rs. 1 for Razorpay",
+        )
+
+    if payload.amount is not None and int(payload.amount) != amount:
+        send_monitoring_alert(
+            "payments.client_amount_mismatch",
+            severity="warning",
+            payload={
+                "user_id": user.id,
+                "firebase_uid_configured": True,
+                "client_amount": int(payload.amount),
+                "server_amount": amount,
+                "currency": currency,
+                "coupon_code_present": bool(coupon["code"]),
+                "reward_points_requested": requested_points,
+            },
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Checkout amount changed. Refresh your cart and try again.",
+        )
+
+    reward_points_used = int(reward_discount / REWARD_POINT_VALUE_RUPEES)
+    metadata = {
+        "authority": "firestore",
+        "server_authoritative_pricing": True,
+        "firebase_uid": firebase_uid,
+        "client_amount": payload.amount,
+        "subtotal_amount": subtotal_paise,
+        "payable_amount": amount,
+        "subtotal": subtotal_rupees,
+        "payable_total": razorpay_order_total(amount),
+        "currency": currency,
+        "coupon": {
+            "code": coupon["code"],
+            "discount": coupon["discount"],
+            "status": coupon["status"],
+        },
+        "gift_voucher": {
+            "code": gift_voucher["code"],
+            "redeemed": gift_voucher["redeemed"],
+            "status": gift_voucher["status"],
+        },
+        "rewards": {
+            "requested_points": requested_points,
+            "available_points_at_checkout": available_points,
+            "consumed_points": reward_points_used,
+            "discount": round(reward_discount, 2),
+            "status": "applied" if reward_points_used else "not_requested",
+        },
+        "cart_cleanup": {
+            "status": "pending_firestore_transaction" if cart_item_ids else "not_available",
+            "cart_item_ids": cart_item_ids,
+        },
+        "items": source_items,
+    }
+    return {
+        "amount": amount,
+        "currency": currency,
+        "receipt": payload.receipt or f"sona-{uuid4().hex[:20]}",
+        "items": order_items,
+        "metadata": metadata,
+        "payable_total": razorpay_order_total(amount),
+        "coupon_discount": coupon["discount"],
+        "reward_points_used": reward_points_used,
+        "authority": "firestore",
+    }
+
+
+def payment_item_reference(item: Any) -> str:
+    return str(getattr(item, "product_id", None) or "").strip()
+
+
+def payment_item_cart_reference(item: Any) -> str | None:
+    value = getattr(item, "cart_item_id", None)
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def product_reference_for_order(product: Product, fallback: str | None = None) -> str:
+    if product.sku:
+        return product.sku
+    return fallback or f"snchatbot_{product.id}"
+
+
+def product_id_from_reference(reference: str) -> int | None:
+    text_value = reference.strip()
+    if text_value.isdigit():
+        return int(text_value)
+    match = re.fullmatch(r"(?:snchatbot_|backend_|product_)?(\d+)", text_value, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def lookup_authoritative_product(db: Session, item: Any) -> Product | None:
+    backend_product_id = getattr(item, "backend_product_id", None)
+    if backend_product_id:
+        product = db.query(Product).filter(Product.id == backend_product_id).first()
+        if product:
+            return product
+
+    reference = payment_item_reference(item)
+    resolved_id = product_id_from_reference(reference) if reference else None
+    if resolved_id:
+        product = db.query(Product).filter(Product.id == resolved_id).first()
+        if product:
+            return product
+
+    if reference:
+        product = db.query(Product).filter(Product.sku == reference).first()
+        if product:
+            return product
+        product = db.query(Product).filter(Product.sku == reference.upper()).first()
+        if product:
+            return product
+        return db.query(Product).filter(Product.name == reference).first()
+
+    return None
+
+
+def ensure_payment_product_available(product: Product, quantity: int) -> None:
+    if not product.in_stock or product.stock_quantity < quantity:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{product.name} does not have enough stock for checkout",
+        )
+
+
+def authoritative_checkout_calculation(
+    db: Session,
+    payload: RazorpayOrderCreate,
+    user: User,
+) -> dict[str, Any]:
+    firestore_calculation = firestore_checkout_calculation(db, payload, user)
+    if firestore_calculation is not None:
+        return firestore_calculation
+
+    if not payload.items:
+        raise HTTPException(status_code=422, detail="Checkout cart is empty")
+
+    currency = (payload.currency or "INR").upper()
+    order_items: list[OrderItemSync] = []
+    subtotal_paise = 0
+    source_items = []
+    cart_item_ids: list[str] = []
+
+    for item in payload.items:
+        product = lookup_authoritative_product(db, item)
+        if product is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Cart item must include a valid backend_product_id, product id, or SKU",
+            )
+
+        quantity = max(parse_optional_int(getattr(item, "qty", 1), default=1), 1)
+        ensure_payment_product_available(product, quantity)
+
+        unit_amount = int(round(float(product.price or 0) * 100))
+        subtotal_paise += unit_amount * quantity
+        product_reference = product_reference_for_order(product, payment_item_reference(item))
+        cart_item_id = payment_item_cart_reference(item)
+        if cart_item_id:
+            cart_item_ids.append(cart_item_id)
+
+        order_items.append(
+            OrderItemSync(
+                product_id=product_reference,
+                backend_product_id=product.id,
+                name=product.name,
+                qty=quantity,
+                price=razorpay_order_total(unit_amount),
+                image=product.image,
+            )
+        )
+        source_items.append(
+            {
+                "requested_product_id": payment_item_reference(item) or None,
+                "requested_backend_product_id": getattr(item, "backend_product_id", None),
+                "cart_item_id": cart_item_id,
+                "selected_size": getattr(item, "selected_size", None),
+                "selected_variant": getattr(item, "selected_variant", None),
+                "resolved_product_id": product.id,
+                "sku": product.sku,
+                "name": product.name,
+                "qty": quantity,
+                "unit_amount": unit_amount,
+            }
+        )
+
+    if subtotal_paise < 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Checkout total must be at least Rs. 1. Refresh product pricing.",
+        )
+
+    coupon_code = request_coupon_code(payload)
+    gift_voucher_code = request_gift_voucher_code(payload)
+    reward_points_requested = request_reward_points(payload)
+    discount_requested = client_coupon_discount(payload)
+    amount = subtotal_paise
+
+    if payload.amount is not None and int(payload.amount) != amount:
+        send_monitoring_alert(
+            "payments.client_amount_mismatch",
+            severity="warning",
+            payload={
+                "user_id": user.id,
+                "client_amount": int(payload.amount),
+                "server_amount": amount,
+                "currency": currency,
+                "coupon_code_present": bool(coupon_code),
+                "reward_points_requested": reward_points_requested,
+            },
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Checkout amount changed. Refresh your cart and try again.",
+        )
+
+    metadata = {
+        "server_authoritative_pricing": True,
+        "client_amount": payload.amount,
+        "subtotal_amount": subtotal_paise,
+        "payable_amount": amount,
+        "subtotal": razorpay_order_total(subtotal_paise),
+        "payable_total": razorpay_order_total(amount),
+        "currency": currency,
+        "coupon": {
+            "code": coupon_code,
+            "client_discount": discount_requested,
+            "discount": 0,
+            "status": "not_configured" if coupon_code or discount_requested else "not_requested",
+        },
+        "gift_voucher": {
+            "code": gift_voucher_code,
+            "redeemed": 0,
+            "status": "not_configured" if gift_voucher_code else "not_requested",
+        },
+        "rewards": {
+            "requested_points": reward_points_requested,
+            "consumed_points": 0,
+            "status": "not_configured" if reward_points_requested else "not_requested",
+        },
+        "cart_cleanup": {
+            "status": "pending_client_cleanup" if cart_item_ids else "not_available",
+            "cart_item_ids": cart_item_ids,
+        },
+        "items": source_items,
+    }
+    return {
+        "amount": amount,
+        "currency": currency,
+        "receipt": payload.receipt or f"sona-{uuid4().hex[:20]}",
+        "items": order_items,
+        "metadata": metadata,
+        "payable_total": razorpay_order_total(amount),
+        "coupon_discount": 0,
+        "reward_points_used": 0,
+    }
+
+
+def razorpay_checkout_notes(
+    payload: RazorpayOrderCreate,
+    user: User,
+    calculation: dict[str, Any] | None = None,
+) -> dict[str, str]:
     notes: dict[str, str] = {}
     for key, value in (payload.notes or {}).items():
         if len(notes) >= 12:
@@ -3274,18 +4243,32 @@ def razorpay_checkout_notes(payload: RazorpayOrderCreate, user: User) -> dict[st
     notes.setdefault("source", "sona_flutter")
     notes.setdefault("user_id", str(user.id))
     notes.setdefault("environment", APP_ENV)
+    if calculation:
+        notes["server_calculated"] = "true"
+        metadata = calculation.get("metadata") if isinstance(calculation, dict) else {}
+        if isinstance(metadata, dict):
+            coupon = metadata.get("coupon")
+            rewards = metadata.get("rewards")
+            if isinstance(coupon, dict) and coupon.get("code"):
+                notes["coupon_code"] = str(coupon["code"])[:256]
+            if isinstance(rewards, dict) and rewards.get("requested_points"):
+                notes["reward_points_requested"] = str(rewards["requested_points"])[:256]
     return dict(list(notes.items())[:15])
 
 
 def razorpay_order_request_payload(
     payload: RazorpayOrderCreate,
     user: User,
+    calculation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    amount = parse_optional_int((calculation or {}).get("amount"), default=0)
+    currency = str((calculation or {}).get("currency") or payload.currency or "INR").upper()
+    receipt = str((calculation or {}).get("receipt") or payload.receipt or f"sona-{uuid4().hex[:20]}")
     return {
-        "amount": payload.amount,
-        "currency": payload.currency,
-        "receipt": payload.receipt or f"sona-{uuid4().hex[:20]}",
-        "notes": razorpay_checkout_notes(payload, user),
+        "amount": amount,
+        "currency": currency,
+        "receipt": receipt,
+        "notes": razorpay_checkout_notes(payload, user, calculation),
     }
 
 
@@ -3323,6 +4306,702 @@ def append_order_raw_payload(
     raw_payload = load_json_object(order.raw_payload)
     raw_payload[key] = payload
     order.raw_payload = dump_json_object(raw_payload)
+
+
+def order_raw_payload(order: OrderSnapshot) -> dict[str, Any]:
+    return load_json_object(order.raw_payload)
+
+
+def order_expected_amount(order: OrderSnapshot) -> int:
+    return int(round(float(order.total or 0) * 100))
+
+
+def order_currency(order: OrderSnapshot) -> str:
+    return str(order.currency or "INR").upper()
+
+
+def order_finalization(order: OrderSnapshot) -> dict[str, Any]:
+    raw_payload = order_raw_payload(order)
+    finalization = raw_payload.get("razorpay_finalization")
+    return finalization if isinstance(finalization, dict) else {}
+
+
+def order_already_finalized(order: OrderSnapshot, payment_id: str) -> bool:
+    finalization = order_finalization(order)
+    if finalization.get("status") == "finalized" and finalization.get("payment_id") == payment_id:
+        return True
+    return order.payment_status in {"verified", "paid"} and order.payment_reference == payment_id
+
+
+def fetch_razorpay_payment(
+    payment_id: str,
+    fallback: dict[str, Any] | None = None,
+) -> tuple[int | None, dict[str, Any]]:
+    if razorpay_checkout_is_configured():
+        return call_razorpay(
+            "GET",
+            f"payments/{urllib.parse.quote(payment_id, safe='')}",
+        )
+    if fallback:
+        return None, fallback
+    raise RuntimeError("Razorpay payment confirmation API is not configured")
+
+
+def payment_amount(payment: dict[str, Any]) -> int:
+    return parse_optional_int(payment.get("amount"), default=0)
+
+
+def payment_currency(payment: dict[str, Any]) -> str:
+    return str(payment.get("currency") or "").upper()
+
+
+def payment_status(payment: dict[str, Any]) -> str:
+    return str(payment.get("status") or "").lower()
+
+
+def decrement_inventory_for_order(db: Session, order: OrderSnapshot) -> list[dict[str, Any]]:
+    updates: list[dict[str, Any]] = []
+    for item in local_order_items(db, order.id):
+        if item.backend_product_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{item.name} is missing backend inventory mapping",
+            )
+        product = db.query(Product).filter(Product.id == item.backend_product_id).first()
+        if product is None:
+            raise HTTPException(status_code=409, detail=f"{item.name} is no longer available")
+        if not product.in_stock or product.stock_quantity < item.qty:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{product.name} does not have enough stock to finalize payment",
+            )
+        before = product.stock_quantity
+        product.stock_quantity = before - item.qty
+        product.in_stock = product.stock_quantity > 0
+        updates.append(
+            {
+                "product_id": product.id,
+                "sku": product.sku,
+                "name": product.name,
+                "qty": item.qty,
+                "before": before,
+                "after": product.stock_quantity,
+            }
+        )
+    return updates
+
+
+def order_uses_firestore_commerce(order: OrderSnapshot) -> bool:
+    return order_snapshot_metadata(order).get("authority") == "firestore"
+
+
+def create_firestore_payment_attempt(
+    user: User,
+    order: OrderSnapshot,
+    calculation: dict[str, Any],
+    payload: RazorpayOrderCreate,
+    razorpay_response: dict[str, Any],
+) -> None:
+    if calculation.get("authority") != "firestore":
+        return
+    if not firestore_commerce_is_configured():
+        raise HTTPException(status_code=503, detail="Firestore checkout is not configured")
+
+    client = get_firestore_client()
+    metadata = calculation.get("metadata") if isinstance(calculation, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    firebase_uid = str(metadata.get("firebase_uid") or "").strip()
+    if not firebase_uid:
+        raise HTTPException(status_code=409, detail="Firestore checkout user mapping is missing")
+
+    attempt_ref = client.collection(FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION).document(
+        order.order_reference
+    )
+    attempt_ref.set(
+        {
+            "razorpayOrderId": order.order_reference,
+            "orderReference": order.order_reference,
+            "localOrderId": order.id,
+            "userId": firebase_uid,
+            "sonaUserId": user.id,
+            "amount": calculation["amount"],
+            "currency": calculation["currency"],
+            "payableTotal": calculation["payable_total"],
+            "couponDiscount": calculation.get("coupon_discount", 0),
+            "rewardPointsUsed": calculation.get("reward_points_used", 0),
+            "items": metadata.get("items") or [],
+            "metadata": metadata,
+            "clientPayload": payload.model_dump(mode="json"),
+            "razorpayOrder": razorpay_response,
+            "status": "payment_pending",
+            "finalized": False,
+            "createdAt": firestore_server_timestamp(),
+            "updatedAt": firestore_server_timestamp(),
+        },
+        merge=True,
+    )
+
+
+def firestore_cart_references(
+    user_ref: Any,
+    items: list[dict[str, Any]],
+    transaction: Any | None = None,
+) -> list[Any]:
+    cart_collection = user_ref.collection("cart")
+    references: dict[str, Any] = {}
+    for item in items:
+        direct_ids = [
+            item.get("cart_item_id"),
+            item.get("requested_product_id"),
+            item.get("firestore_product_id"),
+        ]
+        for doc_id in direct_ids:
+            doc_id = str(doc_id or "").strip()
+            if not doc_id:
+                continue
+            ref = cart_collection.document(doc_id)
+            snapshot = firestore_get(ref, transaction=transaction)
+            if firestore_snapshot_dict(snapshot):
+                references[getattr(ref, "path", doc_id)] = ref
+
+        product_id = str(item.get("requested_product_id") or item.get("product_id") or "").strip()
+        if product_id:
+            query = firestore_query_equal(cart_collection, "productId", product_id)
+            snapshot = firestore_stream_first(query, transaction=transaction)
+            if snapshot:
+                ref = cart_collection.document(firestore_document_id(snapshot, product_id))
+                references[getattr(ref, "path", product_id)] = ref
+    return list(references.values())
+
+
+def firestore_build_order_document(
+    order: OrderSnapshot,
+    metadata: dict[str, Any],
+    payment_id: str,
+    payment: dict[str, Any],
+    reward_points_earned: int,
+    referral_rewards_awarded: int,
+) -> dict[str, Any]:
+    coupon = metadata.get("coupon") if isinstance(metadata.get("coupon"), dict) else {}
+    rewards = metadata.get("rewards") if isinstance(metadata.get("rewards"), dict) else {}
+    gift_voucher = (
+        metadata.get("gift_voucher") if isinstance(metadata.get("gift_voucher"), dict) else {}
+    )
+    return {
+        "orderReference": order.order_reference,
+        "razorpayOrderId": order.order_reference,
+        "paymentProvider": "razorpay",
+        "paymentId": payment_id,
+        "paymentStatus": "verified",
+        "razorpayPaymentStatus": payment_status(payment),
+        "status": "placed",
+        "userId": metadata.get("firebase_uid"),
+        "sonaUserId": order.user_id,
+        "userEmail": order.customer_email,
+        "customerName": order.customer_name,
+        "customerPhone": order.customer_phone,
+        "shippingAddress": load_json_object(order.delivery_address),
+        "items": metadata.get("items") or [],
+        "total": order.total,
+        "originalTotal": metadata.get("subtotal", order.total),
+        "couponCode": coupon.get("code") or "",
+        "couponDiscount": coupon.get("discount") or 0,
+        "giftVoucherCode": gift_voucher.get("code") or "",
+        "giftVoucherRedeemed": gift_voucher.get("redeemed") or 0,
+        "totalAfterCoupon": round(
+            float(metadata.get("subtotal", order.total) or 0)
+            - float(coupon.get("discount") or 0),
+            2,
+        ),
+        "rewardPointsUsed": rewards.get("consumed_points") or 0,
+        "rewardPointsEarned": reward_points_earned,
+        "referralRewardsAwarded": referral_rewards_awarded,
+        "currency": order.currency,
+        "updatedAt": firestore_server_timestamp(),
+        "createdAt": firestore_server_timestamp(),
+    }
+
+
+def finalize_firestore_commerce_payment(
+    order: OrderSnapshot,
+    payment_id: str,
+    payment: dict[str, Any],
+    source: str,
+    event_id: str | None = None,
+) -> dict[str, Any]:
+    if not firestore_commerce_is_configured():
+        raise HTTPException(status_code=503, detail="Firestore checkout is not configured")
+
+    client = get_firestore_client()
+    metadata = order_snapshot_metadata(order)
+    firebase_uid = str(metadata.get("firebase_uid") or "").strip()
+    if not firebase_uid:
+        raise HTTPException(status_code=409, detail="Firestore checkout user mapping is missing")
+
+    attempt_ref = client.collection(FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION).document(
+        order.order_reference
+    )
+    order_ref = client.collection(FIRESTORE_ORDERS_COLLECTION).document(order.order_reference)
+    user_ref = firestore_user_document(client, firebase_uid)
+    transaction = client.transaction()
+
+    def run_transaction(transaction: Any) -> dict[str, Any]:
+        attempt_snapshot = firestore_get(attempt_ref, transaction=transaction)
+        attempt_data = firestore_snapshot_dict(attempt_snapshot)
+        finalized_payment_id = str(attempt_data.get("paymentId") or "").strip()
+        if attempt_data.get("finalized") is True:
+            if finalized_payment_id and finalized_payment_id != payment_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Payment attempt was already finalized with another payment",
+                )
+            return {
+                "status": "idempotent",
+                "inventory_updates": [],
+                "reward_points_consumed": metadata.get("rewards", {}).get("consumed_points", 0),
+                "purchase_rewards_awarded": attempt_data.get("rewardPointsEarned", 0),
+                "referral_rewards_awarded": attempt_data.get("referralRewardsAwarded", 0),
+                "coupon_redeemed": bool(metadata.get("coupon", {}).get("discount")),
+                "gift_voucher_redeemed": bool(metadata.get("gift_voucher", {}).get("redeemed")),
+                "cart_cleanup": attempt_data.get("cartCleanup") or {},
+            }
+
+        expected_amount = parse_optional_int(attempt_data.get("amount"), order_expected_amount(order))
+        expected_currency = str(attempt_data.get("currency") or order_currency(order)).upper()
+        if expected_amount != order_expected_amount(order) or expected_currency != order_currency(order):
+            raise HTTPException(status_code=409, detail="Payment attempt does not match local order")
+        if payment_amount(payment) != expected_amount or payment_currency(payment) != expected_currency:
+            raise HTTPException(
+                status_code=409,
+                detail="Razorpay payment amount or currency did not match the order",
+            )
+
+        items = metadata.get("items") if isinstance(metadata.get("items"), list) else []
+        product_updates: list[tuple[Any, dict[str, Any], dict[str, Any]]] = []
+        inventory_updates: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            reference = str(
+                item.get("firestore_product_id")
+                or item.get("requested_product_id")
+                or item.get("product_id")
+                or ""
+            ).strip()
+            if not reference:
+                raise HTTPException(status_code=409, detail="Order item is missing product mapping")
+            product_match = firestore_find_product(client, reference, transaction=transaction)
+            if product_match is None:
+                raise HTTPException(status_code=409, detail=f"Product {reference} was not found")
+            product_ref, snapshot, product = product_match
+            product_doc_id = firestore_document_id(snapshot, reference)
+            if not firestore_product_active(product):
+                raise HTTPException(status_code=409, detail=f"Product {reference} is not available")
+            quantity = max(parse_optional_int(item.get("qty"), 1), 1)
+            before_stock = firestore_product_stock(product)
+            if before_stock < quantity:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Product {reference} does not have enough stock",
+                )
+            after_stock = before_stock - quantity
+            update_payload = {
+                "stock": after_stock,
+                "stock_quantity": after_stock,
+                "stockQuantity": after_stock,
+                "in_stock": after_stock > 0,
+                "inStock": after_stock > 0,
+                "updatedAt": firestore_server_timestamp(),
+            }
+            product_updates.append((product_ref, update_payload, product))
+            inventory_updates.append(
+                {
+                    "product_id": product_doc_id,
+                    "name": firestore_first_value(product, ["name", "title"]) or product_doc_id,
+                    "qty": quantity,
+                    "before": before_stock,
+                    "after": after_stock,
+                }
+            )
+
+        coupon_data = metadata.get("coupon") if isinstance(metadata.get("coupon"), dict) else {}
+        expected_coupon_discount = firestore_to_float(coupon_data.get("discount"))
+        coupon_ref = None
+        if coupon_data.get("code") and expected_coupon_discount > 0:
+            coupon = firestore_validate_coupon(
+                client,
+                str(coupon_data["code"]),
+                firestore_to_float(metadata.get("subtotal")),
+                transaction=transaction,
+            )
+            if abs(firestore_to_float(coupon.get("discount")) - expected_coupon_discount) > 0.01:
+                raise HTTPException(status_code=409, detail="Coupon value changed before payment")
+            coupon_ref = coupon.get("ref")
+
+        gift_data = (
+            metadata.get("gift_voucher") if isinstance(metadata.get("gift_voucher"), dict) else {}
+        )
+        expected_gift_redeemed = firestore_to_float(gift_data.get("redeemed"))
+        gift_ref = None
+        if gift_data.get("code") and expected_gift_redeemed > 0:
+            gift_voucher = firestore_validate_gift_voucher(
+                client,
+                str(gift_data["code"]),
+                expected_gift_redeemed,
+                transaction=transaction,
+            )
+            if firestore_to_float(gift_voucher.get("redeemed")) + 0.01 < expected_gift_redeemed:
+                raise HTTPException(status_code=409, detail="Gift voucher balance changed")
+            gift_ref = gift_voucher.get("ref")
+
+        user_snapshot = firestore_get(user_ref, transaction=transaction)
+        user_data = firestore_snapshot_dict(user_snapshot)
+        rewards = metadata.get("rewards") if isinstance(metadata.get("rewards"), dict) else {}
+        reward_points_used = firestore_to_int(rewards.get("consumed_points"))
+        available_points = max(firestore_to_int(user_data.get("rewardPoints")), 0)
+        if reward_points_used > available_points:
+            raise HTTPException(status_code=409, detail="Reward point balance changed")
+        reward_points_earned = int(float(order.total or 0) // PURCHASE_REWARD_RUPEES_PER_POINT)
+        reward_delta = reward_points_earned - reward_points_used
+
+        referral_rewards_awarded = 0
+        referrer_uid = str(
+            user_data.get("referredBy")
+            or user_data.get("referred_by")
+            or user_data.get("referrerUid")
+            or ""
+        ).strip()
+        referrer_ref = None
+        if (
+            REFERRAL_REWARD_POINTS > 0
+            and referrer_uid
+            and user_data.get("firstPurchaseReferralRewarded") is not True
+        ):
+            referrer_ref = firestore_user_document(client, referrer_uid)
+            firestore_get(referrer_ref, transaction=transaction)
+            referral_rewards_awarded = REFERRAL_REWARD_POINTS
+
+        cart_refs = firestore_cart_references(user_ref, items, transaction=transaction)
+
+        for product_ref, update_payload, _ in product_updates:
+            transaction.update(product_ref, update_payload)
+        transaction.set(
+            user_ref,
+            {
+                "rewardPoints": firestore_increment(reward_delta),
+                "lastOrderId": order.order_reference,
+                "updatedAt": firestore_server_timestamp(),
+                **(
+                    {"firstPurchaseReferralRewarded": True}
+                    if referral_rewards_awarded
+                    else {}
+                ),
+            },
+            merge=True,
+        )
+        if referrer_ref is not None and referral_rewards_awarded:
+            transaction.set(
+                referrer_ref,
+                {
+                    "rewardPoints": firestore_increment(referral_rewards_awarded),
+                    "updatedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+        if coupon_ref is not None:
+            transaction.set(
+                coupon_ref.collection("redemptions").document(order.order_reference),
+                {
+                    "orderReference": order.order_reference,
+                    "userId": firebase_uid,
+                    "discount": expected_coupon_discount,
+                    "redeemedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+            transaction.set(
+                coupon_ref,
+                {
+                    "redeemedCount": firestore_increment(1),
+                    "lastRedeemedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+        if gift_ref is not None and expected_gift_redeemed > 0:
+            transaction.set(
+                gift_ref.collection("redemptions").document(order.order_reference),
+                {
+                    "orderReference": order.order_reference,
+                    "userId": firebase_uid,
+                    "amount": expected_gift_redeemed,
+                    "redeemedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+            transaction.set(
+                gift_ref,
+                {
+                    "balance": firestore_increment(-expected_gift_redeemed),
+                    "updatedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+
+        for cart_ref in cart_refs:
+            transaction.delete(cart_ref)
+
+        cart_cleanup = {
+            "status": "completed" if cart_refs else "not_found",
+            "cart_item_ids": metadata.get("cart_cleanup", {}).get("cart_item_ids") or [],
+            "removed_count": len(cart_refs),
+        }
+        order_document = firestore_build_order_document(
+            order,
+            metadata,
+            payment_id,
+            payment,
+            reward_points_earned,
+            referral_rewards_awarded,
+        )
+        transaction.set(order_ref, order_document, merge=True)
+        transaction.set(
+            attempt_ref,
+            {
+                "status": "finalized",
+                "finalized": True,
+                "paymentId": payment_id,
+                "paymentStatus": "verified",
+                "source": source,
+                "eventId": event_id,
+                "inventoryUpdates": inventory_updates,
+                "rewardPointsUsed": reward_points_used,
+                "rewardPointsEarned": reward_points_earned,
+                "referralRewardsAwarded": referral_rewards_awarded,
+                "couponRedeemed": coupon_ref is not None,
+                "giftVoucherRedeemed": gift_ref is not None,
+                "cartCleanup": cart_cleanup,
+                "updatedAt": firestore_server_timestamp(),
+                "finalizedAt": firestore_server_timestamp(),
+            },
+            merge=True,
+        )
+        return {
+            "status": "finalized",
+            "inventory_updates": inventory_updates,
+            "reward_points_consumed": reward_points_used,
+            "purchase_rewards_awarded": reward_points_earned,
+            "referral_rewards_awarded": referral_rewards_awarded,
+            "coupon_redeemed": coupon_ref is not None,
+            "gift_voucher_redeemed": gift_ref is not None,
+            "cart_cleanup": cart_cleanup,
+        }
+
+    transactional = getattr(firebase_firestore, "transactional", None)
+    if transactional:
+        return transactional(run_transaction)(transaction)
+    return run_transaction(transaction)
+
+
+def mark_razorpay_finalization_failure(
+    db: Session,
+    order: OrderSnapshot,
+    payment_id: str,
+    reason: str,
+    source: str,
+    payment: dict[str, Any],
+    event_id: str | None = None,
+) -> None:
+    failure_payload = {
+        "status": "failed",
+        "reason": reason,
+        "source": source,
+        "payment_id": payment_id,
+        "event_id": event_id,
+        "payment_status": payment_status(payment) or None,
+        "payment_amount": payment_amount(payment) or None,
+        "payment_currency": payment_currency(payment) or None,
+        "expected_amount": order_expected_amount(order),
+        "expected_currency": order_currency(order),
+        "failed_at": utc_now().isoformat(),
+    }
+    append_order_raw_payload(order, "razorpay_finalization_failure", failure_payload)
+    order.updated_at = utc_now()
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="finalize_payment",
+        status_value="failed",
+        user_id=order.user_id,
+        reference=order.order_reference,
+        request_payload=failure_payload,
+        error=reason,
+    )
+    send_monitoring_alert(
+        "payments.razorpay_finalization_failed",
+        severity="error",
+        payload={
+            "order_reference": order.order_reference,
+            "payment_id": payment_id,
+            "reason": reason,
+            "source": source,
+        },
+    )
+
+
+def finalize_razorpay_payment(
+    db: Session,
+    order: OrderSnapshot,
+    payment_id: str,
+    source: str,
+    payment: dict[str, Any] | None = None,
+    event_id: str | None = None,
+) -> dict[str, Any]:
+    if order_already_finalized(order, payment_id):
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="finalize_payment",
+            status_value="idempotent",
+            user_id=order.user_id,
+            reference=order.order_reference,
+            request_payload={
+                "payment_id": payment_id,
+                "source": source,
+                "event_id": event_id,
+            },
+        )
+        return {"status": "idempotent", "order": order}
+
+    try:
+        _, confirmed_payment = fetch_razorpay_payment(payment_id, fallback=payment)
+    except Exception as exc:
+        mark_razorpay_finalization_failure(
+            db,
+            order,
+            payment_id,
+            "payment_confirmation_failed",
+            source,
+            payment or {},
+            event_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not confirm Razorpay payment status",
+        ) from exc
+
+    confirmed_status = payment_status(confirmed_payment)
+    if confirmed_status != "captured":
+        if confirmed_status in {"failed", "authorized"}:
+            order.payment_status = confirmed_status
+        mark_razorpay_finalization_failure(
+            db,
+            order,
+            payment_id,
+            f"payment_not_captured:{confirmed_status or 'unknown'}",
+            source,
+            confirmed_payment,
+            event_id,
+        )
+        raise HTTPException(status_code=409, detail="Razorpay payment is not captured")
+
+    actual_amount = payment_amount(confirmed_payment)
+    actual_currency = payment_currency(confirmed_payment)
+    expected_amount = order_expected_amount(order)
+    expected_currency = order_currency(order)
+    if actual_amount != expected_amount or actual_currency != expected_currency:
+        mark_razorpay_finalization_failure(
+            db,
+            order,
+            payment_id,
+            "amount_or_currency_mismatch",
+            source,
+            confirmed_payment,
+            event_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Razorpay payment amount or currency did not match the order",
+        )
+
+    try:
+        if order_uses_firestore_commerce(order):
+            commerce_finalization = finalize_firestore_commerce_payment(
+                order,
+                payment_id,
+                confirmed_payment,
+                source,
+                event_id,
+            )
+            inventory_updates = commerce_finalization.get("inventory_updates", [])
+        else:
+            commerce_finalization = {}
+            inventory_updates = decrement_inventory_for_order(db, order)
+    except HTTPException:
+        mark_razorpay_finalization_failure(
+            db,
+            order,
+            payment_id,
+            "inventory_finalization_failed",
+            source,
+            confirmed_payment,
+            event_id,
+        )
+        raise
+
+    now = utc_now()
+    order.payment_status = "verified"
+    order.payment_reference = payment_id
+    if order.status in {"", "created", "payment_pending", "pending_payment"}:
+        order.status = "placed"
+    order.updated_at = now
+
+    raw_payload = order_raw_payload(order)
+    metadata = raw_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    cart_cleanup = metadata.get("cart_cleanup")
+    cart_cleanup = cart_cleanup if isinstance(cart_cleanup, dict) else {}
+    finalization_payload = {
+        "status": "finalized",
+        "payment_id": payment_id,
+        "source": source,
+        "event_id": event_id,
+        "amount": actual_amount,
+        "currency": actual_currency,
+        "finalized_at": now.isoformat(),
+        "inventory_decremented": True,
+        "inventory_updates": inventory_updates,
+        "reward_points_consumed": commerce_finalization.get("reward_points_consumed", 0),
+        "purchase_rewards_awarded": commerce_finalization.get("purchase_rewards_awarded", 0),
+        "referral_rewards_awarded": commerce_finalization.get("referral_rewards_awarded", 0),
+        "coupon_redeemed": commerce_finalization.get("coupon_redeemed", False),
+        "gift_voucher_redeemed": commerce_finalization.get("gift_voucher_redeemed", False),
+        "cart_cleanup": commerce_finalization.get(
+            "cart_cleanup",
+            {
+                "status": "pending_client_cleanup"
+                if cart_cleanup.get("cart_item_ids")
+                else "not_available",
+                "cart_item_ids": cart_cleanup.get("cart_item_ids") or [],
+            },
+        ),
+    }
+    raw_payload["razorpay_finalization"] = finalization_payload
+    order.raw_payload = dump_json_object(raw_payload)
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="finalize_payment",
+        status_value="finalized",
+        user_id=order.user_id,
+        reference=order.order_reference,
+        request_payload={
+            "payment_id": payment_id,
+            "source": source,
+            "event_id": event_id,
+        },
+        response_payload=finalization_payload,
+    )
+    return {"status": "finalized", "order": order}
 
 
 def razorpay_entity(payload: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -3373,6 +5052,44 @@ def razorpay_payment_status(event_name: str, payment: dict[str, Any]) -> str | N
     return None
 
 
+def razorpay_dispute_status(event_name: str) -> str | None:
+    if not event_name.startswith("payment.dispute"):
+        return None
+    if event_name.endswith(".won"):
+        return "dispute_won"
+    if event_name.endswith(".lost"):
+        return "dispute_lost"
+    if event_name.endswith(".closed"):
+        return "dispute_closed"
+    return "dispute_open"
+
+
+def razorpay_webhook_event_id(
+    payload: dict[str, Any],
+    event_name: str,
+    razorpay_order_id: str | None,
+    payment_id: str | None,
+) -> str:
+    event_id = str(payload.get("id") or "").strip()
+    if event_id:
+        return event_id
+    reference = payment_id or razorpay_order_id or str(payload.get("created_at") or "")
+    return f"{event_name}:{reference or hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode('utf-8')).hexdigest()}"
+
+
+def razorpay_webhook_event_exists(db: Session, event_id: str) -> bool:
+    return (
+        db.query(ExternalIntegrationEvent)
+        .filter(
+            ExternalIntegrationEvent.service == "razorpay",
+            ExternalIntegrationEvent.action == "webhook_event",
+            ExternalIntegrationEvent.reference == event_id,
+        )
+        .first()
+        is not None
+    )
+
+
 def apply_razorpay_webhook(
     db: Session,
     payload: dict[str, Any],
@@ -3380,14 +5097,32 @@ def apply_razorpay_webhook(
     event_name = str(payload.get("event") or "unknown")
     payment = razorpay_entity(payload, "payment")
     refund = razorpay_entity(payload, "refund")
+    dispute = razorpay_entity(payload, "dispute")
     order_entity = razorpay_entity(payload, "order")
-    payment_id = str(payment.get("id") or refund.get("payment_id") or "").strip()
+    payment_id = str(
+        payment.get("id") or refund.get("payment_id") or dispute.get("payment_id") or ""
+    ).strip()
     razorpay_order_id = str(
         payment.get("order_id") or order_entity.get("id") or ""
     ).strip()
     amount = payment.get("amount") or refund.get("amount")
-    currency = payment.get("currency")
+    currency = payment.get("currency") or refund.get("currency")
+    event_id = razorpay_webhook_event_id(
+        payload,
+        event_name,
+        razorpay_order_id or None,
+        payment_id or None,
+    )
+    if razorpay_webhook_event_exists(db, event_id):
+        return {
+            "event": event_name,
+            "status": "duplicate",
+            "order_reference": razorpay_order_id or None,
+            "payment_id": payment_id or None,
+        }
+
     audit_payload = {
+        "event_id": event_id,
         "event": event_name,
         "payment_id": payment_id or None,
         "razorpay_order_id": razorpay_order_id or None,
@@ -3399,28 +5134,80 @@ def apply_razorpay_webhook(
     response_payload: dict[str, Any] = {}
     status_value = "unmatched"
 
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="webhook_event",
+        status_value="received",
+        user_id=order.user_id if order else None,
+        reference=event_id,
+        request_payload=audit_payload,
+    )
+
     if order is not None:
         status_value = "received"
-        normalized_payment_status = razorpay_payment_status(event_name, payment)
-        if normalized_payment_status:
-            order.payment_status = normalized_payment_status
-            status_value = "updated"
-        if payment_id:
-            order.payment_reference = payment_id
-        if event_name == "payment.captured" and order.status in {
-            "",
-            "created",
-            "payment_pending",
-            "pending_payment",
-        }:
-            order.status = "placed"
-        order.raw_payload = dump_json_object({"last_razorpay_webhook": audit_payload})
+        if event_name == "payment.captured":
+            if not payment_id:
+                status_value = "finalization_failed"
+                response_payload["error"] = "Missing Razorpay payment id"
+                send_monitoring_alert(
+                    "payments.razorpay_webhook_missing_payment_id",
+                    severity="error",
+                    payload=audit_payload,
+                )
+            else:
+                try:
+                    finalization = finalize_razorpay_payment(
+                        db,
+                        order,
+                        payment_id,
+                        source="webhook",
+                        payment=payment,
+                        event_id=event_id,
+                    )
+                    status_value = str(finalization["status"])
+                except HTTPException as exc:
+                    status_value = "finalization_failed"
+                    response_payload["error"] = exc.detail
+        else:
+            normalized_payment_status = razorpay_payment_status(event_name, payment)
+            normalized_dispute_status = razorpay_dispute_status(event_name)
+            normalized_status = normalized_payment_status or normalized_dispute_status
+            if normalized_status:
+                if (
+                    normalized_status == "failed"
+                    and order.payment_status in {"verified", "paid"}
+                ):
+                    status_value = "ignored_out_of_order"
+                else:
+                    order.payment_status = normalized_status
+                    status_value = "updated"
+            if payment_id and not order.payment_reference:
+                order.payment_reference = payment_id
+            if normalized_dispute_status:
+                send_monitoring_alert(
+                    "payments.razorpay_dispute_event",
+                    severity="warning",
+                    payload={
+                        "order_reference": order.order_reference,
+                        "payment_id": payment_id,
+                        "event": event_name,
+                    },
+                )
+        append_order_raw_payload(order, "last_razorpay_webhook", audit_payload)
         order.updated_at = utc_now()
         response_payload = {
+            **response_payload,
             "order_snapshot_id": order.id,
             "order_reference": order.order_reference,
             "payment_status": order.payment_status,
         }
+    else:
+        send_monitoring_alert(
+            "payments.razorpay_unmatched_webhook",
+            severity="warning",
+            payload=audit_payload,
+        )
 
     record_integration_event(
         db,
@@ -3440,6 +5227,90 @@ def apply_razorpay_webhook(
     }
 
 
+def reconcile_razorpay_orders(db: Session, limit: int = 50) -> dict[str, Any]:
+    candidates = (
+        db.query(OrderSnapshot)
+        .filter(
+            OrderSnapshot.source == "razorpay_checkout",
+            or_(
+                OrderSnapshot.payment_status.is_(None),
+                OrderSnapshot.payment_status.in_(
+                    ["pending", "authorized", "created", "payment_pending"]
+                ),
+            ),
+        )
+        .order_by(OrderSnapshot.created_at.asc(), OrderSnapshot.id.asc())
+        .limit(limit)
+        .all()
+    )
+    result = {
+        "checked": len(candidates),
+        "finalized": 0,
+        "already_finalized": 0,
+        "no_captured_payment": 0,
+        "failed": 0,
+        "errors": [],
+    }
+    for order in candidates:
+        try:
+            _, payments_response = call_razorpay(
+                "GET",
+                f"orders/{urllib.parse.quote(order.order_reference, safe='')}/payments",
+            )
+            payments = payments_response.get("items")
+            payments = payments if isinstance(payments, list) else []
+            captured_payments = [
+                item
+                for item in payments
+                if isinstance(item, dict) and payment_status(item) == "captured"
+            ]
+            if not captured_payments:
+                result["no_captured_payment"] += 1
+                continue
+
+            captured_payment = captured_payments[-1]
+            payment_id = str(captured_payment.get("id") or "").strip()
+            if not payment_id:
+                raise HTTPException(status_code=409, detail="Captured payment is missing id")
+            finalization = finalize_razorpay_payment(
+                db,
+                order,
+                payment_id,
+                source="reconciliation",
+                payment=captured_payment,
+            )
+            if finalization["status"] == "idempotent":
+                result["already_finalized"] += 1
+            else:
+                result["finalized"] += 1
+        except Exception as exc:
+            result["failed"] += 1
+            result["errors"].append(
+                {
+                    "order_reference": order.order_reference,
+                    "error": exc.__class__.__name__,
+                }
+            )
+            record_integration_event(
+                db,
+                service="razorpay",
+                action="reconcile_payment",
+                status_value="failed",
+                user_id=order.user_id,
+                reference=order.order_reference,
+                error=exc.__class__.__name__,
+            )
+            send_monitoring_alert(
+                "payments.razorpay_reconciliation_failed",
+                severity="error",
+                payload={
+                    "order_reference": order.order_reference,
+                    "error": exc.__class__.__name__,
+                },
+            )
+    return result
+
+
 def integration_status() -> dict[str, Any]:
     return {
         "order_backend": {
@@ -3455,6 +5326,13 @@ def integration_status() -> dict[str, Any]:
             "enabled": firebase_auth_is_configured(),
             "project_id_configured": bool(FIREBASE_PROJECT_ID),
             "require_email_verified": FIREBASE_REQUIRE_EMAIL_VERIFIED,
+        },
+        "firestore_commerce": {
+            "enabled": FIRESTORE_COMMERCE_ENABLED,
+            "configured": firestore_commerce_is_configured(),
+            "products_collection": FIRESTORE_PRODUCTS_COLLECTION,
+            "orders_collection": FIRESTORE_ORDERS_COLLECTION,
+            "payment_attempts_collection": FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION,
         },
         "sms_otp": {
             "enabled": SMS_OTP_ENABLED,
@@ -4763,6 +6641,7 @@ def dependency_snapshot(db: Session) -> dict[str, Any]:
         "sms_otp": sms_dependency_status(),
         "oms": optional_service_status(OMS_ENABLED, bool(OMS_BASE_URL), "oms"),
         "razorpay": razorpay_dependency_status(),
+        "firestore_commerce": firestore_commerce_dependency_status(),
         "firebase_auth": optional_service_status(
             FIREBASE_AUTH_ENABLED, bool(FIREBASE_PROJECT_ID), "firebase_auth"
         ),
@@ -4931,7 +6810,9 @@ async def firebase_auth(
 
     email = firebase_email_for_identity(firebase_payload)
     firebase_uid = str(firebase_payload["sub"])
-    user = db.query(User).filter(User.email == email).first()
+    user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
+    if user is None:
+        user = db.query(User).filter(User.email == email).first()
     created = False
 
     if user is None:
@@ -4941,6 +6822,8 @@ async def firebase_auth(
             hashed_password=hash_password(generate_opaque_token()),
             is_verified=True,
             is_admin=False,
+            firebase_uid=firebase_uid,
+            auth_provider="firebase",
         )
         db.add(user)
         db.commit()
@@ -4952,8 +6835,19 @@ async def firebase_auth(
             user_id=user.id,
             email=user.email,
         )
-    elif not user.is_verified:
+    elif user.firebase_uid and user.firebase_uid != firebase_uid:
+        log_event(
+            "auth.firebase_identity_conflict",
+            request,
+            user_id=user.id,
+            email=user.email,
+            success=False,
+        )
+        raise HTTPException(status_code=409, detail="Firebase identity does not match this user")
+    elif not user.is_verified or user.firebase_uid != firebase_uid or user.auth_provider != "firebase":
         user.is_verified = True
+        user.firebase_uid = firebase_uid
+        user.auth_provider = "firebase"
         db.commit()
         db.refresh(user)
 
@@ -5705,6 +7599,7 @@ async def mobile_config(db: Session = Depends(get_db)):
             "oms_order_lookup": True,
             "razorpay_checkout": razorpay_checkout_is_configured(),
             "razorpay_webhook": razorpay_webhook_is_configured(),
+            "firestore_authoritative_checkout": firestore_commerce_is_configured(),
             "llm_grounded_answers": llm_is_configured(),
             "addresses": True,
             "notification_settings": True,
@@ -6500,6 +8395,30 @@ async def admin_update_order(
     return serialize_order_snapshot(db, order)
 
 
+@app.post("/admin/payments/razorpay/reconcile")
+async def admin_reconcile_razorpay_payments(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    if not razorpay_checkout_is_configured():
+        raise HTTPException(status_code=503, detail="Razorpay checkout API is not configured")
+
+    result = reconcile_razorpay_orders(db, limit=limit)
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="reconcile_payment",
+        status_value="completed",
+        user_id=admin_user.id,
+        response_payload=result,
+    )
+    db.commit()
+    log_admin_action(request, admin_user, "reconcile", "razorpay_payments")
+    return result
+
+
 @app.get("/admin/orders/support", response_model=list[OrderSupportOut])
 async def admin_list_order_support_requests(
     limit: int = Query(default=100, ge=1, le=500),
@@ -6879,7 +8798,9 @@ async def create_razorpay_checkout_order(
     if not razorpay_checkout_is_configured():
         raise HTTPException(status_code=503, detail="Razorpay checkout API is not configured")
 
-    request_payload = razorpay_order_request_payload(payload, current_user)
+    hydrate_payment_firebase_identity(db, current_user, payload)
+    calculation = authoritative_checkout_calculation(db, payload, current_user)
+    request_payload = razorpay_order_request_payload(payload, current_user, calculation)
     try:
         status_code, razorpay_response = call_razorpay("POST", "orders", request_payload)
     except urllib.error.HTTPError as exc:
@@ -6942,14 +8863,40 @@ async def create_razorpay_checkout_order(
         db.commit()
         raise HTTPException(status_code=502, detail="Razorpay order response was invalid")
 
-    amount = int(razorpay_response.get("amount") or payload.amount)
+    amount = int(razorpay_response.get("amount") or 0)
     currency = str(razorpay_response.get("currency") or payload.currency).upper()
+    if amount != calculation["amount"] or currency != calculation["currency"]:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="create_order",
+            status_value="amount_mismatch",
+            user_id=current_user.id,
+            request_payload=request_payload,
+            response_payload=razorpay_response,
+            status_code=status_code,
+            error="Razorpay order amount or currency did not match backend calculation",
+        )
+        db.commit()
+        send_monitoring_alert(
+            "payments.razorpay_order_amount_mismatch",
+            severity="error",
+            payload={
+                "expected_amount": calculation["amount"],
+                "actual_amount": amount,
+                "expected_currency": calculation["currency"],
+                "actual_currency": currency,
+            },
+        )
+        raise HTTPException(status_code=502, detail="Razorpay order response amount was invalid")
+
     order_payload = OrderSyncRequest(
         order_reference=razorpay_order_id,
         status="payment_pending",
-        total=razorpay_order_total(amount),
+        total=calculation["payable_total"],
         currency=currency,
-        items=payload.items,
+        items=calculation["items"],
         customer_name=payload.customer_name,
         customer_email=payload.customer_email,
         customer_phone=payload.customer_phone,
@@ -6957,11 +8904,69 @@ async def create_razorpay_checkout_order(
         payment_status="pending",
         source="razorpay_checkout",
         raw_payload={
+            "metadata": calculation["metadata"],
+            "client_payload": payload.model_dump(mode="json"),
             "razorpay_create_request": request_payload,
             "razorpay_order": razorpay_response,
         },
     )
     order = upsert_local_order_snapshot(db, current_user, order_payload)
+    try:
+        create_firestore_payment_attempt(
+            current_user,
+            order,
+            calculation,
+            payload,
+            razorpay_response,
+        )
+    except HTTPException:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="firestore_commerce",
+            action="create_payment_attempt",
+            status_value="failed",
+            user_id=current_user.id,
+            reference=razorpay_order_id,
+            request_payload={"calculation_authority": calculation.get("authority", "local")},
+            error="Could not create Firestore payment attempt",
+        )
+        db.commit()
+        send_monitoring_alert(
+            "payments.firestore_payment_attempt_failed",
+            severity="error",
+            payload={
+                "order_reference": razorpay_order_id,
+                "user_id": current_user.id,
+            },
+        )
+        raise
+    except Exception as exc:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="firestore_commerce",
+            action="create_payment_attempt",
+            status_value="failed",
+            user_id=current_user.id,
+            reference=razorpay_order_id,
+            request_payload={"calculation_authority": calculation.get("authority", "local")},
+            error=exc.__class__.__name__,
+        )
+        db.commit()
+        send_monitoring_alert(
+            "payments.firestore_payment_attempt_failed",
+            severity="error",
+            payload={
+                "order_reference": razorpay_order_id,
+                "user_id": current_user.id,
+                "error": exc.__class__.__name__,
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not lock checkout attempt in Firestore",
+        ) from exc
     record_integration_event(
         db,
         service="razorpay",
@@ -6996,6 +9001,11 @@ async def create_razorpay_checkout_order(
         status=str(razorpay_response.get("status") or "created"),
         payable_total=order.total,
         payableTotal=order.total,
+        coupon_discount=calculation["coupon_discount"],
+        couponDiscount=calculation["coupon_discount"],
+        reward_points_used=calculation["reward_points_used"],
+        rewardPointsUsed=calculation["reward_points_used"],
+        server_calculated=True,
     )
 
 
@@ -7053,11 +9063,17 @@ async def verify_razorpay_checkout_payment(
         )
         raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
 
-    order.payment_status = "verified"
-    order.payment_reference = payload.razorpay_payment_id
-    if order.status in {"", "created", "payment_pending", "pending_payment"}:
-        order.status = "placed"
-    order.updated_at = utc_now()
+    try:
+        finalization = finalize_razorpay_payment(
+            db,
+            order,
+            payload.razorpay_payment_id,
+            source="verify",
+        )
+    except HTTPException:
+        db.commit()
+        raise
+
     append_order_raw_payload(
         order,
         "razorpay_checkout_verification",
@@ -7065,13 +9081,14 @@ async def verify_razorpay_checkout_payment(
             "razorpay_order_id": payload.razorpay_order_id,
             "razorpay_payment_id": payload.razorpay_payment_id,
             "verified_at": order.updated_at.isoformat(),
+            "finalization_status": finalization["status"],
         },
     )
     record_integration_event(
         db,
         service="razorpay",
         action="verify_payment",
-        status_value="verified",
+        status_value=str(finalization["status"]),
         user_id=current_user.id,
         reference=payload.razorpay_order_id,
         request_payload={

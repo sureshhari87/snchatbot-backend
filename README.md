@@ -112,6 +112,20 @@ Production integration secrets:
 - `FIREBASE_PROJECT_ID` Firebase project ID used to verify Android Firebase ID tokens
 - `FIREBASE_AUTH_ENABLED` enables `POST /auth/firebase`; defaults to enabled when `FIREBASE_PROJECT_ID` is set
 - `FIREBASE_REQUIRE_EMAIL_VERIFIED` blocks Firebase token exchange unless Firebase marks the email verified
+- `FIREBASE_SERVICE_ACCOUNT_JSON` one-line Firebase service-account JSON for Firestore commerce checkout
+- `FIREBASE_SERVICE_ACCOUNT_PATH` optional service-account file path for non-Hugging Face deployments
+- `FIRESTORE_COMMERCE_ENABLED` enables server-authoritative checkout from Firestore products, rates, cart, coupons, rewards, and orders
+- `FIRESTORE_PRODUCTS_COLLECTION` default: `products`
+- `FIRESTORE_USERS_COLLECTION` default: `users`
+- `FIRESTORE_ORDERS_COLLECTION` default: `orders`
+- `FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION` default: `payment_attempts`
+- `FIRESTORE_COUPONS_COLLECTION` default: `coupons`
+- `FIRESTORE_GIFT_VOUCHERS_COLLECTION` default: `gift_vouchers`
+- `FIRESTORE_GOLD_RATES_COLLECTION` default: `gold_rates`
+- `FIRESTORE_GOLD_RATES_DOCUMENT` default: `today`
+- `REWARD_POINT_VALUE_RUPEES` default: `1`
+- `PURCHASE_REWARD_RUPEES_PER_POINT` default: `100`
+- `REFERRAL_REWARD_POINTS` default: `0`
 - `SMS_OTP_ENABLED` enables backend-controlled phone OTP login through `POST /auth/otp/request` and `POST /auth/otp/verify`
 - `SMS_PROVIDER` currently supports `onhand`
 - `PHONE_AUTH_PEPPER` stable secret used to hash phone identities; keep it unchanged after launch
@@ -412,7 +426,7 @@ Important mobile flows:
 - Chat: `POST /chat` returns `intent`, `confidence`, `answer_source`, `tool_calls`, `guardrails`, `applied_filters`, `result_count`, `suggested_next_questions`, `lead_captured`, and optional `handoff`
 - Customer actions: wishlist, save-for-later, callback requests, appointments, custom-order requests, complaints, and order-support capture
 - Orders: `GET /orders/{order_reference}` and cancel/return/refund endpoints call the configured OMS when enabled
-- Payments: Android calls `POST /payments/razorpay/orders`, opens Razorpay Checkout with the returned `order_id` and `key_id`, then calls `POST /payments/razorpay/verify`; Razorpay also calls `POST /payments/razorpay/webhook` on Hugging Face for async payment events
+- Payments: Android calls `POST /payments/razorpay/orders` with product IDs and quantities, opens Razorpay Checkout with the backend-calculated `order_id`, `key_id`, and `amount`, then calls `POST /payments/razorpay/verify`; Razorpay also calls `POST /payments/razorpay/webhook` on Hugging Face for async payment events
 - Feedback: `POST /feedback` stores thumbs-up, thumbs-down, not-helpful, rating, and comments against a `response_id`
 
 Order support is capture-only until `OMS_ENABLED=1` and `OMS_BASE_URL` are configured. After that, lookup, cancel, return, refund, and `/orders/support` requests are sent to your OMS and audited in `external_integration_events`. See [docs/oms-integration.md](docs/oms-integration.md) for the required OMS API contract and Android handling notes.
@@ -425,10 +439,11 @@ Use Hugging Face for the webhook when Firebase Functions are not available on yo
 
 Android checkout flow:
 
-1. Call `POST /payments/razorpay/orders` with `amount` in paise, `currency`, cart `items`, and customer/address details.
-2. Open Razorpay Checkout in Flutter using response fields `key_id`, `order_id`, `amount`, and `currency`.
-3. After Checkout success, call `POST /payments/razorpay/verify` with `razorpay_order_id`, `razorpay_payment_id`, and `razorpay_signature`.
-4. Read `order.status` and `order.payment_status` from the verify response. A valid payment becomes `status=placed` and `payment_status=verified`.
+1. Call `POST /payments/razorpay/orders` with cart/product IDs, `backend_product_id` when available, quantities, coupon/reward request fields, and customer/address details.
+2. Let FastAPI calculate the payable amount. With `FIRESTORE_COMMERCE_ENABLED=1`, it uses Firestore products, live rates, coupon/gift-voucher data, reward points, and cart ownership; otherwise it uses the local product table fallback. Flutter may send `amount` during migration only as a sanity check; a mismatch is rejected before Razorpay is called.
+3. Open Razorpay Checkout in Flutter using response fields `key_id`, `order_id`, `amount`, and `currency`.
+4. After Checkout success, call `POST /payments/razorpay/verify` with `razorpay_order_id`, `razorpay_payment_id`, and `razorpay_signature`.
+5. Read `order.status` and `order.payment_status` from the verify response. A valid captured payment becomes `status=placed` and `payment_status=verified`.
 
 Webhook URL:
 
@@ -444,12 +459,13 @@ RAZORPAY_KEY_ID=replace-with-your-razorpay-key-id
 RAZORPAY_KEY_SECRET=replace-with-your-razorpay-key-secret
 ```
 
-The webhook route validates Razorpay's `X-Razorpay-Signature` header using the raw request body before it updates any local order snapshot. Enable the `payment.captured` event in Razorpay.
+The webhook route validates Razorpay's `X-Razorpay-Signature` header using the raw request body before it updates any local order snapshot. It records event ids for idempotency, ignores duplicate and out-of-order events, verifies captured amount/currency through the shared finalizer, and records refund/dispute events for admin review. Enable `payment.captured`, `payment.failed`, refund, and dispute events in Razorpay.
 
 Admin production operations:
 
 - `GET /admin/integrations/status`
 - `GET /admin/integrations/events`
+- `POST /admin/payments/razorpay/reconcile?limit=50`
 - `POST /admin/alerts/test`
 
 For production monitoring setup, see [docs/monitoring-sentry.md](docs/monitoring-sentry.md).

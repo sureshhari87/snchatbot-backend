@@ -19,6 +19,8 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     is_verified = Column(Boolean, nullable=False, default=False)
     is_admin = Column(Boolean, nullable=False, default=False)
+    firebase_uid = Column(String, unique=True, nullable=True, index=True)
+    auth_provider = Column(String, nullable=True)
 
 
 class UserAddress(Base):

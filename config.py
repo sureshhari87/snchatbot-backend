@@ -163,6 +163,20 @@ class Settings:
     firebase_auth_enabled: bool
     firebase_require_email_verified: bool
     firebase_certs_url: str
+    firebase_service_account_json: str | None
+    firebase_service_account_path: str | None
+    firestore_commerce_enabled: bool
+    firestore_products_collection: str
+    firestore_users_collection: str
+    firestore_orders_collection: str
+    firestore_payment_attempts_collection: str
+    firestore_coupons_collection: str
+    firestore_gift_vouchers_collection: str
+    firestore_gold_rates_collection: str
+    firestore_gold_rates_document: str
+    reward_point_value_rupees: float
+    purchase_reward_rupees_per_point: int
+    referral_reward_points: int
     sms_otp_enabled: bool
     sms_provider: str
     sms_timeout_seconds: int
@@ -254,6 +268,8 @@ def build_settings() -> Settings:
     )
     llm_model = get_str("LLM_MODEL") or get_str("OPENAI_MODEL", OPENAI_DEFAULT_MODEL)
     firebase_project_id = get_str("FIREBASE_PROJECT_ID")
+    firebase_service_account_json = get_str("FIREBASE_SERVICE_ACCOUNT_JSON")
+    firebase_service_account_path = get_str("FIREBASE_SERVICE_ACCOUNT_PATH")
     frontend_reset_url = get_str("FRONTEND_RESET_URL", "http://localhost:3000/reset-password")
     frontend_verify_url = get_str("FRONTEND_VERIFY_URL", "http://localhost:3000/verify-email")
     cors_origins = normalize_cors_origins(
@@ -331,6 +347,39 @@ def build_settings() -> Settings:
             "https://www.googleapis.com/robot/v1/metadata/x509/"
             "securetoken@system.gserviceaccount.com",
         ),
+        firebase_service_account_json=firebase_service_account_json,
+        firebase_service_account_path=firebase_service_account_path,
+        firestore_commerce_enabled=get_bool(
+            "FIRESTORE_COMMERCE_ENABLED",
+            bool(
+                firebase_project_id
+                and (
+                    firebase_service_account_json
+                    or firebase_service_account_path
+                    or get_str("GOOGLE_APPLICATION_CREDENTIALS")
+                )
+            ),
+        ),
+        firestore_products_collection=get_str("FIRESTORE_PRODUCTS_COLLECTION", "products"),
+        firestore_users_collection=get_str("FIRESTORE_USERS_COLLECTION", "users"),
+        firestore_orders_collection=get_str("FIRESTORE_ORDERS_COLLECTION", "orders"),
+        firestore_payment_attempts_collection=get_str(
+            "FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION",
+            "payment_attempts",
+        ),
+        firestore_coupons_collection=get_str("FIRESTORE_COUPONS_COLLECTION", "coupons"),
+        firestore_gift_vouchers_collection=get_str(
+            "FIRESTORE_GIFT_VOUCHERS_COLLECTION",
+            "gift_vouchers",
+        ),
+        firestore_gold_rates_collection=get_str("FIRESTORE_GOLD_RATES_COLLECTION", "gold_rates"),
+        firestore_gold_rates_document=get_str("FIRESTORE_GOLD_RATES_DOCUMENT", "today"),
+        reward_point_value_rupees=get_float("REWARD_POINT_VALUE_RUPEES", 1.0),
+        purchase_reward_rupees_per_point=max(
+            get_int("PURCHASE_REWARD_RUPEES_PER_POINT", 100),
+            1,
+        ),
+        referral_reward_points=max(get_int("REFERRAL_REWARD_POINTS", 0), 0),
         sms_otp_enabled=get_bool("SMS_OTP_ENABLED", False),
         sms_provider=(get_str("SMS_PROVIDER", "onhand") or "onhand").lower(),
         sms_timeout_seconds=get_int("SMS_TIMEOUT_SECONDS", 10),
@@ -438,6 +487,20 @@ FIREBASE_PROJECT_ID = settings.firebase_project_id
 FIREBASE_AUTH_ENABLED = settings.firebase_auth_enabled
 FIREBASE_REQUIRE_EMAIL_VERIFIED = settings.firebase_require_email_verified
 FIREBASE_CERTS_URL = settings.firebase_certs_url
+FIREBASE_SERVICE_ACCOUNT_JSON = settings.firebase_service_account_json
+FIREBASE_SERVICE_ACCOUNT_PATH = settings.firebase_service_account_path
+FIRESTORE_COMMERCE_ENABLED = settings.firestore_commerce_enabled
+FIRESTORE_PRODUCTS_COLLECTION = settings.firestore_products_collection
+FIRESTORE_USERS_COLLECTION = settings.firestore_users_collection
+FIRESTORE_ORDERS_COLLECTION = settings.firestore_orders_collection
+FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION = settings.firestore_payment_attempts_collection
+FIRESTORE_COUPONS_COLLECTION = settings.firestore_coupons_collection
+FIRESTORE_GIFT_VOUCHERS_COLLECTION = settings.firestore_gift_vouchers_collection
+FIRESTORE_GOLD_RATES_COLLECTION = settings.firestore_gold_rates_collection
+FIRESTORE_GOLD_RATES_DOCUMENT = settings.firestore_gold_rates_document
+REWARD_POINT_VALUE_RUPEES = settings.reward_point_value_rupees
+PURCHASE_REWARD_RUPEES_PER_POINT = settings.purchase_reward_rupees_per_point
+REFERRAL_REWARD_POINTS = settings.referral_reward_points
 SMS_OTP_ENABLED = settings.sms_otp_enabled
 SMS_PROVIDER = settings.sms_provider
 SMS_TIMEOUT_SECONDS = settings.sms_timeout_seconds

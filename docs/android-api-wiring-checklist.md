@@ -150,10 +150,18 @@ Wire:
 
 Razorpay flow:
 
-1. Send cart total as paise to `POST /payments/razorpay/orders`.
-2. Open Razorpay Checkout with `key_id`, `order_id`, `amount`, and `currency`.
-3. Send Checkout success fields to `POST /payments/razorpay/verify`.
-4. Show success only when backend returns `verified=true`.
+1. Send cart/product IDs, `backend_product_id` when available, quantities, coupon code, reward request, delivery address, and a fresh `firebase_id_token` to `POST /payments/razorpay/orders`.
+2. Do not trust or send item prices as payment truth. With Firestore commerce enabled, the backend calculates `amount`, `payableTotal`, coupon/gift-voucher redemption, reward usage, and stores the pending payment attempt from Firestore data.
+3. Open Razorpay Checkout with backend response fields `key_id`, `order_id`, `amount`, and `currency`.
+4. Send Checkout success fields to `POST /payments/razorpay/verify`.
+5. Show success only when backend returns `verified=true`.
+
+During migration, Flutter may still send `amount` as a sanity check. If the backend rejects the request with
+`Checkout amount changed. Refresh your cart and try again.`, reload products/cart from the backend because the
+client-calculated amount is no longer trusted.
+
+When `/mobile/config` returns `firestore_authoritative_checkout=true`, Flutter should trust the backend
+`amount` and show the backend `payableTotal`, `couponDiscount`, and `rewardPointsUsed` before opening Razorpay.
 
 Until real OMS is enabled, order endpoints may return `capture_only`. Show this as "Request received" rather than "Order updated".
 

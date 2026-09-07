@@ -501,6 +501,15 @@ class OrderItemSync(BaseModel):
     image: Optional[str] = None
 
 
+class PaymentCartItem(BaseModel):
+    product_id: Optional[str] = None
+    backend_product_id: Optional[int] = None
+    qty: int = Field(default=1, ge=1)
+    selected_size: Optional[str] = None
+    selected_variant: Optional[str] = None
+    cart_item_id: Optional[str] = None
+
+
 class OrderSyncRequest(BaseModel):
     order_reference: str = Field(..., min_length=1)
     status: str = "placed"
@@ -522,15 +531,19 @@ class OrderSyncRequest(BaseModel):
 
 
 class RazorpayOrderCreate(BaseModel):
-    amount: int = Field(..., ge=100)
+    amount: Optional[int] = Field(default=None, ge=100)
     currency: str = Field(default="INR", min_length=3, max_length=3)
     receipt: Optional[str] = Field(default=None, max_length=40)
     notes: dict[str, Any] = Field(default_factory=dict)
-    items: List[OrderItemSync] = Field(default_factory=list)
+    items: List[PaymentCartItem] = Field(default_factory=list)
+    coupon_code: Optional[str] = Field(default=None, max_length=80)
+    reward_points_requested: int = Field(default=0, ge=0)
+    gift_voucher_code: Optional[str] = Field(default=None, max_length=80)
     customer_name: Optional[str] = None
     customer_email: Optional[EmailStr] = None
     customer_phone: Optional[str] = None
     delivery_address: Optional[dict[str, Any]] = None
+    firebase_id_token: Optional[str] = Field(default=None, min_length=20)
 
     @field_validator("currency")
     @classmethod
@@ -561,6 +574,9 @@ class RazorpayOrderOut(BaseModel):
     payableTotal: float
     coupon_discount: float = 0
     couponDiscount: float = 0
+    reward_points_used: int = 0
+    rewardPointsUsed: int = 0
+    server_calculated: bool = True
 
 
 class RazorpayPaymentVerifyRequest(BaseModel):

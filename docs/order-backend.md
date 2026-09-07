@@ -14,12 +14,14 @@ Content-Type: application/json
 
 ```json
 {
-  "amount": 2450000,
   "currency": "INR",
   "receipt": "sona-cart-1001",
   "notes": {
     "cart_id": "cart-1001"
   },
+  "coupon_code": "SONA100",
+  "reward_points_requested": 0,
+  "firebase_id_token": "optional-fresh-firebase-id-token",
   "customer_name": "Customer Name",
   "customer_email": "customer@example.com",
   "customer_phone": "9876543210",
@@ -32,16 +34,20 @@ Content-Type: application/json
     {
       "product_id": "snchatbot_1",
       "backend_product_id": 1,
-      "name": "Gold Ring",
       "qty": 1,
-      "price": 24500,
-      "image": "https://example.com/ring.jpg"
+      "cart_item_id": "flutter-cart-doc-id"
     }
   ]
 }
 ```
 
-`amount` is in Razorpay's smallest currency unit. For INR, send paise, so Rs. 24500 becomes `2450000`.
+When `FIRESTORE_COMMERCE_ENABLED=1` and Firebase Admin credentials are configured, the backend calculates
+`amount` from Firestore `products`, `gold_rates/today`, coupons, gift vouchers, reward points, and current
+cart ownership. Otherwise it falls back to the local Postgres product table for Sona AI/admin catalogue items.
+
+Flutter may send `amount` during migration only as a sanity check; if the client amount does not match the
+backend amount, the request is rejected before Razorpay is called. Do not send trusted prices, coupon
+discounts, or reward deductions from Flutter.
 
 Response:
 
@@ -58,7 +64,9 @@ Response:
 }
 ```
 
-For Flutter compatibility, the response also includes camelCase aliases such as `keyId`, `razorpayOrderId`, and `payableTotal`.
+For Flutter compatibility, the response also includes camelCase aliases such as `keyId`, `razorpayOrderId`,
+`payableTotal`, `couponDiscount`, and `rewardPointsUsed`. Always open Razorpay Checkout with the amount
+returned by the backend.
 
 Use `key_id`, `order_id`, `amount`, and `currency` to open Razorpay Checkout. After Checkout success, verify on the backend:
 
@@ -76,8 +84,70 @@ Content-Type: application/json
 }
 ```
 
-A valid signature updates the local order snapshot to `status=placed` and `payment_status=verified`.
+A valid Checkout signature is only the first check. The backend then confirms the payment status with Razorpay,
+compares the captured amount and currency with the local order, and runs the shared finalizer once. For
+Firestore-authoritative orders, that finalizer updates Firestore products, reward points, coupon/gift-voucher
+redemptions, `orders/{orderId}`, `payment_attempts/{orderId}`, and cart cleanup in one Firestore transaction.
+For local catalogue orders, it decrements local Postgres inventory once. The local order snapshot is updated to
+`status=placed` and `payment_status=verified`.
 The verify response includes both a nested `order` object and top-level fields such as `order_reference`, `status`, `payment_status`, `total`, `currency`, and `items` for payment recovery screens.
+
+The same finalization operation is used by `POST /payments/razorpay/verify` and the Razorpay webhook, so retries
+and duplicate events do not decrement stock twice.
+
+## Firestore Commerce Authority
+
+Use this mode for the production Flutter app because your live cart, products, coupons, rewards, and order
+screens are Firestore-backed.
+
+Required Hugging Face secrets:
+
+```env
+FIREBASE_PROJECT_ID=your-firebase-project-id
+FIREBASE_AUTH_ENABLED=1
+FIRESTORE_COMMERCE_ENABLED=1
+FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+```
+
+Optional tuning:
+
+```env
+FIRESTORE_PRODUCTS_COLLECTION=products
+FIRESTORE_USERS_COLLECTION=users
+FIRESTORE_ORDERS_COLLECTION=orders
+FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION=payment_attempts
+FIRESTORE_COUPONS_COLLECTION=coupons
+FIRESTORE_GIFT_VOUCHERS_COLLECTION=gift_vouchers
+FIRESTORE_GOLD_RATES_COLLECTION=gold_rates
+FIRESTORE_GOLD_RATES_DOCUMENT=today
+REWARD_POINT_VALUE_RUPEES=1
+PURCHASE_REWARD_RUPEES_PER_POINT=100
+REFERRAL_REWARD_POINTS=0
+```
+
+For existing users, the app should call `POST /auth/firebase` again, or send `firebase_id_token` during
+`POST /payments/razorpay/orders`, so FastAPI can stamp the local user with the trusted Firebase UID.
+
+## Razorpay Webhook And Reconciliation
+
+Configure Razorpay to call:
+
+```text
+https://sureshhari-snchatbot-backend.hf.space/payments/razorpay/webhook
+```
+
+The webhook verifies the raw-body signature, records the event id, ignores duplicates, handles out-of-order
+failed events without downgrading verified orders, and records refund/dispute events for admin follow-up.
+
+If Razorpay captured a payment but the webhook was missed, an admin can run:
+
+```http
+POST /admin/payments/razorpay/reconcile?limit=50
+Authorization: Bearer <admin_access_token>
+```
+
+This checks pending local Razorpay orders against Razorpay and finalizes any captured payment using the same
+idempotent finalizer.
 
 ## Legacy Checkout Sync
 

@@ -30,6 +30,8 @@ def test_firebase_auth_creates_verified_sona_user(client, db, monkeypatch):
     user = db.query(User).filter(User.email == "firebase.user@example.com").one()
     assert user.is_verified is True
     assert user.is_admin is False
+    assert user.firebase_uid == "firebaseUid123"
+    assert user.auth_provider == "firebase"
     assert db.query(RefreshToken).filter(RefreshToken.user_id == user.id).count() == 1
 
     me = client.get("/me", headers={"Authorization": f"Bearer {body['access_token']}"})
@@ -62,6 +64,8 @@ def test_firebase_auth_reuses_existing_email_and_marks_verified(client, db, monk
     assert len(users) == 1
     assert users[0].id == existing.id
     assert users[0].is_verified is True
+    assert users[0].firebase_uid == "uidExisting"
+    assert users[0].auth_provider == "firebase"
 
 
 def test_firebase_auth_creates_and_reuses_phone_only_customer(client, db, monkeypatch):
@@ -84,6 +88,33 @@ def test_firebase_auth_creates_and_reuses_phone_only_customer(client, db, monkey
     assert len(users) == 1
     assert users[0].is_verified is True
     assert users[0].is_admin is False
+    assert users[0].firebase_uid == "firebasePhoneUid123"
+
+
+def test_firebase_auth_rejects_conflicting_existing_uid(client, db, monkeypatch):
+    import main
+
+    existing = User(
+        username="firebase_conflict",
+        email="conflict.firebase@example.com",
+        hashed_password=hash_password("testpass123"),
+        is_verified=True,
+        firebase_uid="originalUid",
+        auth_provider="firebase",
+    )
+    db.add(existing)
+    db.commit()
+
+    monkeypatch.setattr(
+        main,
+        "verify_firebase_id_token",
+        lambda token: firebase_payload("conflict.firebase@example.com", "otherUid"),
+    )
+
+    response = client.post("/auth/firebase", json={"id_token": "firebase-id-token-for-tests"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Firebase identity does not match this user"
 
 
 def test_firebase_phone_identity_is_stable_and_does_not_expose_phone_number():
