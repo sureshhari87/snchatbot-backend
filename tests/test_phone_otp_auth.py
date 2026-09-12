@@ -239,7 +239,7 @@ def test_onhandsms_query_request_uses_configured_user_agent(monkeypatch):
         return DummyResponse()
 
     monkeypatch.setattr(main, "SMS_HTTP_USER_AGENT", "SonaTestClient/1.0")
-    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(main, "http_urlopen", fake_urlopen)
 
     status_code, body = main.query_http_request(
         "https://sms.example.test/send",
@@ -264,7 +264,5 @@ def test_otp_message_template_supports_hugging_face_escaped_newlines(monkeypatch
     )
 
     assert main.render_otp_message("123456") == (
-        "Dear User,\n"
-        "Your mobile verification code is 123456\n"
-        "Please don't share this."
+        "Dear User,\nYour mobile verification code is 123456\nPlease don't share this."
     )

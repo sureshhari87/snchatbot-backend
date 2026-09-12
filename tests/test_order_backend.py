@@ -754,8 +754,7 @@ def test_razorpay_payment_verify_rejects_amount_mismatch(
 
     assert response.status_code == 409
     assert (
-        response.json()["detail"]
-        == "Razorpay payment amount or currency did not match the order"
+        response.json()["detail"] == "Razorpay payment amount or currency did not match the order"
     )
     product = db.query(Product).filter(Product.id == 2).one()
     assert product.stock_quantity == 5

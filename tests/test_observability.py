@@ -115,10 +115,7 @@ def test_monitoring_helpers_log_monitored_event_without_type_error(monkeypatch):
     assert sentry_sent is True
     assert captured_messages == [("monitoring.test_alert", "info")]
     log_payloads = [json.loads(message) for message in captured_logs]
-    assert {
-        (payload["event"], payload.get("monitored_event"))
-        for payload in log_payloads
-    } >= {
+    assert {(payload["event"], payload.get("monitored_event")) for payload in log_payloads} >= {
         ("monitoring.alert_sent", "monitoring.test_alert"),
         ("monitoring.sentry_message_sent", "monitoring.test_alert"),
     }

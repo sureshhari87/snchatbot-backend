@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from jose import jwt
+import jwt
 
 from main import ALGORITHM, SECRET_KEY, create_access_token
 from models import User

@@ -1,2 +1,1 @@
 """Sona AI backend package."""
-

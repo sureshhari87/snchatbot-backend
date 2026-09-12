@@ -102,16 +102,36 @@ def search_catalog(request: SearchRequest) -> tuple[list[Product], dict[str, Any
             continue
         if filters["max_price"] is not None and product.price > filters["max_price"]:
             continue
-        text = " ".join([product.name, product.description, product.category, product.metal, *product.tags, *product.occasion, *product.style])
+        text = " ".join(
+            [
+                product.name,
+                product.description,
+                product.category,
+                product.metal,
+                *product.tags,
+                *product.occasion,
+                *product.style,
+            ]
+        )
         matches = query_words & _words(text)
-        score = len(matches) * 3 + (2 if filters["category"] else 0) + (2 if filters["metal"] else 0)
-        if matches or any(filters[key] is not None for key in ("category", "metal", "min_price", "max_price")):
+        score = (
+            len(matches) * 3 + (2 if filters["category"] else 0) + (2 if filters["metal"] else 0)
+        )
+        if matches or any(
+            filters[key] is not None for key in ("category", "metal", "min_price", "max_price")
+        ):
             scored.append((score, product))
     scored.sort(key=lambda item: (-item[0], item[1].price))
     return [product for _, product in scored[: request.limit]], filters
 
 
-def recommend(products: list[Product], seed: Product | None, occasion: str | None, budget: float | None, limit: int) -> tuple[list[Product], dict[str, str]]:
+def recommend(
+    products: list[Product],
+    seed: Product | None,
+    occasion: str | None,
+    budget: float | None,
+    limit: int,
+) -> tuple[list[Product], dict[str, str]]:
     ranked: list[tuple[float, Product, str]] = []
     for product in products:
         if seed and str(product.id) == str(seed.id):
@@ -143,7 +163,14 @@ def recommend(products: list[Product], seed: Product | None, occasion: str | Non
     return [x[1] for x in chosen], {str(x[1].id): x[2] for x in chosen}
 
 
-def personalize(products: list[Product], events: list[Any], categories: list[str], metals: list[str], budget: float | None, limit: int) -> tuple[list[Product], dict[str, str]]:
+def personalize(
+    products: list[Product],
+    events: list[Any],
+    categories: list[str],
+    metals: list[str],
+    budget: float | None,
+    limit: int,
+) -> tuple[list[Product], dict[str, str]]:
     weights = {"view": 1, "search": 1, "wishlist": 3, "cart": 4, "purchase": 5}
     product_map = {str(product.id): product for product in products}
     category_affinity: defaultdict[str, int] = defaultdict(int)
@@ -185,10 +212,15 @@ class OpenAIClient:
     def model_uses_reasoning(self) -> bool:
         return self.settings.openai_model.startswith("gpt-6")
 
-    async def json_response(self, instructions: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    async def json_response(
+        self, instructions: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
         if not self.enabled:
             return None
-        headers = {"Authorization": f"Bearer {self.settings.openai_api_key}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Content-Type": "application/json",
+        }
         body = {
             "model": self.settings.openai_model,
             "instructions": instructions,
@@ -199,7 +231,9 @@ class OpenAIClient:
         if self.model_uses_reasoning:
             body["reasoning"] = {"effort": self.settings.openai_reasoning_effort}
         async with httpx.AsyncClient(timeout=35) as client:
-            response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=body)
+            response = await client.post(
+                "https://api.openai.com/v1/responses", headers=headers, json=body
+            )
             response.raise_for_status()
             data = response.json()
         for item in data.get("output", []):
@@ -216,7 +250,11 @@ class OpenAIClient:
             response = await client.post(
                 "https://api.openai.com/v1/images/generations",
                 headers=headers,
-                json={"model": self.settings.openai_image_model, "prompt": prompt, "size": "1024x1024"},
+                json={
+                    "model": self.settings.openai_image_model,
+                    "prompt": prompt,
+                    "size": "1024x1024",
+                },
             )
             response.raise_for_status()
             return response.json().get("data", [{}])[0].get("b64_json")

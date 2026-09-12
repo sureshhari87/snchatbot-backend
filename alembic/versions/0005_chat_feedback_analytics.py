@@ -104,7 +104,9 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("id"),
         )
     _create_index_if_missing("ix_response_feedback_id", "response_feedback", ["id"])
-    _create_index_if_missing("ix_response_feedback_response_id", "response_feedback", ["response_id"])
+    _create_index_if_missing(
+        "ix_response_feedback_response_id", "response_feedback", ["response_id"]
+    )
     _create_index_if_missing("ix_response_feedback_user_id", "response_feedback", ["user_id"])
     _create_index_if_missing("ix_response_feedback_session_id", "response_feedback", ["session_id"])
     _create_index_if_missing(

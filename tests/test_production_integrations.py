@@ -159,7 +159,9 @@ def test_oms_order_lookup_and_action_sync(client, auth_headers, admin_headers, d
     assert refund.json()["integration_status"] == "synced"
     assert refund.json()["status"] == "synced_to_oms"
 
-    events = db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "oms").all()
+    events = (
+        db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "oms").all()
+    )
     assert {event.action for event in events} >= {"lookup", "cancel", "refund"}
     assert calls[0]["headers"]["Authorization"] == "Bearer oms-token"
     assert calls[1]["method"] == "POST"
@@ -178,11 +180,7 @@ def test_llm_grounded_chat_layer_uses_configured_provider(auth_client, db, monke
         assert payload["model"] == "test-model"
         return 200, {
             "choices": [
-                {
-                    "message": {
-                        "content": "The Classic Gold Ring is in stock and fits your budget."
-                    }
-                }
+                {"message": {"content": "The Classic Gold Ring is in stock and fits your budget."}}
             ]
         }
 
@@ -203,7 +201,9 @@ def test_llm_grounded_chat_layer_uses_configured_provider(auth_client, db, monke
     assert "llm_completion" in body["tool_calls"]
     assert "llm-grounded-catalog" in body["guardrails"]
 
-    event = db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "llm").first()
+    event = (
+        db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "llm").first()
+    )
     assert event is not None
     assert event.status == "synced"
 
@@ -237,7 +237,9 @@ def test_openai_llm_layer_uses_responses_api_for_latest_model(auth_client, db, m
     assert body["reply"] == "The Classic Gold Ring is a strong match under 20000."
     assert body["answer_source"] == "llm_grounded_catalog"
 
-    event = db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "llm").first()
+    event = (
+        db.query(ExternalIntegrationEvent).filter(ExternalIntegrationEvent.service == "llm").first()
+    )
     assert event is not None
     assert event.action == "responses"
 

@@ -140,7 +140,9 @@ def test_admin_knowledge_and_mobile_public_config(client, admin_headers, db, mon
     assert mobile_config["capabilities"]["razorpay_webhook"] is True
     assert mobile_config["public_config"]["android_min_version"] == "1"
 
-    config_entry = db.query(AppConfigEntry).filter(AppConfigEntry.key == "android_min_version").first()
+    config_entry = (
+        db.query(AppConfigEntry).filter(AppConfigEntry.key == "android_min_version").first()
+    )
     patch_response = client.patch(
         f"/admin/config/{config_entry.id}",
         headers=admin_headers,

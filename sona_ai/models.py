@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
 class Product(StrictModel):
@@ -120,4 +120,3 @@ class ConceptResponse(StrictModel):
     image_mime_type: str | None = None
     answer_source: Literal["ai", "template"]
     disclaimer: str
-

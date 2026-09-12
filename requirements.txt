@@ -4,7 +4,7 @@ pydantic
 sqlalchemy
 alembic
 psycopg[binary]
-python-jose[cryptography]
+PyJWT[crypto]>=2.13.0,<3
 python-multipart
 pwdlib[argon2]
 slowapi

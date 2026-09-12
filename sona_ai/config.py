@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     allowed_origins: str = "*"
     max_catalog_items: int = 500
     secret_key: str | None = None
-    jwt_algorithm: str = 'HS256'
+    jwt_algorithm: str = "HS256"
     ai_requests_per_minute: int = 30
     concept_requests_per_minute: int = 5
 
@@ -30,4 +30,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

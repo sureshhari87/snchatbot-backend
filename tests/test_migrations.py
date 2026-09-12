@@ -17,4 +17,3 @@ def test_alembic_revision_ids_fit_default_version_column():
         assert len(module.revision) <= 32, f"{migration_file} revision id is too long"
         if module.down_revision:
             assert len(module.down_revision) <= 32, f"{migration_file} down_revision is too long"
-

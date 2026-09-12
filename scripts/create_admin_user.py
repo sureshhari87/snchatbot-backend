@@ -79,7 +79,9 @@ def create_or_promote_admin(
         return f"Created admin user: {normalized_email}"
     except IntegrityError as exc:
         db.rollback()
-        raise SystemExit(f"Could not create admin user because of a database constraint: {exc}") from exc
+        raise SystemExit(
+            f"Could not create admin user because of a database constraint: {exc}"
+        ) from exc
     finally:
         db.close()
 

@@ -22,12 +22,14 @@ from pathlib import Path
 from typing import Any, List
 from uuid import uuid4
 
+import jwt
+from cryptography.x509 import load_pem_x509_certificate
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jose import JWTError, jwt
+from jwt import PyJWTError as JWTError
 from pwdlib import PasswordHash
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -46,6 +48,7 @@ except Exception:  # pragma: no cover - optional production integration
     firebase_credentials = None
     firebase_firestore = None
 
+from commerce import install as install_commerce_routes
 from config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     ADMIN_BOOTSTRAP_EMAIL,
@@ -181,6 +184,7 @@ from models import (
     WishlistItem,
     utc_now,
 )
+from safe_http import http_urlopen
 from schemas import (
     AiGeneratedConceptCreate,
     AiGeneratedConceptOut,
@@ -481,7 +485,7 @@ def json_http_request(
         headers=request_headers,
         method=method,
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with http_urlopen(request, timeout=timeout) as response:
         raw_body = response.read().decode("utf-8")
         if not raw_body:
             return response.status, {}
@@ -1260,7 +1264,7 @@ def fetch_firebase_public_certs(force_refresh: bool = False) -> dict[str, str]:
         headers={"Accept": "application/json", "User-Agent": "snchatbot-backend/1.0"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with http_urlopen(request, timeout=10) as response:
             raw_body = response.read().decode("utf-8")
             certs = json.loads(raw_body)
             cache_control = response.headers.get("Cache-Control", "")
@@ -1300,6 +1304,8 @@ def verify_firebase_id_token(id_token: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="Invalid Firebase token")
 
     try:
+        if "BEGIN CERTIFICATE" in cert:
+            cert = load_pem_x509_certificate(cert.encode("ascii")).public_key()
         payload = jwt.decode(
             id_token,
             cert,
@@ -1541,7 +1547,7 @@ def urlencoded_http_request(
         headers=sms_http_headers("application/x-www-form-urlencoded"),
         method=method,
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with http_urlopen(request, timeout=timeout) as response:
         raw_body = response.read().decode("utf-8")
         if not raw_body:
             return response.status, {}
@@ -1562,7 +1568,7 @@ def query_http_request(
         headers=sms_http_headers(),
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with http_urlopen(request, timeout=timeout) as response:
         raw_body = response.read().decode("utf-8")
         if not raw_body:
             return response.status, {}
@@ -3562,8 +3568,10 @@ def firestore_product_has_dynamic_pricing(product: dict[str, Any]) -> bool:
         > 0
     )
     dynamic_pricing = firestore_first_value(product, ["useDynamicPricing", "use_dynamic_pricing"])
-    return has_supported_metal and has_weight and (
-        dynamic_pricing is None or firestore_to_bool(dynamic_pricing) is True
+    return (
+        has_supported_metal
+        and has_weight
+        and (dynamic_pricing is None or firestore_to_bool(dynamic_pricing) is True)
     )
 
 
@@ -3621,7 +3629,9 @@ def firestore_product_price(product: dict[str, Any], rates: dict[str, Any]) -> f
     making_charge = firestore_to_float(
         firestore_first_value(product, ["makingCharge", "making_charge"])
     )
-    stone_charge = firestore_to_float(firestore_first_value(product, ["stoneCharge", "stone_charge"]))
+    stone_charge = firestore_to_float(
+        firestore_first_value(product, ["stoneCharge", "stone_charge"])
+    )
     diamond_charge = firestore_to_float(
         firestore_first_value(product, ["diamondCharge", "diamond_charge"])
     )
@@ -3841,9 +3851,7 @@ def firestore_order_item_payload(
         "category": str(
             firestore_first_value(product, ["subCategory", "productType", "category"]) or ""
         ),
-        "metal": str(
-            firestore_first_value(product, ["metalType", "metal_type", "metal"]) or ""
-        ),
+        "metal": str(firestore_first_value(product, ["metalType", "metal_type", "metal"]) or ""),
     }
 
 
@@ -3909,7 +3917,9 @@ def firestore_checkout_calculation(
                 detail=f"Product {reference} does not have valid live pricing",
             )
         subtotal_paise += unit_amount * quantity
-        item_payload = firestore_order_item_payload(document_id, product, quantity, unit_price, item)
+        item_payload = firestore_order_item_payload(
+            document_id, product, quantity, unit_price, item
+        )
         order_items.append(
             OrderItemSync(
                 product_id=item_payload["product_id"],
@@ -4094,12 +4104,22 @@ def authoritative_checkout_calculation(
     payload: RazorpayOrderCreate,
     user: User,
 ) -> dict[str, Any]:
-    firestore_calculation = firestore_checkout_calculation(db, payload, user)
+    firestore_calculation = (
+        firestore_checkout_calculation(db, payload, user)
+        if payload.commerce_source != "fastapi"
+        else None
+    )
     if firestore_calculation is not None:
         return firestore_calculation
 
     if not payload.items:
         raise HTTPException(status_code=422, detail="Checkout cart is empty")
+
+    fastapi_checkout = {}
+    if payload.commerce_source == "fastapi":
+        from commerce import validate_checkout
+
+        fastapi_checkout = validate_checkout(db, payload, user)
 
     currency = (payload.currency or "INR").upper()
     order_items: list[OrderItemSync] = []
@@ -4182,6 +4202,9 @@ def authoritative_checkout_calculation(
 
     metadata = {
         "server_authoritative_pricing": True,
+        "commerce_source": payload.commerce_source,
+        "fastapi_checkout": fastapi_checkout,
+        "delivery_promises": fastapi_checkout.get("delivery_promises", []),
         "client_amount": payload.amount,
         "subtotal_amount": subtotal_paise,
         "payable_amount": amount,
@@ -4263,7 +4286,9 @@ def razorpay_order_request_payload(
 ) -> dict[str, Any]:
     amount = parse_optional_int((calculation or {}).get("amount"), default=0)
     currency = str((calculation or {}).get("currency") or payload.currency or "INR").upper()
-    receipt = str((calculation or {}).get("receipt") or payload.receipt or f"sona-{uuid4().hex[:20]}")
+    receipt = str(
+        (calculation or {}).get("receipt") or payload.receipt or f"sona-{uuid4().hex[:20]}"
+    )
     return {
         "amount": amount,
         "currency": currency,
@@ -4509,8 +4534,7 @@ def firestore_build_order_document(
         "giftVoucherCode": gift_voucher.get("code") or "",
         "giftVoucherRedeemed": gift_voucher.get("redeemed") or 0,
         "totalAfterCoupon": round(
-            float(metadata.get("subtotal", order.total) or 0)
-            - float(coupon.get("discount") or 0),
+            float(metadata.get("subtotal", order.total) or 0) - float(coupon.get("discount") or 0),
             2,
         ),
         "rewardPointsUsed": rewards.get("consumed_points") or 0,
@@ -4566,11 +4590,20 @@ def finalize_firestore_commerce_payment(
                 "cart_cleanup": attempt_data.get("cartCleanup") or {},
             }
 
-        expected_amount = parse_optional_int(attempt_data.get("amount"), order_expected_amount(order))
+        expected_amount = parse_optional_int(
+            attempt_data.get("amount"), order_expected_amount(order)
+        )
         expected_currency = str(attempt_data.get("currency") or order_currency(order)).upper()
-        if expected_amount != order_expected_amount(order) or expected_currency != order_currency(order):
-            raise HTTPException(status_code=409, detail="Payment attempt does not match local order")
-        if payment_amount(payment) != expected_amount or payment_currency(payment) != expected_currency:
+        if expected_amount != order_expected_amount(order) or expected_currency != order_currency(
+            order
+        ):
+            raise HTTPException(
+                status_code=409, detail="Payment attempt does not match local order"
+            )
+        if (
+            payment_amount(payment) != expected_amount
+            or payment_currency(payment) != expected_currency
+        ):
             raise HTTPException(
                 status_code=409,
                 detail="Razorpay payment amount or currency did not match the order",
@@ -4691,11 +4724,7 @@ def finalize_firestore_commerce_payment(
                 "rewardPoints": firestore_increment(reward_delta),
                 "lastOrderId": order.order_reference,
                 "updatedAt": firestore_server_timestamp(),
-                **(
-                    {"firstPurchaseReferralRewarded": True}
-                    if referral_rewards_awarded
-                    else {}
-                ),
+                **({"firstPurchaseReferralRewarded": True} if referral_rewards_awarded else {}),
             },
             merge=True,
         )
@@ -4936,6 +4965,9 @@ def finalize_razorpay_payment(
         else:
             commerce_finalization = {}
             inventory_updates = decrement_inventory_for_order(db, order)
+            from commerce import clean_paid_cart
+
+            commerce_finalization = clean_paid_cart(db, order)
     except HTTPException:
         mark_razorpay_finalization_failure(
             db,
@@ -5102,9 +5134,7 @@ def apply_razorpay_webhook(
     payment_id = str(
         payment.get("id") or refund.get("payment_id") or dispute.get("payment_id") or ""
     ).strip()
-    razorpay_order_id = str(
-        payment.get("order_id") or order_entity.get("id") or ""
-    ).strip()
+    razorpay_order_id = str(payment.get("order_id") or order_entity.get("id") or "").strip()
     amount = payment.get("amount") or refund.get("amount")
     currency = payment.get("currency") or refund.get("currency")
     event_id = razorpay_webhook_event_id(
@@ -5174,10 +5204,7 @@ def apply_razorpay_webhook(
             normalized_dispute_status = razorpay_dispute_status(event_name)
             normalized_status = normalized_payment_status or normalized_dispute_status
             if normalized_status:
-                if (
-                    normalized_status == "failed"
-                    and order.payment_status in {"verified", "paid"}
-                ):
+                if normalized_status == "failed" and order.payment_status in {"verified", "paid"}:
                     status_value = "ignored_out_of_order"
                 else:
                     order.payment_status = normalized_status
@@ -6228,7 +6255,9 @@ def parse_filter_updates(message: str) -> tuple[dict[str, Any], set[str], bool, 
 
     if message_has_any(msg, ["cheaper", "lower price", "less expensive"]):
         relative_price = "cheaper"
-    elif message_has_any(msg, ["more expensive", "higher price", "higher budget", "premium", "luxury"]):
+    elif message_has_any(
+        msg, ["more expensive", "higher price", "higher budget", "premium", "luxury"]
+    ):
         relative_price = "premium"
 
     if message_has_any(msg, ["in stock", "available", "ready to ship"]):
@@ -6844,7 +6873,11 @@ async def firebase_auth(
             success=False,
         )
         raise HTTPException(status_code=409, detail="Firebase identity does not match this user")
-    elif not user.is_verified or user.firebase_uid != firebase_uid or user.auth_provider != "firebase":
+    elif (
+        not user.is_verified
+        or user.firebase_uid != firebase_uid
+        or user.auth_provider != "firebase"
+    ):
         user.is_verified = True
         user.firebase_uid = firebase_uid
         user.auth_provider = "firebase"
@@ -7350,6 +7383,7 @@ async def list_products(
     style: str | None = None,
     in_stock_only: bool = False,
     limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     query = product_search_query(
@@ -7369,7 +7403,12 @@ async def list_products(
         gift_intent=gift_intent,
         in_stock_only=in_stock_only,
     )
-    return query.order_by(Product.price.asc(), Product.id.asc()).limit(clamp_limit(limit)).all()
+    return (
+        query.order_by(Product.price.asc(), Product.id.asc())
+        .offset(offset)
+        .limit(clamp_limit(limit))
+        .all()
+    )
 
 
 @app.post("/products/{product_id}/back-in-stock", response_model=BackInStockSubscriptionOut)
@@ -9833,3 +9872,6 @@ def generate_opaque_token() -> str:
 
 def hash_opaque_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+install_commerce_routes(app, get_db, get_current_user)

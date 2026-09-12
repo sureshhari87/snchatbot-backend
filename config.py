@@ -400,9 +400,7 @@ def build_settings() -> Settings:
         onhandsms_route=get_str("ONHANDSMS_ROUTE", "transactional"),
         onhandsms_template_id=get_str("ONHANDSMS_TEMPLATE_ID"),
         onhandsms_method=(get_str("ONHANDSMS_METHOD", "POST") or "POST").upper(),
-        onhandsms_payload_format=(
-            get_str("ONHANDSMS_PAYLOAD_FORMAT", "json") or "json"
-        ).lower(),
+        onhandsms_payload_format=(get_str("ONHANDSMS_PAYLOAD_FORMAT", "json") or "json").lower(),
         onhandsms_payload_template=get_str("ONHANDSMS_PAYLOAD_TEMPLATE"),
         onhandsms_message_template=get_str(
             "ONHANDSMS_MESSAGE_TEMPLATE",

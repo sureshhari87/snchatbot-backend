@@ -84,6 +84,16 @@ class Product(Base):
     style = Column(JSON, nullable=True)
 
 
+class CommerceCartItem(Base):
+    __tablename__ = "commerce_cart_items"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    quantity = Column(Integer, nullable=False, default=1)
+    options = Column(JSON, nullable=False, default=dict)
+    updated_at = Column(DateTime, nullable=False, default=utc_now)
+
+
 class ProductCategory(Base):
     __tablename__ = "product_categories"
 

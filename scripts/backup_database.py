@@ -3,10 +3,14 @@ import json
 import os
 import shutil
 import sqlite3
-import subprocess
+
+# Operator-only pg_dump; the executable is validated and no shell is used.
+import subprocess  # nosec B404
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+
+from psycopg.conninfo import conninfo_to_dict
 
 
 def utc_timestamp() -> str:
@@ -81,14 +85,15 @@ def backup_sqlite(database_url: str, output_dir: Path, label: str) -> tuple[Path
 
 
 def pg_dump_executable(explicit_path: str | None = None) -> str:
-    if explicit_path:
-        return explicit_path
-    resolved = shutil.which("pg_dump")
+    resolved = explicit_path or shutil.which("pg_dump")
     if not resolved:
         raise FileNotFoundError(
             "pg_dump was not found. Install PostgreSQL client tools or set PG_DUMP_PATH."
         )
-    return resolved
+    executable = Path(resolved).resolve(strict=True)
+    if not executable.is_file() or executable.name.lower() not in {"pg_dump", "pg_dump.exe"}:
+        raise ValueError("Expected a pg_dump executable path")
+    return str(executable)
 
 
 def backup_postgres(
@@ -105,9 +110,33 @@ def backup_postgres(
         "--no-owner",
         "--file",
         str(backup_file),
-        database_url,
     ]
-    subprocess.run(command, check=True)
+    normalized = database_url.replace("postgresql+psycopg2://", "postgresql://", 1).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    params = conninfo_to_dict(normalized)
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("PG")}
+    fields = {
+        "host": "PGHOST",
+        "port": "PGPORT",
+        "user": "PGUSER",
+        "password": "PGPASSWORD",
+        "dbname": "PGDATABASE",
+        "sslmode": "PGSSLMODE",
+        "channel_binding": "PGCHANNELBINDING",
+    }
+    if set(params) - set(fields):
+        raise ValueError("Unsupported backup connection option")
+    env.update({fields[key]: value for key, value in params.items()})
+    env["PGCONNECT_TIMEOUT"] = "20"
+    # The executable is an operator-selected absolute pg_dump path, not a web input.
+    # Keep the URL/password out of process arguments and exception text.
+    try:
+        result = subprocess.run(command, env=env, capture_output=True, shell=False)  # nosec B603
+        if result.returncode:
+            raise RuntimeError("pg_dump failed; database details withheld")
+    finally:
+        env.clear()
     if not backup_file.exists() or backup_file.stat().st_size == 0:
         raise RuntimeError("pg_dump completed but produced an empty backup file.")
 
@@ -117,7 +146,9 @@ def backup_postgres(
         "postgres",
         label,
         "success",
-        {"restore_command": f"pg_restore --clean --if-exists --dbname <target-db-url> {backup_file}"},
+        {
+            "restore_command": f"pg_restore --clean --if-exists --dbname <target-db-url> {backup_file}"
+        },
     )
     return backup_file, manifest_path
 

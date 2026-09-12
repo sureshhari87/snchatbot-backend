@@ -531,6 +531,7 @@ class OrderSyncRequest(BaseModel):
 
 
 class RazorpayOrderCreate(BaseModel):
+    commerce_source: Literal["auto", "fastapi"] = "auto"
     amount: Optional[int] = Field(default=None, ge=100)
     currency: str = Field(default="INR", min_length=3, max_length=3)
     receipt: Optional[str] = Field(default=None, max_length=40)
