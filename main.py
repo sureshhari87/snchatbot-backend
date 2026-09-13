@@ -48,6 +48,7 @@ except Exception:  # pragma: no cover - optional production integration
     firebase_credentials = None
     firebase_firestore = None
 
+from catalogue_admin import install as install_catalogue_admin
 from commerce import install as install_commerce_routes
 from config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
@@ -9875,3 +9876,4 @@ def hash_opaque_token(token: str) -> str:
 
 
 install_commerce_routes(app, get_db, get_current_user)
+install_catalogue_admin(app, get_db, require_permission)

@@ -23,6 +23,7 @@ def normalize_string_list(value: Any) -> list[str]:
 
 
 class ProductOut(BaseModel):
+    attributes: dict[str, Any] = Field(default_factory=dict)
     id: int
     name: str
     description: Optional[str] = None

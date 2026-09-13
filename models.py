@@ -82,6 +82,27 @@ class Product(Base):
     tags = Column(JSON, nullable=True)
     occasion = Column(JSON, nullable=True)
     style = Column(JSON, nullable=True)
+    source_id = Column(String, unique=True, nullable=True, index=True)
+    source_data = Column(JSON, nullable=True)
+
+    @property
+    def attributes(self):
+        fields = {
+            "images",
+            "sizes",
+            "sizeOptions",
+            "sizeType",
+            "goldColor",
+            "assurance",
+            "readyToShip",
+            "madeToOrder",
+            "handlingDays",
+            "manufacturingDays",
+            "sizeAdjustmentDays",
+            "dispatchNotBefore",
+            "subCategory",
+        }
+        return {key: value for key, value in (self.source_data or {}).items() if key in fields}
 
 
 class CommerceCartItem(Base):

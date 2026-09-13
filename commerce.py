@@ -45,6 +45,18 @@ def check_stock(product, quantity):
         raise HTTPException(409, "Requested quantity is no longer in stock")
 
 
+def check_selection(product, size="", variant=""):
+    data = product.source_data or {}
+    choices = data.get("sizeOptions") or data.get("sizes") or []
+    if not isinstance(choices, list) or any(isinstance(x, (dict, list)) for x in choices):
+        raise HTTPException(409, "Product sizes need configuration")
+    allowed = {str(x).strip() for x in choices if str(x).strip()}
+    if variant and variant != size:
+        raise HTTPException(422, "Select the exact product SKU; variant pricing is not configured")
+    if (size and size not in allowed) or (allowed and not size):
+        raise HTTPException(422, "Select an available product size")
+
+
 def cart_out(db, item):
     product = db.get(Product, item.product_id)
     return {
@@ -159,10 +171,7 @@ def validate_checkout(db, payload, user):
         if not item.backend_product_id or str(item.backend_product_id) != item.product_id:
             raise HTTPException(422, "Use the same numeric product ID throughout checkout")
         product_id = item.backend_product_id
-        if item.selected_size or item.selected_variant:
-            raise HTTPException(
-                422, "Select the exact product SKU; variant pricing is not configured"
-            )
+        check_selection(product_or_error(db, product_id), item.selected_size, item.selected_variant)
         totals[product_id] = totals.get(product_id, 0) + item.qty
         if item.cart_item_id:
             try:
@@ -172,6 +181,8 @@ def validate_checkout(db, payload, user):
             row = owned_item(db, user.id, cart_id)
             if row.product_id != product_id or row.quantity != item.qty:
                 raise HTTPException(409, "Your cart changed. Refresh before paying")
+            if (row.options or {}).get("selected_size", "") != (item.selected_size or ""):
+                raise HTTPException(409, "Your selected size changed. Refresh before paying")
             versions[str(cart_id)] = row.updated_at.isoformat()
             options[str(cart_id)] = row.options
     for product_id, quantity in totals.items():
@@ -226,11 +237,8 @@ def install(app, get_db, get_current_user):
 
     @app.post("/cart")
     def add(payload: CartWrite, user=Depends(get_current_user), db: Session = Depends(get_db)):
-        if payload.selected_size or payload.selected_variant:
-            raise HTTPException(
-                422, "Select the exact product SKU; variant pricing is not configured"
-            )
         product = product_or_error(db, payload.product_id)
+        check_selection(product, payload.selected_size, payload.selected_variant)
         check_stock(product, payload.quantity)
         item = CommerceCartItem(
             user_id=user.id,
