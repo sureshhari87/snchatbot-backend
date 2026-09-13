@@ -145,31 +145,26 @@ jobs:
       - name: Build Docker image
         run: docker build --pull=false -t snchatbot-backend:ci .
 
-  deploy-staging:
-    name: Staging Deploy
+  staging-smoke-tests:
+    name: Isolated Container Staging
     runs-on: ubuntu-latest
     needs: [quality, tests, security, docker-build]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: staging
-
-    steps:
-      - name: Trigger staging deploy when configured
+    timeout-minutes: 15
+    # Disposable CI credentials only. Never attach production or Neon secrets.
+    services:
+      postgres:
+        image: postgres:18
         env:
-          STAGING_DEPLOY_WEBHOOK: ${{ secrets.STAGING_DEPLOY_WEBHOOK }}
-        run: |
-          if [ -z "$STAGING_DEPLOY_WEBHOOK" ]; then
-            echo "STAGING_DEPLOY_WEBHOOK is not configured; skipping staging deploy."
-            exit 0
-          fi
-
-          curl -fsS -X POST "$STAGING_DEPLOY_WEBHOOK"
-
-  staging-smoke-tests:
-    name: Staging Smoke Tests
-    runs-on: ubuntu-latest
-    needs: deploy-staging
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: staging
+          POSTGRES_USER: staging_ci
+          POSTGRES_PASSWORD: ephemeral-ci-only
+          POSTGRES_DB: staging_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U staging_ci -d staging_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
 
     steps:
       - name: Checkout repository
@@ -180,18 +175,38 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run staging smoke tests when configured
-        env:
-          STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
-        run: |
-          if [ -z "$STAGING_BASE_URL" ]; then
-            echo "STAGING_BASE_URL is not configured; production deployment is blocked until staging smoke tests can run."
-            exit 1
-          fi
+      - name: Build the real deployment image
+        run: docker build -t snchatbot-backend:staging .
 
-          SMOKE_BASE_URL="$STAGING_BASE_URL" \
-          SMOKE_EXPECT_LATEST_CHAT_CONTRACT=1 \
-          python scripts/smoke_test.py
+      - name: Start isolated backend and apply migrations
+        run: |
+          docker run -d --name staging-backend --network host \
+            -e APP_ENV=staging -e TESTING=0 \
+            -e DATABASE_URL=postgresql+psycopg://staging_ci:ephemeral-ci-only@127.0.0.1:5432/staging_ci \
+            -e SECRET_KEY=isolated-ci-only-jwt-signing-key-not-used-in-production \
+            -e RUN_MIGRATIONS_BEFORE_START=1 -e RUN_MIGRATIONS_ON_STARTUP=0 \
+            -e HTTPS_REDIRECT=0 -e PORT=7860 -e HOST=127.0.0.1 \
+            -e CORS_ORIGINS=http://127.0.0.1:7860 \
+            -e FIRESTORE_COMMERCE_ENABLED=0 -e FIREBASE_AUTH_ENABLED=0 \
+            -e LLM_ENABLED=0 -e ADMIN_BOOTSTRAP_ENABLED=0 \
+            -e PROXY_HEADERS=0 \
+            snchatbot-backend:staging
+
+      - name: Verify readiness and deployed contracts
+        env:
+          SMOKE_BASE_URL: http://127.0.0.1:7860
+          SMOKE_EXPECT_LATEST_CHAT_CONTRACT: "1"
+          SMOKE_EXPECT_COMMERCE_CONTRACT: "1"
+          SMOKE_RETRIES: "24"
+        run: python scripts/smoke_test.py
+
+      - name: Show isolated backend logs on failure
+        if: failure()
+        run: docker logs staging-backend
+
+      - name: Stop isolated backend
+        if: always()
+        run: docker rm -f staging-backend || true
 
   deploy-production:
     name: Production Deploy

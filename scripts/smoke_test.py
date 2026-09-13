@@ -18,6 +18,22 @@ EXPECT_LATEST_CHAT_CONTRACT = os.getenv(
     "SMOKE_EXPECT_LATEST_CHAT_CONTRACT",
     os.getenv("LIVE_API_EXPECT_LATEST_CHAT_CONTRACT", ""),
 ).lower() in {"1", "true", "yes", "on"}
+EXPECT_COMMERCE_CONTRACT = os.getenv("SMOKE_EXPECT_COMMERCE_CONTRACT", "0") == "1"
+
+
+def check_commerce_contract(schema: dict) -> None:
+    paths = schema.get("paths", {})
+    for path in [
+        "/products",
+        "/cart",
+        "/delivery/quote",
+        "/admin/catalogue/products",
+        "/admin/catalogue/rates",
+        "/catalogue/metal-rates",
+    ]:
+        require(path in paths, f"OpenAPI contract is missing {path}")
+    product = schema.get("components", {}).get("schemas", {}).get("ProductOut", {})
+    require("attributes" in product.get("properties", {}), "ProductOut lacks imported attributes")
 
 
 def request_json(path: str) -> tuple[int, dict]:
@@ -79,6 +95,10 @@ def check_openapi_contract() -> None:
     if EXPECT_LATEST_CHAT_CONTRACT:
         for field in ["applied_filters", "result_count", "suggested_next_questions"]:
             require(field in chat_properties, f"ChatResponse is missing {field}")
+    if EXPECT_COMMERCE_CONTRACT:
+        check_commerce_contract(schema)
+        status, _ = request_json("/cart")
+        require(status == 401, "Unauthenticated cart access must return 401")
 
 
 def main() -> int:
