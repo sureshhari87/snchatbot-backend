@@ -105,7 +105,20 @@ def migrate_child():
     command.upgrade(config, "head")
 
 
-def main():
+def payment_test_environment(key_id, key_secret):
+    if not key_id.startswith("rzp_test_") or not key_id[len("rzp_test_") :].isalnum():
+        raise ValueError("Only a Razorpay test key ID is accepted")
+    if not key_secret or any(c.isspace() or not c.isprintable() for c in key_secret):
+        raise ValueError("A nonempty Razorpay test key secret is required")
+    return {"RAZORPAY_KEY_ID": key_id, "RAZORPAY_KEY_SECRET": key_secret}
+
+
+def staging_auth_environment():
+    # Public project identifier only; users and permissions remain in staging SQL.
+    return {"FIREBASE_PROJECT_ID": "sona-jewellery-app", "FIREBASE_AUTH_ENABLED": "1"}
+
+
+def main(test_payments=False, firebase_auth=False):
     if not sys.stdin.isatty():
         raise ValueError("Run in an interactive terminal for hidden input")
     print("Select Neon branch staging, database snchatbot_staging, role staging_owner.")
@@ -140,6 +153,16 @@ def main():
         if preflight(url) != "ready":
             raise RuntimeError("Staging schema verification failed")
         print("Staging schema verified: " + REVISION)
+        if firebase_auth:
+            env.update(staging_auth_environment())
+            print("Firebase login enabled for sona-jewellery-app; no admin grants are added.")
+        if test_payments:
+            print("Enter TEST keys only. Neither value is saved or displayed.")
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                key_id = getpass.getpass("Razorpay TEST Key ID (hidden): ")
+                key_secret = getpass.getpass("Razorpay TEST Key Secret (hidden): ")
+            env.update(payment_test_environment(key_id, key_secret))
         process = subprocess.Popen(  # nosec B603 - fixed local module, no shell
             [
                 sys.executable,
@@ -181,8 +204,20 @@ def main():
             else:
                 raise RuntimeError("Local staging readiness timed out")
             print("STAGING READY: http://127.0.0.1:8001/ready")
+            if firebase_auth:
+                print(
+                    "Customer Firebase login configured; actual sign-in still needs verification."
+                )
             print("Keep this terminal open. Ctrl+C stops only this local backend.")
-            print("No production changes. Payment credentials have not been configured.")
+            if test_payments:
+                payment = payload.get("dependencies", {}).get("razorpay", {})
+                if not payment.get("checkout_api_configured"):
+                    raise RuntimeError("Backend did not load test payment configuration")
+                print("RAZORPAY TEST KEYS LOADED. Provider authentication is not yet verified.")
+                print("Webhook, login and delivery checks remain separate prerequisites.")
+            else:
+                print("Payment credentials have not been configured.")
+            print("No production changes.")
             process.wait()
         finally:
             if process.poll() is None:
@@ -198,6 +233,11 @@ if __name__ == "__main__":
     try:
         if sys.argv[1:] == ["--migrate-child"]:
             migrate_child()
+        elif sys.argv[1:] and set(sys.argv[1:]) <= {"--test-payments", "--firebase-auth"}:
+            main(
+                test_payments="--test-payments" in sys.argv,
+                firebase_auth="--firebase-auth" in sys.argv,
+            )
         elif sys.argv[1:]:
             raise ValueError("No command-line credentials accepted")
         else:

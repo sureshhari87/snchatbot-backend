@@ -3,12 +3,38 @@
 import unittest
 from unittest.mock import patch
 
-from scripts.local_staging import clean_environment, validate_url
+from scripts.local_staging import (
+    clean_environment,
+    payment_test_environment,
+    staging_auth_environment,
+    validate_url,
+)
 
 URL = "postgresql://staging_owner:dummy@ep-example.neon.tech/snchatbot_staging?sslmode=require"
 
 
 class LocalStagingTests(unittest.TestCase):
+    def test_auth_configuration_has_no_admin_or_service_credentials(self):
+        self.assertEqual(staging_auth_environment(), {
+            "FIREBASE_PROJECT_ID": "sona-jewellery-app", "FIREBASE_AUTH_ENABLED": "1",
+        })
+
+    def test_payment_test_keys(self):
+        env = payment_test_environment("rzp_test_dummy123", "dummy-secret")
+        self.assertEqual(env["RAZORPAY_KEY_ID"], "rzp_test_dummy123")
+        self.assertEqual(env["RAZORPAY_KEY_SECRET"], "dummy-secret")
+        self.assertEqual(len(env), 2)
+
+    def test_payment_rejects_live_or_invalid_keys(self):
+        for key in ["rzp_live_dummy123", "", "rzp_test_", "rzp_test_bad key"]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                payment_test_environment(key, "dummy-secret")
+
+    def test_payment_rejects_empty_or_multiline_secret(self):
+        for value in ["", "bad secret", "secret\n", "secret\x00"]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                payment_test_environment("rzp_test_dummy123", value)
+
     def test_direct_staging_url(self):
         self.assertEqual(validate_url(URL), URL)
 
