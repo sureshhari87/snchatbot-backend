@@ -15,9 +15,13 @@ URL = "postgresql://staging_owner:dummy@ep-example.neon.tech/snchatbot_staging?s
 
 class LocalStagingTests(unittest.TestCase):
     def test_auth_configuration_has_no_admin_or_service_credentials(self):
-        self.assertEqual(staging_auth_environment(), {
-            "FIREBASE_PROJECT_ID": "sona-jewellery-app", "FIREBASE_AUTH_ENABLED": "1",
-        })
+        self.assertEqual(
+            staging_auth_environment(),
+            {
+                "FIREBASE_PROJECT_ID": "sona-jewellery-app",
+                "FIREBASE_AUTH_ENABLED": "1",
+            },
+        )
 
     def test_payment_test_keys(self):
         env = payment_test_environment("rzp_test_dummy123", "dummy-secret")
