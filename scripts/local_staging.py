@@ -118,7 +118,43 @@ def staging_auth_environment():
     return {"FIREBASE_PROJECT_ID": "sona-jewellery-app", "FIREBASE_AUTH_ENABLED": "1"}
 
 
-def main(test_payments=False, firebase_auth=False):
+def sms_staging_environment(username, password, pepper):
+    if not username or not password or any(not c.isprintable() for c in username + password):
+        raise ValueError("SMS credentials must be nonempty single-line values")
+    if username == password:
+        raise ValueError("Replace the exposed SMS password before using staging")
+    if len(pepper) < 32 or any(c.isspace() or not c.isprintable() for c in pepper):
+        raise ValueError("Use a reusable random staging phone secret of at least 32 characters")
+    return {
+        "SMS_OTP_ENABLED": "1",
+        "SMS_PROVIDER": "onhand",
+        "ONHANDSMS_API_URL": "https://api.onhandsms.com/api/v2/sendsms",
+        "ONHANDSMS_USERNAME": username,
+        "ONHANDSMS_PASSWORD": password,
+        "ONHANDSMS_SENDER_ID": "SONAJS",
+        "ONHANDSMS_TEMPLATE_ID": "1707173372695978586",
+        "ONHANDSMS_METHOD": "POST",
+        "ONHANDSMS_PAYLOAD_FORMAT": "form",
+        "ONHANDSMS_PAYLOAD_TEMPLATE": json.dumps(
+            {
+                "username": "{username}",
+                "password": "{password}",
+                "senderid": "{sender_id}",
+                "number": "{phone_local}",
+                "istamil": "0",
+                "dlttemplateid": "{template_id}",
+                "message": "{message}",
+            }
+        ),
+        "ONHANDSMS_MESSAGE_TEMPLATE": (
+            "Dear User,\nYour mobile verification code is {otp}\n"
+            "Please don't share this.\nThanks,\nSONA JEWELLERS"
+        ),
+        "PHONE_AUTH_PEPPER": pepper,
+    }
+
+
+def main(test_payments=False, firebase_auth=False, onhand_sms=False):
     if not sys.stdin.isatty():
         raise ValueError("Run in an interactive terminal for hidden input")
     print("Select Neon branch staging, database snchatbot_staging, role staging_owner.")
@@ -163,6 +199,19 @@ def main(test_payments=False, firebase_auth=False):
                 key_id = getpass.getpass("Razorpay TEST Key ID (hidden): ")
                 key_secret = getpass.getpass("Razorpay TEST Key Secret (hidden): ")
             env.update(payment_test_environment(key_id, key_secret))
+        if onhand_sms:
+            print("OnhandSMS sends REAL SMS and may use paid credits, even in staging.")
+            print("Use the rotated password. Store one random 32+ character phone secret")
+            print("in your password manager and reuse it on EVERY staging restart.")
+            if input("Type ENABLE_SMS to enable sending from the app: ").strip() != "ENABLE_SMS":
+                print("SMS setup cancelled; backend was not started.")
+                return
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                username = getpass.getpass("OnhandSMS username (hidden): ")
+                password = getpass.getpass("New OnhandSMS password (hidden): ")
+                pepper = getpass.getpass("Reusable staging phone secret (hidden): ")
+            env.update(sms_staging_environment(username, password, pepper))
         process = subprocess.Popen(  # nosec B603 - fixed local module, no shell
             [
                 sys.executable,
@@ -203,6 +252,11 @@ def main(test_payments=False, firebase_auth=False):
                 time.sleep(1)
             else:
                 raise RuntimeError("Local staging readiness timed out")
+            if onhand_sms:
+                sms = payload.get("dependencies", {}).get("sms_otp", {})
+                if sms.get("status") != "configured" or sms.get("provider") != "onhand":
+                    raise RuntimeError("Backend did not load OnhandSMS settings")
+                print("ONHANDSMS CONFIGURED: HTTPS POST. SMS delivery not yet verified.")
             print("STAGING READY: http://127.0.0.1:8001/ready")
             if firebase_auth:
                 print(
@@ -233,10 +287,15 @@ if __name__ == "__main__":
     try:
         if sys.argv[1:] == ["--migrate-child"]:
             migrate_child()
-        elif sys.argv[1:] and set(sys.argv[1:]) <= {"--test-payments", "--firebase-auth"}:
+        elif sys.argv[1:] and set(sys.argv[1:]) <= {
+            "--test-payments",
+            "--firebase-auth",
+            "--onhand-sms",
+        }:
             main(
                 test_payments="--test-payments" in sys.argv,
                 firebase_auth="--firebase-auth" in sys.argv,
+                onhand_sms="--onhand-sms" in sys.argv,
             )
         elif sys.argv[1:]:
             raise ValueError("No command-line credentials accepted")
