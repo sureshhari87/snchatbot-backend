@@ -1,0 +1,39 @@
+# Staging only. Do not attach production credentials or select a paid plan.
+services:
+  - type: web
+    name: snchatbot-staging
+    runtime: docker
+    plan: free
+    branch: codex/fastapi-commerce-migration
+    autoDeployTrigger: "off"
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python scripts/render_staging.py
+    healthCheckPath: /ready
+    envVars:
+      - key: APP_ENV
+        value: staging
+      - key: DATABASE_URL
+        sync: false
+      - key: STAGING_NEON_HOST
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PORT
+        value: "10000"
+      - key: RUN_MIGRATIONS_ON_STARTUP
+        value: "0"
+      - key: RUN_MIGRATIONS_BEFORE_START
+        value: "0"
+      - key: FIREBASE_AUTH_ENABLED
+        value: "0"
+      - key: FIRESTORE_COMMERCE_ENABLED
+        value: "0"
+      - key: ADMIN_BOOTSTRAP_ENABLED
+        value: "0"
+      - key: SMS_OTP_ENABLED
+        value: "0"
+      - key: LLM_ENABLED
+        value: "0"
+      - key: OMS_ENABLED
+        value: "0"
