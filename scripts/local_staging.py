@@ -154,7 +154,37 @@ def sms_staging_environment(username, password, pepper):
     }
 
 
-def main(test_payments=False, firebase_auth=False, onhand_sms=False):
+def webhook_test_environment(secret):
+    if len(secret) < 32 or any(c.isspace() or not c.isprintable() for c in secret):
+        raise ValueError("Use a dedicated random test webhook secret of at least 32 characters")
+    return {"RAZORPAY_WEBHOOK_SECRET": secret}
+
+
+def ai_staging_environment(base_url, model, api_key):
+    parsed = urlparse(base_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Use an HTTPS provider URL without credentials or query parameters")
+    for value in (base_url, model, api_key):
+        if not value or any(c.isspace() or not c.isprintable() for c in value):
+            raise ValueError("Provider settings must be nonempty single-line values")
+    return {
+        "LLM_ENABLED": "1",
+        "LLM_BASE_URL": base_url,
+        "LLM_MODEL": model,
+        "LLM_API_KEY": api_key,
+    }
+
+
+def main(test_payments=False, firebase_auth=False, onhand_sms=False, test_webhook=False, ai=False):
+    if test_webhook and not test_payments:
+        raise ValueError("Test webhook configuration requires --test-payments")
     if not sys.stdin.isatty():
         raise ValueError("Run in an interactive terminal for hidden input")
     print("Select Neon branch staging, database snchatbot_staging, role staging_owner.")
@@ -199,6 +229,23 @@ def main(test_payments=False, firebase_auth=False, onhand_sms=False):
                 key_id = getpass.getpass("Razorpay TEST Key ID (hidden): ")
                 key_secret = getpass.getpass("Razorpay TEST Key Secret (hidden): ")
             env.update(payment_test_environment(key_id, key_secret))
+        if test_webhook:
+            print("Use a dedicated TEST webhook secret, matching the Razorpay test dashboard.")
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                secret = getpass.getpass("Razorpay TEST webhook secret (hidden): ")
+            env.update(webhook_test_environment(secret))
+        if ai:
+            print("AI requests may incur provider charges. No request is made at startup.")
+            if input("Type ENABLE_AI to configure staging AI: ").strip() != "ENABLE_AI":
+                print("AI setup cancelled; backend was not started.")
+                return
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                base_url = getpass.getpass("AI provider HTTPS base URL (hidden): ")
+                model = getpass.getpass("AI model available to your account (hidden): ")
+                api_key = getpass.getpass("AI staging API key (hidden): ")
+            env.update(ai_staging_environment(base_url, model, api_key))
         if onhand_sms:
             print("OnhandSMS sends REAL SMS and may use paid credits, even in staging.")
             print("Use the rotated password. Store one random 32+ character phone secret")
@@ -271,6 +318,21 @@ def main(test_payments=False, firebase_auth=False, onhand_sms=False):
                 print("Webhook, login and delivery checks remain separate prerequisites.")
             else:
                 print("Payment credentials have not been configured.")
+            if test_webhook:
+                if (
+                    not payload.get("dependencies", {})
+                    .get("razorpay", {})
+                    .get("webhook_configured")
+                ):
+                    raise RuntimeError("Backend did not load the test webhook secret")
+                print("TEST WEBHOOK SECRET LOADED. Provider delivery is NOT verified.")
+                print(
+                    "Loopback is not reachable by Razorpay; a public staging HTTPS URL is required."
+                )
+            if ai:
+                if payload.get("dependencies", {}).get("llm", {}).get("status") != "configured":
+                    raise RuntimeError("Backend did not load AI configuration")
+                print("AI SETTINGS LOADED. Provider access and grounded replies are NOT verified.")
             print("No production changes.")
             process.wait()
         finally:
@@ -291,11 +353,15 @@ if __name__ == "__main__":
             "--test-payments",
             "--firebase-auth",
             "--onhand-sms",
+            "--test-webhook",
+            "--ai",
         }:
             main(
                 test_payments="--test-payments" in sys.argv,
                 firebase_auth="--firebase-auth" in sys.argv,
                 onhand_sms="--onhand-sms" in sys.argv,
+                test_webhook="--test-webhook" in sys.argv,
+                ai="--ai" in sys.argv,
             )
         elif sys.argv[1:]:
             raise ValueError("No command-line credentials accepted")
