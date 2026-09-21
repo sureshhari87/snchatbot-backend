@@ -1,0 +1,40 @@
+{
+  "status": "draft_inactive",
+  "target_config_key": "commerce.delivery_routes",
+  "source_policy_url": "https://sona-jewels-store.sonajewellery.chatgpt.site/shipping-and-exchange",
+  "source_policy_updated": "2026-09-01",
+  "reviewed_on": "2026-09-21",
+  "published_policy": {
+    "region": "India",
+    "standard_shipping": "complimentary for eligible orders",
+    "estimated_total_business_days": {"minimum": 7, "maximum": 15},
+    "exceptions": "Personalised and made-to-order pieces may take longer; exceptional charges must be disclosed before payment."
+  },
+  "draft_timing_approved_by_owner": true,
+  "live_activation_approved": false,
+  "approved_pin_prefixes": [],
+  "route_defaults": {
+    "active": false,
+    "method": "standard",
+    "handling_days": 2,
+    "minimum_transit_days": 5,
+    "maximum_transit_days": 13,
+    "working_weekdays": [0, 1, 2, 3, 4, 5],
+    "cutoff": "16:00",
+    "holidays": []
+  },
+  "calendar_notes": {
+    "timezone": "Asia/Kolkata",
+    "weekday_numbering": "Python: Monday=0 through Sunday=6; not JavaScript numbering",
+    "holidays_confirmed": false
+  },
+  "routes": [],
+  "activation_requirements": [
+    "Confirm actual courier-supported PIN codes/prefixes and exclusions; website coverage is not carrier serviceability.",
+    "Confirm the holiday calendar, dispatch origin and cutoff behavior.",
+    "Define separate handling for personalised, made-to-order, resized and unavailable products.",
+    "Verify checkout does not add standard shipping charges to eligible orders; disclose exceptional charges before payment.",
+    "Create and test routes in staging through the authenticated admin configuration API.",
+    "Obtain explicit activation approval after supported/unsupported PIN, stock, cutoff and holiday checks."
+  ]
+}
