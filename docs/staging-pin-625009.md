@@ -8,6 +8,37 @@ This is NOT courier verification or production serviceability approval.
 - Holiday list is empty for this staging fixture, not an approved production calendar.
 - Test with ordinary in-stock products, not customised/made-to-order products.
 
+## If setup stopped with OperationalError
+
+A successful TCP port check does not verify database authentication, TLS or SQL permissions.
+Do not reset passwords, weaken TLS, or retry writes merely because port 5432 is reachable.
+Use this read-only diagnostic on the current computer:
+
+```powershell
+cd C:\Users\sures\sona_jewellery_app\.codex\fastapi-commerce
+& "C:\Users\sures\snchatbot-staging\.venv\Scripts\python.exe" scripts/check_staging_delivery.py
+```
+
+Enter the expected staging hostname and DIRECT staging URL in its prompts, not command
+arguments. It uses a read-only transaction, checks identity/schema/current delivery state,
+and reports only a fixed failure category and phase. No raw PostgreSQL errors or URL are
+printed. The connection timeout is 30 seconds for diagnosis only; write behavior is unchanged.
+
+- `AUTHENTICATION`: privately recopy the selected staging role's connection URL; do not
+  rotate a password used by Render without planning the corresponding secret update.
+- `TLS`: keep TLS enabled; investigate local client/certificate/channel-binding support.
+- `CONNECTION_TIMEOUT`, `DNS`, `CONNECTION_REFUSED`, `DISCONNECTED`: investigate the local
+  connection path and endpoint availability; a healthy Render connection is a different path.
+- `PERMISSION`: review staging role access, not production grants.
+- `UNCLASSIFIED`: the safe classifier cannot determine the cause; do not guess from the label.
+- `delivery=already_configured`: the approved route is present, so no write retry is needed.
+- `delivery=not_configured`: configuration is still pending; review any permission flags
+  before using the write helper below.
+- `delivery=needs_review`: existing data differs; it is not printed or overwritten.
+
+Share only the diagnostic JSON result. A successful read check does not prove that every
+subsequent write/commit will succeed. This diagnostic performs no schema/data changes.
+
 ## Apply once, with hidden credentials
 
 On the current computer:
