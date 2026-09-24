@@ -52,6 +52,12 @@ def render_environment(source):
                 env.get("PHONE_AUTH_PEPPER", ""),
             )
         )
+    admin_origin = env.get("STAGING_ADMIN_ORIGIN", "").strip()
+    if admin_origin not in {"", "http://localhost:7357", "http://127.0.0.1:7357"}:
+        raise ValueError("STAGING_ADMIN_ORIGIN must be the exact local review console origin")
+    origins = ["https://" + hostname]
+    if admin_origin:
+        origins.append(admin_origin)
     env.update(
         DATABASE_URL=url,
         APP_DEBUG="0",
@@ -63,7 +69,7 @@ def render_environment(source):
         ADMIN_BOOTSTRAP_ENABLED="0",
         OMS_ENABLED="0",
         TRUSTED_HOSTS=hostname + ",127.0.0.1,localhost",
-        CORS_ORIGINS="https://" + hostname,
+        CORS_ORIGINS=",".join(origins),
         HTTPS_REDIRECT="1",
         PROXY_HEADERS="1",
         FORWARDED_ALLOW_IPS="*",

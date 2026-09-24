@@ -67,6 +67,27 @@ class RenderStagingTests(unittest.TestCase):
                 self.source(RAZORPAY_KEY_ID="rzp_live_dummy", RAZORPAY_KEY_SECRET="test-secret")
             )
 
+    def test_admin_cors_is_explicit_and_defaults_closed(self):
+        env = render_environment(self.source(CORS_ORIGINS="*"))
+        self.assertEqual(env["CORS_ORIGINS"], "https://snchatbot-staging.onrender.com")
+        for origin in ("http://localhost:7357", "http://127.0.0.1:7357"):
+            env = render_environment(self.source(STAGING_ADMIN_ORIGIN=origin))
+            self.assertEqual(
+                env["CORS_ORIGINS"], "https://snchatbot-staging.onrender.com," + origin
+            )
+
+    def test_admin_cors_rejects_wildcards_and_other_origins(self):
+        for origin in (
+            "*",
+            "null",
+            "http://localhost:7357/",
+            "http://localhost:7358",
+            "https://other.example",
+            "http://localhost:7357,https://other.example",
+        ):
+            with self.subTest(origin=origin), self.assertRaises(ValueError):
+                render_environment(self.source(STAGING_ADMIN_ORIGIN=origin))
+
     def test_accepts_test_keys_and_webhook(self):
         env = render_environment(
             self.source(
