@@ -185,6 +185,8 @@ from models import (
     WishlistItem,
     utc_now,
 )
+from notification_api import install as install_notification_api
+from review_api import install as install_review_api
 from safe_http import http_urlopen
 from schemas import (
     AiGeneratedConceptCreate,
@@ -9208,18 +9210,11 @@ async def sync_order_snapshot(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    order = upsert_local_order_snapshot(db, current_user, payload)
-    record_integration_event(
-        db,
-        service="order_backend",
-        action="sync",
-        status_value="synced",
-        user_id=current_user.id,
-        reference=payload.order_reference,
-        request_payload=payload.model_dump(mode="json"),
-    )
-    db.commit()
-    db.refresh(order)
+    # Compatibility lookup only. Customers cannot author payment/fulfilment
+    # state, prices, items, source markers or totals through legacy sync.
+    order = local_order_for_user(db, current_user.id, payload.order_reference)
+    if order is None:
+        raise HTTPException(409, "Order not found; verify payment or contact support")
     return serialize_order_snapshot(db, order)
 
 
@@ -9877,3 +9872,5 @@ def hash_opaque_token(token: str) -> str:
 
 install_commerce_routes(app, get_db, get_current_user)
 install_catalogue_admin(app, get_db, require_permission)
+install_review_api(app, get_db, get_current_user, require_permission)
+install_notification_api(app, get_db, get_current_user, require_permission, log_admin_action)

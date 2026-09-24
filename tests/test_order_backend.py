@@ -2,7 +2,26 @@ import hashlib
 import hmac
 import json
 
+import pytest
+from fastapi.encoders import jsonable_encoder
+from httpx import Response
+
 from models import ExternalIntegrationEvent, OrderSnapshot, Product
+
+
+@pytest.fixture
+def server_order_seed(db, verified_user):
+    """Trusted fixture setup; never bypass the HTTP endpoint in security tests."""
+    import main
+    from schemas import OrderSyncRequest
+
+    def seed(path, *, headers, json):
+        assert path == "/orders/sync"
+        order = main.upsert_local_order_snapshot(db, verified_user, OrderSyncRequest(**json))
+        db.commit()
+        return Response(200, json=jsonable_encoder(main.serialize_order_snapshot(db, order)))
+
+    return seed
 
 
 def razorpay_signature(payload: dict, secret: str) -> tuple[bytes, str]:
@@ -12,6 +31,7 @@ def razorpay_signature(payload: dict, secret: str) -> tuple[bytes, str]:
 
 
 def test_local_order_sync_lookup_support_action_and_admin_update(
+    server_order_seed,
     client,
     auth_headers,
     admin_headers,
@@ -60,7 +80,7 @@ def test_local_order_sync_lookup_support_action_and_admin_update(
         ],
     }
 
-    sync_response = client.post("/orders/sync", headers=auth_headers, json=payload)
+    sync_response = server_order_seed("/orders/sync", headers=auth_headers, json=payload)
     assert sync_response.status_code == 200
     synced = sync_response.json()
     assert synced["order_reference"] == "ORD-LOCAL-1001"
@@ -123,12 +143,19 @@ def test_local_order_sync_lookup_support_action_and_admin_update(
     assert order.status == "shipped"
 
     events = db.query(ExternalIntegrationEvent).all()
-    assert {event.service for event in events} >= {"order_backend", "oms"}
-    assert {event.status for event in events} >= {"synced", "local"}
+    assert "oms" in {event.service for event in events}
+    # Trusted setup is not a customer sync mutation. Legacy sync is read-only.
+    assert not any(event.service == "order_backend" and event.action == "sync" for event in events)
+    assert "local" in {event.status for event in events}
+    assert not any(
+        event.service == "order_backend" and event.status == "synced" for event in events
+    )
 
 
-def test_order_sync_accepts_flutter_formatted_delivery_address(client, auth_headers):
-    response = client.post(
+def test_trusted_order_seed_accepts_flutter_formatted_delivery_address(
+    server_order_seed, auth_headers
+):
+    response = server_order_seed(
         "/orders/sync",
         headers=auth_headers,
         json={
@@ -148,6 +175,7 @@ def test_order_sync_accepts_flutter_formatted_delivery_address(client, auth_head
 
 
 def test_razorpay_webhook_updates_matching_order_snapshot(
+    server_order_seed,
     client,
     auth_headers,
     db,
@@ -188,7 +216,7 @@ def test_razorpay_webhook_updates_matching_order_snapshot(
             }
         ],
     }
-    sync_response = client.post("/orders/sync", headers=auth_headers, json=payload)
+    sync_response = server_order_seed("/orders/sync", headers=auth_headers, json=payload)
     assert sync_response.status_code == 200
 
     webhook_payload = {
@@ -476,6 +504,7 @@ def test_razorpay_order_create_uses_firestore_authority_when_enabled(
 
 
 def test_razorpay_payment_verify_marks_order_paid(
+    server_order_seed,
     client,
     auth_headers,
     db,
@@ -499,7 +528,7 @@ def test_razorpay_payment_verify_marks_order_paid(
 
     monkeypatch.setattr(main, "call_razorpay", fake_call_razorpay)
 
-    sync_response = client.post(
+    sync_response = server_order_seed(
         "/orders/sync",
         headers=auth_headers,
         json={
@@ -576,6 +605,7 @@ def test_razorpay_payment_verify_marks_order_paid(
 
 
 def test_razorpay_payment_verify_uses_firestore_finalizer_for_firestore_orders(
+    server_order_seed,
     client,
     auth_headers,
     db,
@@ -623,7 +653,7 @@ def test_razorpay_payment_verify_uses_firestore_finalizer_for_firestore_orders(
     monkeypatch.setattr(main, "call_razorpay", fake_call_razorpay)
     monkeypatch.setattr(main, "finalize_firestore_commerce_payment", fake_firestore_finalizer)
 
-    sync_response = client.post(
+    sync_response = server_order_seed(
         "/orders/sync",
         headers=auth_headers,
         json={
@@ -692,6 +722,7 @@ def test_razorpay_payment_verify_uses_firestore_finalizer_for_firestore_orders(
 
 
 def test_razorpay_payment_verify_rejects_amount_mismatch(
+    server_order_seed,
     client,
     auth_headers,
     db,
@@ -713,7 +744,7 @@ def test_razorpay_payment_verify_rejects_amount_mismatch(
 
     monkeypatch.setattr(main, "call_razorpay", fake_call_razorpay)
 
-    sync_response = client.post(
+    sync_response = server_order_seed(
         "/orders/sync",
         headers=auth_headers,
         json={
@@ -761,6 +792,7 @@ def test_razorpay_payment_verify_rejects_amount_mismatch(
 
 
 def test_razorpay_payment_verify_rejects_bad_signature(
+    server_order_seed,
     client,
     auth_headers,
     monkeypatch,
@@ -770,7 +802,7 @@ def test_razorpay_payment_verify_rejects_bad_signature(
     monkeypatch.setattr(main, "RAZORPAY_KEY_ID", "rzp_test_key")
     monkeypatch.setattr(main, "RAZORPAY_KEY_SECRET", "rzp_test_secret")
 
-    sync_response = client.post(
+    sync_response = server_order_seed(
         "/orders/sync",
         headers=auth_headers,
         json={
@@ -798,6 +830,7 @@ def test_razorpay_payment_verify_rejects_bad_signature(
 
 
 def test_razorpay_webhook_duplicate_capture_is_idempotent(
+    server_order_seed,
     client,
     auth_headers,
     db,
@@ -820,7 +853,7 @@ def test_razorpay_webhook_duplicate_capture_is_idempotent(
 
     monkeypatch.setattr(main, "call_razorpay", fake_call_razorpay)
 
-    sync_response = client.post(
+    sync_response = server_order_seed(
         "/orders/sync",
         headers=auth_headers,
         json={
@@ -896,6 +929,7 @@ def test_razorpay_webhook_duplicate_capture_is_idempotent(
 
 
 def test_razorpay_webhook_failed_event_does_not_downgrade_verified_order(
+    server_order_seed,
     client,
     auth_headers,
     db,
@@ -907,7 +941,7 @@ def test_razorpay_webhook_failed_event_does_not_downgrade_verified_order(
     monkeypatch.setattr(main, "RAZORPAY_KEY_ID", "rzp_test_key")
     monkeypatch.setattr(main, "RAZORPAY_KEY_SECRET", "rzp_test_secret")
 
-    sync_response = client.post(
+    sync_response = server_order_seed(
         "/orders/sync",
         headers=auth_headers,
         json={

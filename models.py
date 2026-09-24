@@ -1,6 +1,18 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.sql import func
 
 from database import Base
@@ -40,6 +52,53 @@ class UserAddress(Base):
     is_default = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class ProductReview(Base):
+    __tablename__ = "product_reviews"
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_id", name="uq_review_user_product"),
+        CheckConstraint("rating >= 1 AND rating <= 5", name="ck_review_rating"),
+    )
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    rating = Column(Integer, nullable=False)
+    title = Column(String(120), nullable=False, default="")
+    body = Column(Text, nullable=False)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    display_name = Column(String(40), nullable=False, default="Sona customer")
+    fit = Column(String(30), nullable=False, default="notApplicable")
+    size_feedback = Column(String(30), nullable=False, default="notApplicable")
+    seller_response = Column(String(1000), nullable=True)
+    moderation_reason = Column(String(1000), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+    updated_at = Column(DateTime, nullable=False, default=utc_now)
+    moderated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    moderated_at = Column(DateTime, nullable=True)
+
+
+class ReviewHelpfulVote(Base):
+    __tablename__ = "review_helpful_votes"
+    review_id = Column(
+        Integer, ForeignKey("product_reviews.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+
+
+class CustomerNotification(Base):
+    __tablename__ = "customer_notifications"
+    __table_args__ = (UniqueConstraint("user_id", "deduplication_key", name="uq_notification_recipient_key"),)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    deduplication_key = Column(String(100), nullable=False)
+    title = Column(String(160), nullable=False)
+    body = Column(String(2000), nullable=False)
+    target = Column(String(50), nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+    read_at = Column(DateTime, nullable=True)
 
 
 class NotificationSettings(Base):
