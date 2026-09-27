@@ -5022,6 +5022,9 @@ def finalize_razorpay_payment(
     }
     raw_payload["razorpay_finalization"] = finalization_payload
     order.raw_payload = dump_json_object(raw_payload)
+    from order_notifications import enqueue_verified_payment
+
+    enqueue_verified_payment(db, order)
     record_integration_event(
         db,
         service="razorpay",
@@ -8421,16 +8424,20 @@ async def admin_update_order(
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
 ):
-    order = db.query(OrderSnapshot).filter(OrderSnapshot.id == order_id).first()
+    order = db.query(OrderSnapshot).filter(OrderSnapshot.id == order_id).with_for_update().first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    previous_status = order.status
     updates = payload.model_dump(exclude_unset=True)
     if "delivery_address" in updates:
         order.delivery_address = dump_json_object(updates.pop("delivery_address") or {})
     for field, value in updates.items():
         setattr(order, field, value)
     order.updated_at = utc_now()
+    from order_notifications import enqueue_admin_order_status
+
+    enqueue_admin_order_status(db, order, previous_status, admin_user.id)
     log_admin_action(request, admin_user, "update", "order", order.id)
     db.commit()
     db.refresh(order)

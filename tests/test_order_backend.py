@@ -6,7 +6,7 @@ import pytest
 from fastapi.encoders import jsonable_encoder
 from httpx import Response
 
-from models import ExternalIntegrationEvent, OrderSnapshot, Product
+from models import CustomerNotification, ExternalIntegrationEvent, OrderSnapshot, Product
 
 
 @pytest.fixture
@@ -602,6 +602,13 @@ def test_razorpay_payment_verify_marks_order_paid(
     assert second_response.json()["verified"] is True
     db.refresh(product)
     assert product.stock_quantity == 4
+    message = db.query(CustomerNotification).filter_by(
+        deduplication_key=f"payment-verified:{order.id}"
+    ).one()
+    assert message.user_id == order.user_id
+    assert message.created_by is None
+    assert message.read_at is None
+    assert message.title == "Payment confirmed"
 
 
 def test_razorpay_payment_verify_uses_firestore_finalizer_for_firestore_orders(
@@ -926,6 +933,11 @@ def test_razorpay_webhook_duplicate_capture_is_idempotent(
         .all()
     )
     assert len(webhook_events) == 1
+    messages = db.query(CustomerNotification).filter(
+        CustomerNotification.deduplication_key.like("payment-verified:%")
+    ).all()
+    assert len(messages) == 1
+    assert messages[0].created_by is None
 
 
 def test_razorpay_webhook_failed_event_does_not_downgrade_verified_order(

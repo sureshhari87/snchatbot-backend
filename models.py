@@ -92,7 +92,8 @@ class CustomerNotification(Base):
     __table_args__ = (UniqueConstraint("user_id", "deduplication_key", name="uq_notification_recipient_key"),)
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # NULL denotes a backend-generated event, never a customer impersonating admin.
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     deduplication_key = Column(String(100), nullable=False)
     title = Column(String(160), nullable=False)
     body = Column(String(2000), nullable=False)
