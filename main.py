@@ -6697,7 +6697,7 @@ def dependency_snapshot(db: Session) -> dict[str, Any]:
 
 
 @app.get("/ready")
-async def readiness(response: Response, db: Session = Depends(get_db)):
+def readiness(response: Response, db: Session = Depends(get_db)):
     snapshot = dependency_snapshot(db)
     if snapshot["status"] != "ok":
         response.status_code = 503
@@ -6705,12 +6705,12 @@ async def readiness(response: Response, db: Session = Depends(get_db)):
 
 
 @app.get("/readiness")
-async def readiness_alias(response: Response, db: Session = Depends(get_db)):
-    return await readiness(response, db)
+def readiness_alias(response: Response, db: Session = Depends(get_db)):
+    return readiness(response, db)
 
 
 @app.get("/dependencies")
-async def dependencies(response: Response, db: Session = Depends(get_db)):
+def dependencies(response: Response, db: Session = Depends(get_db)):
     snapshot = dependency_snapshot(db)
     if snapshot["status"] != "ok":
         response.status_code = 503
@@ -7373,7 +7373,7 @@ async def get_chat_session(
 
 
 @app.get("/products", response_model=list[ProductOut])
-async def list_products(
+def list_products(
     q: str | None = None,
     category: str | None = None,
     metal: str | None = None,
