@@ -809,6 +809,7 @@ async def request_id_middleware(request: Request, call_next):
             request,
             level=logging.ERROR,
             error_type=exc.__class__.__name__,
+            error_module=exc.__class__.__module__,
             error_message=str(exc)[:300] if APP_DEBUG or is_testing() else None,
             duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
             sentry_captured=sentry_captured,
