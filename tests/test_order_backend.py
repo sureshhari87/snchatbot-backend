@@ -836,12 +836,14 @@ def test_razorpay_payment_verify_rejects_bad_signature(
     assert response.json()["detail"] == "Invalid Razorpay payment signature"
 
 
+@pytest.mark.parametrize("verify_first", [False, True])
 def test_razorpay_webhook_duplicate_capture_is_idempotent(
     server_order_seed,
     client,
     auth_headers,
     db,
     monkeypatch,
+    verify_first,
 ):
     import main
 
@@ -900,6 +902,19 @@ def test_razorpay_webhook_duplicate_capture_is_idempotent(
     }
     raw_body, signature = razorpay_signature(webhook_payload, "test_webhook_secret")
 
+    def verify():
+        signature = hmac.new(
+            b"rzp_test_secret", b"order_dup_1001|pay_dup_1001", hashlib.sha256
+        ).hexdigest()
+        response = client.post("/payments/razorpay/verify", headers=auth_headers, json={
+            "razorpay_order_id": "order_dup_1001", "razorpay_payment_id": "pay_dup_1001",
+            "razorpay_signature": signature,
+        })
+        assert response.status_code == 200
+
+    if verify_first:
+        verify()
+
     first = client.post(
         "/payments/razorpay/webhook",
         content=raw_body,
@@ -919,6 +934,13 @@ def test_razorpay_webhook_duplicate_capture_is_idempotent(
 
     assert first.status_code == 200
     assert second.status_code == 200
+    verify()
+    # A different delivery ID must not repeat inventory or the notification.
+    webhook_payload["id"] = "evt_duplicate_capture_new_delivery"
+    raw_body, signature = razorpay_signature(webhook_payload, "test_webhook_secret")
+    assert client.post("/payments/razorpay/webhook", content=raw_body, headers={
+        "Content-Type": "application/json", "X-Razorpay-Signature": signature,
+    }).status_code == 200
     product = db.query(Product).filter(Product.id == 1).one()
     assert product.stock_quantity == 7
     finalized_events = (

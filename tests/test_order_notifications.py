@@ -12,6 +12,22 @@ def seed_order(db, user):
     return order
 
 
+@pytest.mark.parametrize("status", ["processing", "shipped", "delivered", "cancelled"])
+def test_each_supported_status_notifies_once(client, db, verified_user, admin_headers, status):
+    from order_notifications import STATUS_LABELS
+
+    order = seed_order(db, verified_user)
+    for _ in range(3):
+        response = client.patch(
+            f"/admin/orders/{order.id}", headers=admin_headers, json={"status": status}
+        )
+        assert response.status_code == 200
+    notification = db.query(CustomerNotification).one()
+    assert notification.user_id == verified_user.id
+    assert STATUS_LABELS[status] in notification.body
+    assert notification.deduplication_key == f"order-status:{order.id}:{status}"
+
+
 def test_admin_status_message_is_owned_and_deduplicated(
     client, db, verified_user, admin_user, admin_headers, auth_headers
 ):

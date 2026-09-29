@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
+from threading import Lock
 from typing import Any, List
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy import String as SqlString
 from sqlalchemy import cast, inspect, or_, text
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -677,6 +679,7 @@ app.mount("/sona", sona_ai_app)
 
 limiter = Limiter(key_func=get_remote_address, enabled=not is_testing())
 LOGIN_FAILURES: dict[str, list[datetime]] = {}
+LOGIN_FAILURES_LOCK = Lock()
 
 
 if TRUSTED_HOSTS and TRUSTED_HOSTS != ["*"]:
@@ -1146,18 +1149,21 @@ def login_failure_key(email: str, request: Request) -> str:
 def login_is_locked(email: str, request: Request) -> bool:
     key = login_failure_key(email, request)
     cutoff = utc_now() - timedelta(minutes=LOGIN_LOCKOUT_MINUTES)
-    failures = [failed_at for failed_at in LOGIN_FAILURES.get(key, []) if failed_at >= cutoff]
-    LOGIN_FAILURES[key] = failures
-    return len(failures) >= LOGIN_FAILURE_LIMIT
+    with LOGIN_FAILURES_LOCK:
+        failures = [failed_at for failed_at in LOGIN_FAILURES.get(key, []) if failed_at >= cutoff]
+        LOGIN_FAILURES[key] = failures
+        return len(failures) >= LOGIN_FAILURE_LIMIT
 
 
 def record_login_failure(email: str, request: Request) -> None:
     key = login_failure_key(email, request)
-    LOGIN_FAILURES.setdefault(key, []).append(utc_now())
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.setdefault(key, []).append(utc_now())
 
 
 def clear_login_failures(email: str, request: Request) -> None:
-    LOGIN_FAILURES.pop(login_failure_key(email, request), None)
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.pop(login_failure_key(email, request), None)
 
 
 def mark_refresh_token_used(token_row: RefreshToken, request: Request) -> None:
@@ -4390,20 +4396,37 @@ def payment_status(payment: dict[str, Any]) -> str:
 
 def decrement_inventory_for_order(db: Session, order: OrderSnapshot) -> list[dict[str, Any]]:
     updates: list[dict[str, Any]] = []
-    for item in local_order_items(db, order.id):
+    items = local_order_items(db, order.id)
+    quantities: dict[int, int] = {}
+    for item in items:
         if item.backend_product_id is None:
             raise HTTPException(
                 status_code=409,
                 detail=f"{item.name} is missing backend inventory mapping",
             )
-        product = db.query(Product).filter(Product.id == item.backend_product_id).first()
+        quantities[item.backend_product_id] = quantities.get(item.backend_product_id, 0) + item.qty
+    # Lock in a stable order, including across different orders for the same stock.
+    products = {
+        product.id: product
+        for product in db.query(Product)
+        .filter(Product.id.in_(quantities))
+        .order_by(Product.id)
+        .populate_existing()
+        .with_for_update()
+        .all()
+    }
+    # Validate the entire basket before changing any stock.
+    for item in items:
+        product = products.get(item.backend_product_id)
         if product is None:
             raise HTTPException(status_code=409, detail=f"{item.name} is no longer available")
-        if not product.in_stock or product.stock_quantity < item.qty:
+        if not product.in_stock or product.stock_quantity < quantities[product.id]:
             raise HTTPException(
                 status_code=409,
                 detail=f"{product.name} does not have enough stock to finalize payment",
             )
+    for item in items:
+        product = products[item.backend_product_id]
         before = product.stock_quantity
         product.stock_quantity = before - item.qty
         product.in_stock = product.stock_quantity > 0
@@ -4889,6 +4912,15 @@ def finalize_razorpay_payment(
     payment: dict[str, Any] | None = None,
     event_id: str | None = None,
 ) -> dict[str, Any]:
+    # Serialize verify/webhook/reconciliation for this order. Refresh any stale
+    # identity-map copy after waiting for the other transaction to commit.
+    order = (
+        db.query(OrderSnapshot)
+        .filter(OrderSnapshot.id == order.id)
+        .populate_existing()
+        .with_for_update()
+        .one()
+    )
     if order_already_finalized(order, payment_id):
         record_integration_event(
             db,
@@ -4904,6 +4936,11 @@ def finalize_razorpay_payment(
             },
         )
         return {"status": "idempotent", "order": order}
+
+    if order_finalization(order).get("status") == "finalized" or order.payment_status in {
+        "verified", "paid"
+    }:
+        raise HTTPException(status_code=409, detail="Order already finalized with another payment")
 
     try:
         _, confirmed_payment = fetch_razorpay_payment(payment_id, fallback=payment)
@@ -4968,10 +5005,13 @@ def finalize_razorpay_payment(
             inventory_updates = commerce_finalization.get("inventory_updates", [])
         else:
             commerce_finalization = {}
-            inventory_updates = decrement_inventory_for_order(db, order)
-            from commerce import clean_paid_cart
+            # Callers retain failure audit records, but must never commit a
+            # partially decremented basket when downstream finalization fails.
+            with db.begin_nested():
+                inventory_updates = decrement_inventory_for_order(db, order)
+                from commerce import clean_paid_cart
 
-            commerce_finalization = clean_paid_cart(db, order)
+                commerce_finalization = clean_paid_cart(db, order)
     except HTTPException:
         mark_razorpay_finalization_failure(
             db,
@@ -5070,6 +5110,8 @@ def find_order_by_razorpay_ids(
         db.query(OrderSnapshot)
         .filter(or_(*filters))
         .order_by(OrderSnapshot.updated_at.desc(), OrderSnapshot.id.desc())
+        .populate_existing()
+        .with_for_update()
         .first()
     )
 
@@ -5168,6 +5210,12 @@ def apply_razorpay_webhook(
         "currency": currency,
     }
     order = find_order_by_razorpay_ids(db, razorpay_order_id, payment_id)
+    # Another delivery may have committed while this request waited for the order lock.
+    if order is not None and razorpay_webhook_event_exists(db, event_id):
+        return {
+            "event": event_name, "status": "duplicate",
+            "order_reference": razorpay_order_id or None, "payment_id": payment_id or None,
+        }
     response_payload: dict[str, Any] = {}
     status_value = "unmatched"
 
@@ -6719,7 +6767,7 @@ def dependencies(response: Response, db: Session = Depends(get_db)):
 
 @app.post("/register", response_model=UserOut)
 @limiter.limit("5/minute")
-async def register(
+def register(
     request: Request,
     user: UserRegister,
     db: Session = Depends(get_db),
@@ -6768,7 +6816,7 @@ async def register(
 
 @app.post("/login", response_model=TokenResponse)
 @limiter.limit("5/minute")
-async def login(
+def login(
     request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
@@ -6827,7 +6875,7 @@ async def login(
 
 @app.post("/auth/firebase", response_model=TokenResponse)
 @limiter.limit("10/minute")
-async def firebase_auth(
+def firebase_auth(
     request: Request,
     payload: FirebaseAuthRequest,
     db: Session = Depends(get_db),
@@ -6905,7 +6953,7 @@ async def firebase_auth(
 
 @app.post("/auth/otp/request", response_model=OtpRequestOut)
 @limiter.limit("3/minute")
-async def request_phone_otp(
+def request_phone_otp(
     request: Request,
     payload: OtpRequestCreate,
     db: Session = Depends(get_db),
@@ -6963,7 +7011,7 @@ async def request_phone_otp(
 
 @app.post("/auth/otp/verify", response_model=TokenResponse)
 @limiter.limit("5/minute")
-async def verify_phone_otp(
+def verify_phone_otp(
     request: Request,
     payload: OtpVerifyRequest,
     db: Session = Depends(get_db),
@@ -7028,7 +7076,7 @@ async def verify_phone_otp(
 
 @app.post("/refresh", response_model=TokenResponse)
 @limiter.limit("10/minute")
-async def refresh_token_endpoint(
+def refresh_token_endpoint(
     request: Request, req: RefreshTokenRequest, db: Session = Depends(get_db)
 ):
     credentials_exception = HTTPException(status_code=401, detail="Invalid refresh token")
@@ -7153,7 +7201,7 @@ async def refresh_token_endpoint(
 
 @app.post("/logout", response_model=MessageResponse)
 @limiter.limit("10/minute")
-async def logout(
+def logout(
     request: Request,
     req: RefreshTokenRequest,
     current_user: User = Depends(get_current_user),
@@ -7183,7 +7231,7 @@ async def logout(
 
 @app.post("/logout-all-devices", response_model=MessageResponse)
 @limiter.limit("5/minute")
-async def logout_all_devices(
+def logout_all_devices(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -7205,12 +7253,12 @@ async def logout_all_devices(
 
 
 @app.get("/me", response_model=UserOut)
-async def me(current_user: User = Depends(get_current_user)):
+def me(current_user: User = Depends(get_current_user)):
     return current_user
 
 
 @app.get("/users/me/addresses", response_model=list[UserAddressOut])
-async def list_my_addresses(
+def list_my_addresses(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -7223,7 +7271,7 @@ async def list_my_addresses(
 
 
 @app.post("/users/me/addresses", response_model=UserAddressOut)
-async def create_my_address(
+def create_my_address(
     payload: UserAddressCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -7245,7 +7293,7 @@ async def create_my_address(
 
 
 @app.patch("/users/me/addresses/{address_id}", response_model=UserAddressOut)
-async def update_my_address(
+def update_my_address(
     address_id: int,
     payload: UserAddressUpdate,
     current_user: User = Depends(get_current_user),
@@ -7263,7 +7311,7 @@ async def update_my_address(
 
 
 @app.delete("/users/me/addresses/{address_id}", response_model=MessageResponse)
-async def delete_my_address(
+def delete_my_address(
     address_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -7289,7 +7337,7 @@ async def delete_my_address(
 
 
 @app.get("/users/me/notification-settings", response_model=NotificationSettingsOut)
-async def get_my_notification_settings(
+def get_my_notification_settings(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -7297,7 +7345,7 @@ async def get_my_notification_settings(
 
 
 @app.patch("/users/me/notification-settings", response_model=NotificationSettingsOut)
-async def update_my_notification_settings(
+def update_my_notification_settings(
     payload: NotificationSettingsUpdate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -7329,7 +7377,7 @@ def chat_session_summary(db: Session, session: ChatSession) -> ChatSessionOut:
 
 
 @app.get("/chat/sessions", response_model=list[ChatSessionOut])
-async def list_chat_sessions(
+def list_chat_sessions(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -7343,7 +7391,7 @@ async def list_chat_sessions(
 
 
 @app.get("/chat/sessions/{session_id}", response_model=ChatSessionDetailOut)
-async def get_chat_session(
+def get_chat_session(
     session_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -7419,7 +7467,7 @@ def list_products(
 
 
 @app.post("/products/{product_id}/back-in-stock", response_model=BackInStockSubscriptionOut)
-async def subscribe_back_in_stock(
+def subscribe_back_in_stock(
     product_id: int,
     payload: BackInStockSubscribeRequest | None = None,
     current_user: User = Depends(get_current_user),
@@ -7464,7 +7512,7 @@ async def subscribe_back_in_stock(
 
 
 @app.get("/back-in-stock/my", response_model=list[BackInStockSubscriptionOut])
-async def list_my_back_in_stock_alerts(
+def list_my_back_in_stock_alerts(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -7487,7 +7535,7 @@ async def list_my_back_in_stock_alerts(
 
 
 @app.delete("/back-in-stock/{subscription_id}", response_model=MessageResponse)
-async def cancel_back_in_stock_alert(
+def cancel_back_in_stock_alert(
     subscription_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -7511,7 +7559,7 @@ async def cancel_back_in_stock_alert(
 
 
 @app.get("/products/{product_id}/similar", response_model=list[ProductOut])
-async def similar_products(
+def similar_products(
     product_id: int,
     limit: int = Query(default=6, ge=1, le=20),
     db: Session = Depends(get_db),
@@ -7535,12 +7583,12 @@ async def similar_products(
 
 
 @app.get("/products/{product_id}", response_model=ProductOut)
-async def get_product(product_id: int, db: Session = Depends(get_db)):
+def get_product(product_id: int, db: Session = Depends(get_db)):
     return get_product_or_404(db, product_id)
 
 
 @app.get("/featured-products", response_model=list[ProductOut])
-async def featured_products(
+def featured_products(
     limit: int = Query(default=10, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
@@ -7572,7 +7620,7 @@ async def featured_products(
 
 
 @app.get("/seasonal-collections", response_model=list[SeasonalCollectionOut])
-async def seasonal_collections(db: Session = Depends(get_db)):
+def seasonal_collections(db: Session = Depends(get_db)):
     now = utc_now()
     return (
         db.query(SeasonalCollection)
@@ -7587,7 +7635,7 @@ async def seasonal_collections(db: Session = Depends(get_db)):
 
 
 @app.get("/categories", response_model=list[CategoryOut])
-async def list_categories(db: Session = Depends(get_db)):
+def list_categories(db: Session = Depends(get_db)):
     return (
         db.query(ProductCategory)
         .filter(ProductCategory.is_active == True)
@@ -7607,17 +7655,17 @@ def list_public_knowledge(db: Session, kind: str) -> list[KnowledgeBaseOut]:
 
 
 @app.get("/faqs", response_model=list[KnowledgeBaseOut])
-async def list_faqs(db: Session = Depends(get_db)):
+def list_faqs(db: Session = Depends(get_db)):
     return list_public_knowledge(db, "faq")
 
 
 @app.get("/policies", response_model=list[KnowledgeBaseOut])
-async def list_policies(db: Session = Depends(get_db)):
+def list_policies(db: Session = Depends(get_db)):
     return list_public_knowledge(db, "policy")
 
 
 @app.get("/mobile/config")
-async def mobile_config(db: Session = Depends(get_db)):
+def mobile_config(db: Session = Depends(get_db)):
     return {
         "api_version": "v1",
         "oms_connected": oms_is_configured(),
@@ -7677,7 +7725,7 @@ async def mobile_config(db: Session = Depends(get_db)):
 
 
 @app.get("/admin/products", response_model=list[ProductOut])
-async def admin_list_products(
+def admin_list_products(
     admin_user: User = Depends(require_permission("products:manage")),
     db: Session = Depends(get_db),
 ):
@@ -7685,7 +7733,7 @@ async def admin_list_products(
 
 
 @app.post("/admin/products", response_model=ProductOut)
-async def admin_create_product(
+def admin_create_product(
     request: Request,
     product_in: ProductCreate,
     admin_user: User = Depends(require_permission("products:manage")),
@@ -7700,7 +7748,7 @@ async def admin_create_product(
 
 
 @app.get("/admin/products/{product_id}", response_model=ProductOut)
-async def admin_get_product(
+def admin_get_product(
     product_id: int,
     admin_user: User = Depends(require_permission("products:manage")),
     db: Session = Depends(get_db),
@@ -7709,7 +7757,7 @@ async def admin_get_product(
 
 
 @app.patch("/admin/products/{product_id}", response_model=ProductOut)
-async def admin_update_product(
+def admin_update_product(
     product_id: int,
     request: Request,
     product_in: ProductUpdate,
@@ -7725,7 +7773,7 @@ async def admin_update_product(
 
 
 @app.patch("/admin/products/{product_id}/inventory", response_model=ProductOut)
-async def admin_update_inventory(
+def admin_update_inventory(
     product_id: int,
     request: Request,
     inventory: InventoryUpdate,
@@ -7760,7 +7808,7 @@ async def admin_update_inventory(
     "/admin/products/{product_id}/back-in-stock/notify",
     response_model=BackInStockNotifyOut,
 )
-async def admin_notify_back_in_stock(
+def admin_notify_back_in_stock(
     product_id: int,
     request: Request,
     admin_user: User = Depends(require_permission("products:manage")),
@@ -7778,7 +7826,7 @@ async def admin_notify_back_in_stock(
 
 
 @app.delete("/admin/products/{product_id}", response_model=MessageResponse)
-async def admin_delete_product(
+def admin_delete_product(
     product_id: int,
     request: Request,
     admin_user: User = Depends(require_permission("products:manage")),
@@ -7792,7 +7840,7 @@ async def admin_delete_product(
 
 
 @app.get("/admin/categories", response_model=list[CategoryOut])
-async def admin_list_categories(
+def admin_list_categories(
     admin_user: User = Depends(require_permission("catalog:manage")),
     db: Session = Depends(get_db),
 ):
@@ -7800,7 +7848,7 @@ async def admin_list_categories(
 
 
 @app.post("/admin/categories", response_model=CategoryOut)
-async def admin_create_category(
+def admin_create_category(
     request: Request,
     category_in: CategoryCreate,
     admin_user: User = Depends(require_permission("catalog:manage")),
@@ -7822,7 +7870,7 @@ async def admin_create_category(
 
 
 @app.patch("/admin/categories/{category_id}", response_model=CategoryOut)
-async def admin_update_category(
+def admin_update_category(
     category_id: int,
     request: Request,
     category_in: CategoryUpdate,
@@ -7843,7 +7891,7 @@ async def admin_update_category(
 
 
 @app.delete("/admin/categories/{category_id}", response_model=MessageResponse)
-async def admin_delete_category(
+def admin_delete_category(
     category_id: int,
     request: Request,
     admin_user: User = Depends(require_permission("catalog:manage")),
@@ -7857,7 +7905,7 @@ async def admin_delete_category(
 
 
 @app.get("/admin/featured-items", response_model=list[FeaturedItemOut])
-async def admin_list_featured_items(
+def admin_list_featured_items(
     admin_user: User = Depends(require_permission("catalog:manage")),
     db: Session = Depends(get_db),
 ):
@@ -7872,7 +7920,7 @@ async def admin_list_featured_items(
 
 
 @app.post("/admin/featured-items", response_model=FeaturedItemOut)
-async def admin_create_featured_item(
+def admin_create_featured_item(
     request: Request,
     item_in: FeaturedItemCreate,
     admin_user: User = Depends(require_permission("catalog:manage")),
@@ -7888,7 +7936,7 @@ async def admin_create_featured_item(
 
 
 @app.patch("/admin/featured-items/{item_id}", response_model=FeaturedItemOut)
-async def admin_update_featured_item(
+def admin_update_featured_item(
     item_id: int,
     request: Request,
     item_in: FeaturedItemUpdate,
@@ -7907,7 +7955,7 @@ async def admin_update_featured_item(
 
 
 @app.delete("/admin/featured-items/{item_id}", response_model=MessageResponse)
-async def admin_delete_featured_item(
+def admin_delete_featured_item(
     item_id: int,
     request: Request,
     admin_user: User = Depends(require_permission("catalog:manage")),
@@ -7921,7 +7969,7 @@ async def admin_delete_featured_item(
 
 
 @app.get("/admin/seasonal-collections", response_model=list[SeasonalCollectionOut])
-async def admin_list_seasonal_collections(
+def admin_list_seasonal_collections(
     admin_user: User = Depends(require_permission("catalog:manage")),
     db: Session = Depends(get_db),
 ):
@@ -7929,7 +7977,7 @@ async def admin_list_seasonal_collections(
 
 
 @app.post("/admin/seasonal-collections", response_model=SeasonalCollectionOut)
-async def admin_create_seasonal_collection(
+def admin_create_seasonal_collection(
     request: Request,
     collection_in: SeasonalCollectionCreate,
     admin_user: User = Depends(require_permission("catalog:manage")),
@@ -7949,7 +7997,7 @@ async def admin_create_seasonal_collection(
 
 
 @app.patch("/admin/seasonal-collections/{collection_id}", response_model=SeasonalCollectionOut)
-async def admin_update_seasonal_collection(
+def admin_update_seasonal_collection(
     collection_id: int,
     request: Request,
     collection_in: SeasonalCollectionUpdate,
@@ -7970,7 +8018,7 @@ async def admin_update_seasonal_collection(
 
 
 @app.delete("/admin/seasonal-collections/{collection_id}", response_model=MessageResponse)
-async def admin_delete_seasonal_collection(
+def admin_delete_seasonal_collection(
     collection_id: int,
     request: Request,
     admin_user: User = Depends(require_permission("catalog:manage")),
@@ -7984,7 +8032,7 @@ async def admin_delete_seasonal_collection(
 
 
 @app.get("/admin/knowledge-base", response_model=list[KnowledgeBaseOut])
-async def admin_list_knowledge_base(
+def admin_list_knowledge_base(
     kind: str | None = None,
     admin_user: User = Depends(require_permission("knowledge:manage")),
     db: Session = Depends(get_db),
@@ -7997,7 +8045,7 @@ async def admin_list_knowledge_base(
 
 
 @app.post("/admin/knowledge-base", response_model=KnowledgeBaseOut)
-async def admin_create_knowledge_base_item(
+def admin_create_knowledge_base_item(
     request: Request,
     item_in: KnowledgeBaseCreate,
     admin_user: User = Depends(require_permission("knowledge:manage")),
@@ -8021,7 +8069,7 @@ async def admin_create_knowledge_base_item(
 
 
 @app.patch("/admin/knowledge-base/{item_id}", response_model=KnowledgeBaseOut)
-async def admin_update_knowledge_base_item(
+def admin_update_knowledge_base_item(
     item_id: int,
     request: Request,
     item_in: KnowledgeBaseUpdate,
@@ -8045,7 +8093,7 @@ async def admin_update_knowledge_base_item(
 
 
 @app.delete("/admin/knowledge-base/{item_id}", response_model=MessageResponse)
-async def admin_delete_knowledge_base_item(
+def admin_delete_knowledge_base_item(
     item_id: int,
     request: Request,
     admin_user: User = Depends(require_permission("knowledge:manage")),
@@ -8059,7 +8107,7 @@ async def admin_delete_knowledge_base_item(
 
 
 @app.get("/admin/config", response_model=list[AppConfigOut])
-async def admin_list_config(
+def admin_list_config(
     admin_user: User = Depends(require_permission("config:manage")),
     db: Session = Depends(get_db),
 ):
@@ -8067,7 +8115,7 @@ async def admin_list_config(
 
 
 @app.post("/admin/config", response_model=AppConfigOut)
-async def admin_create_config_entry(
+def admin_create_config_entry(
     request: Request,
     entry_in: AppConfigCreate,
     admin_user: User = Depends(require_permission("config:manage")),
@@ -8083,7 +8131,7 @@ async def admin_create_config_entry(
 
 
 @app.patch("/admin/config/{entry_id}", response_model=AppConfigOut)
-async def admin_update_config_entry(
+def admin_update_config_entry(
     entry_id: int,
     request: Request,
     entry_in: AppConfigUpdate,
@@ -8101,7 +8149,7 @@ async def admin_update_config_entry(
 
 
 @app.delete("/admin/config/{entry_id}", response_model=MessageResponse)
-async def admin_delete_config_entry(
+def admin_delete_config_entry(
     entry_id: int,
     request: Request,
     admin_user: User = Depends(require_permission("config:manage")),
@@ -8115,7 +8163,7 @@ async def admin_delete_config_entry(
 
 
 @app.get("/admin/leads", response_model=list[LeadCaptureOut])
-async def admin_list_leads(
+def admin_list_leads(
     admin_user: User = Depends(require_permission("leads:manage")),
     db: Session = Depends(get_db),
 ):
@@ -8123,21 +8171,21 @@ async def admin_list_leads(
 
 
 @app.get("/admin/metrics")
-async def admin_metrics(
+def admin_metrics(
     admin_user: User = Depends(require_permission("metrics:read")),
 ):
     return metrics_snapshot()
 
 
 @app.get("/admin/integrations/status")
-async def admin_integrations_status(
+def admin_integrations_status(
     admin_user: User = Depends(require_permission("metrics:read")),
 ):
     return integration_status()
 
 
 @app.get("/admin/integrations/events", response_model=list[ExternalIntegrationEventOut])
-async def admin_integration_events(
+def admin_integration_events(
     service: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     admin_user: User = Depends(require_permission("metrics:read")),
@@ -8150,7 +8198,7 @@ async def admin_integration_events(
 
 
 @app.post("/admin/email/test", response_model=MessageResponse)
-async def admin_test_email(
+def admin_test_email(
     request: Request,
     payload: EmailTestRequest | None = None,
     admin_user: User = Depends(require_permission("metrics:read")),
@@ -8181,7 +8229,7 @@ async def admin_test_email(
 
 
 @app.post("/admin/alerts/test", response_model=MessageResponse)
-async def admin_test_alert(
+def admin_test_alert(
     request: Request,
     admin_user: User = Depends(require_permission("metrics:read")),
 ):
@@ -8212,7 +8260,7 @@ async def admin_test_alert(
 
 
 @app.get("/admin/analytics/chat")
-async def admin_chat_analytics(
+def admin_chat_analytics(
     limit: int = 500,
     admin_user: User = Depends(require_permission("metrics:read")),
     db: Session = Depends(get_db),
@@ -8221,7 +8269,7 @@ async def admin_chat_analytics(
 
 
 @app.get("/admin/chat-transcripts/review")
-async def admin_chat_transcript_review(
+def admin_chat_transcript_review(
     limit: int = 25,
     include_reviewed: bool = False,
     admin_user: User = Depends(require_permission("metrics:read")),
@@ -8231,7 +8279,7 @@ async def admin_chat_transcript_review(
 
 
 @app.patch("/admin/chat-transcripts/{response_id}/review")
-async def admin_mark_chat_transcript_reviewed(
+def admin_mark_chat_transcript_reviewed(
     response_id: str,
     payload: TranscriptReviewUpdate,
     request: Request,
@@ -8258,7 +8306,7 @@ async def admin_mark_chat_transcript_reviewed(
 
 
 @app.patch("/admin/leads/{lead_id}", response_model=LeadCaptureOut)
-async def admin_update_lead_status(
+def admin_update_lead_status(
     lead_id: int,
     request: Request,
     lead_in: LeadStatusUpdate,
@@ -8276,7 +8324,7 @@ async def admin_update_lead_status(
 
 
 @app.get("/admin/request-callbacks", response_model=list[CallbackRequestOut])
-async def admin_list_callback_requests(
+def admin_list_callback_requests(
     limit: int = Query(default=100, ge=1, le=500),
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
@@ -8285,7 +8333,7 @@ async def admin_list_callback_requests(
 
 
 @app.patch("/admin/request-callbacks/{callback_id}", response_model=CallbackRequestOut)
-async def admin_update_callback_request(
+def admin_update_callback_request(
     callback_id: int,
     request: Request,
     status_in: LeadStatusUpdate,
@@ -8301,7 +8349,7 @@ async def admin_update_callback_request(
 
 
 @app.get("/admin/appointments", response_model=list[AppointmentOut])
-async def admin_list_appointments(
+def admin_list_appointments(
     limit: int = Query(default=100, ge=1, le=500),
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
@@ -8315,7 +8363,7 @@ async def admin_list_appointments(
 
 
 @app.patch("/admin/appointments/{appointment_id}", response_model=AppointmentOut)
-async def admin_update_appointment(
+def admin_update_appointment(
     appointment_id: int,
     request: Request,
     status_in: LeadStatusUpdate,
@@ -8331,7 +8379,7 @@ async def admin_update_appointment(
 
 
 @app.get("/admin/custom-orders", response_model=list[CustomOrderOut])
-async def admin_list_custom_orders(
+def admin_list_custom_orders(
     limit: int = Query(default=100, ge=1, le=500),
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
@@ -8345,7 +8393,7 @@ async def admin_list_custom_orders(
 
 
 @app.patch("/admin/custom-orders/{request_id}", response_model=CustomOrderOut)
-async def admin_update_custom_order(
+def admin_update_custom_order(
     request_id: int,
     request: Request,
     status_in: LeadStatusUpdate,
@@ -8363,7 +8411,7 @@ async def admin_update_custom_order(
 
 
 @app.get("/admin/ai-concepts", response_model=list[AiGeneratedConceptOut])
-async def admin_list_ai_concepts(
+def admin_list_ai_concepts(
     limit: int = Query(default=100, ge=1, le=500),
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
@@ -8378,7 +8426,7 @@ async def admin_list_ai_concepts(
 
 
 @app.get("/admin/complaints", response_model=list[ComplaintOut])
-async def admin_list_complaints(
+def admin_list_complaints(
     limit: int = Query(default=100, ge=1, le=500),
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
@@ -8387,7 +8435,7 @@ async def admin_list_complaints(
 
 
 @app.patch("/admin/complaints/{ticket_id}", response_model=ComplaintOut)
-async def admin_update_complaint(
+def admin_update_complaint(
     ticket_id: int,
     request: Request,
     status_in: LeadStatusUpdate,
@@ -8403,7 +8451,7 @@ async def admin_update_complaint(
 
 
 @app.get("/admin/orders", response_model=list[OrderSnapshotOut])
-async def admin_list_orders(
+def admin_list_orders(
     status_filter: str | None = Query(default=None, alias="status"),
     source: str | None = None,
     admin_user: User = Depends(require_permission("support:manage")),
@@ -8418,7 +8466,7 @@ async def admin_list_orders(
 
 
 @app.patch("/admin/orders/{order_id}", response_model=OrderSnapshotOut)
-async def admin_update_order(
+def admin_update_order(
     order_id: int,
     payload: OrderStatusUpdate,
     request: Request,
@@ -8446,7 +8494,7 @@ async def admin_update_order(
 
 
 @app.post("/admin/payments/razorpay/reconcile")
-async def admin_reconcile_razorpay_payments(
+def admin_reconcile_razorpay_payments(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     admin_user: User = Depends(require_permission("support:manage")),
@@ -8470,7 +8518,7 @@ async def admin_reconcile_razorpay_payments(
 
 
 @app.get("/admin/orders/support", response_model=list[OrderSupportOut])
-async def admin_list_order_support_requests(
+def admin_list_order_support_requests(
     limit: int = Query(default=100, ge=1, le=500),
     admin_user: User = Depends(require_permission("support:manage")),
     db: Session = Depends(get_db),
@@ -8484,7 +8532,7 @@ async def admin_list_order_support_requests(
 
 
 @app.patch("/admin/orders/support/{request_id}", response_model=OrderSupportOut)
-async def admin_update_order_support_request(
+def admin_update_order_support_request(
     request_id: int,
     request: Request,
     status_in: LeadStatusUpdate,
@@ -8556,7 +8604,7 @@ def delete_saved_item(db: Session, model, user_id: int, item_id: int) -> None:
 
 
 @app.get("/wishlist", response_model=list[SavedProductOut])
-async def list_wishlist(
+def list_wishlist(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -8564,7 +8612,7 @@ async def list_wishlist(
 
 
 @app.post("/wishlist", response_model=SavedProductOut)
-async def add_to_wishlist(
+def add_to_wishlist(
     payload: SavedItemCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8573,7 +8621,7 @@ async def add_to_wishlist(
 
 
 @app.delete("/wishlist/{item_id}", response_model=MessageResponse)
-async def remove_from_wishlist(
+def remove_from_wishlist(
     item_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8583,7 +8631,7 @@ async def remove_from_wishlist(
 
 
 @app.get("/save-for-later", response_model=list[SavedProductOut])
-async def list_save_for_later(
+def list_save_for_later(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -8591,7 +8639,7 @@ async def list_save_for_later(
 
 
 @app.post("/save-for-later", response_model=SavedProductOut)
-async def add_to_save_for_later(
+def add_to_save_for_later(
     payload: SavedItemCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8600,7 +8648,7 @@ async def add_to_save_for_later(
 
 
 @app.delete("/save-for-later/{item_id}", response_model=MessageResponse)
-async def remove_from_save_for_later(
+def remove_from_save_for_later(
     item_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8610,7 +8658,7 @@ async def remove_from_save_for_later(
 
 
 @app.post("/request-callback", response_model=CallbackRequestOut)
-async def request_callback(
+def request_callback(
     payload: CallbackRequestCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8631,7 +8679,7 @@ async def request_callback(
 
 
 @app.get("/request-callbacks/my", response_model=list[CallbackRequestOut])
-async def list_my_callback_requests(
+def list_my_callback_requests(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -8644,7 +8692,7 @@ async def list_my_callback_requests(
 
 
 @app.post("/appointments", response_model=AppointmentOut)
-async def book_appointment(
+def book_appointment(
     payload: AppointmentCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8666,7 +8714,7 @@ async def book_appointment(
 
 
 @app.get("/appointments/my", response_model=list[AppointmentOut])
-async def list_my_appointments(
+def list_my_appointments(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -8679,7 +8727,7 @@ async def list_my_appointments(
 
 
 @app.post("/custom-orders", response_model=CustomOrderOut)
-async def create_custom_order_request(
+def create_custom_order_request(
     payload: CustomOrderCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8712,7 +8760,7 @@ async def create_custom_order_request(
 
 
 @app.get("/custom-orders/my", response_model=list[CustomOrderOut])
-async def list_my_custom_orders(
+def list_my_custom_orders(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -8725,7 +8773,7 @@ async def list_my_custom_orders(
 
 
 @app.post("/ai-concepts", response_model=AiGeneratedConceptOut)
-async def save_ai_generated_concept(
+def save_ai_generated_concept(
     payload: AiGeneratedConceptCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8784,7 +8832,7 @@ async def save_ai_generated_concept(
 
 
 @app.get("/ai-concepts/my", response_model=list[AiGeneratedConceptOut])
-async def list_my_ai_generated_concepts(
+def list_my_ai_generated_concepts(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -8799,7 +8847,7 @@ async def list_my_ai_generated_concepts(
 
 
 @app.post("/complaints", response_model=ComplaintOut)
-async def create_complaint_ticket(
+def create_complaint_ticket(
     payload: ComplaintCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -8826,7 +8874,7 @@ async def create_complaint_ticket(
 
 
 @app.get("/complaints/my", response_model=list[ComplaintOut])
-async def list_my_complaints(
+def list_my_complaints(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -8839,7 +8887,7 @@ async def list_my_complaints(
 
 
 @app.post("/payments/razorpay/orders", response_model=RazorpayOrderOut)
-async def create_razorpay_checkout_order(
+def create_razorpay_checkout_order(
     request: Request,
     payload: RazorpayOrderCreate,
     current_user: User = Depends(get_current_user),
@@ -9060,7 +9108,7 @@ async def create_razorpay_checkout_order(
 
 
 @app.post("/payments/razorpay/verify", response_model=RazorpayPaymentVerifyOut)
-async def verify_razorpay_checkout_payment(
+def verify_razorpay_checkout_payment(
     request: Request,
     payload: RazorpayPaymentVerifyRequest,
     current_user: User = Depends(get_current_user),
@@ -9198,6 +9246,11 @@ async def receive_razorpay_webhook(
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Invalid Razorpay webhook payload")
 
+    return await run_in_threadpool(process_razorpay_webhook, db, payload, request)
+
+
+def process_razorpay_webhook(db: Session, payload: dict, request: Request):
+    """Keep blocking SQL and provider calls off the ASGI event loop."""
     result = apply_razorpay_webhook(db, payload)
     increment_metric("razorpay_webhooks")
     db.commit()
@@ -9213,7 +9266,7 @@ async def receive_razorpay_webhook(
 
 
 @app.post("/orders/sync", response_model=OrderSnapshotOut)
-async def sync_order_snapshot(
+def sync_order_snapshot(
     payload: OrderSyncRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -9227,7 +9280,7 @@ async def sync_order_snapshot(
 
 
 @app.get("/orders/my", response_model=list[OrderSnapshotOut])
-async def list_my_orders(
+def list_my_orders(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -9241,7 +9294,7 @@ async def list_my_orders(
 
 
 @app.post("/orders/support", response_model=OrderSupportOut)
-async def create_order_support_request(
+def create_order_support_request(
     payload: OrderSupportCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -9320,7 +9373,7 @@ async def create_order_support_request(
 
 
 @app.get("/orders/support/my", response_model=list[OrderSupportOut])
-async def list_my_order_support_requests(
+def list_my_order_support_requests(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -9333,7 +9386,7 @@ async def list_my_order_support_requests(
 
 
 @app.get("/orders/{order_reference}", response_model=OrderLookupOut)
-async def get_order_status(
+def get_order_status(
     order_reference: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -9367,7 +9420,7 @@ async def get_order_status(
 
 
 @app.post("/orders/{order_reference}/cancel", response_model=OrderActionOut)
-async def cancel_order(
+def cancel_order(
     order_reference: str,
     payload: OrderActionRequest,
     current_user: User = Depends(get_current_user),
@@ -9400,7 +9453,7 @@ async def cancel_order(
 
 
 @app.post("/orders/{order_reference}/return", response_model=OrderActionOut)
-async def request_order_return(
+def request_order_return(
     order_reference: str,
     payload: OrderActionRequest,
     current_user: User = Depends(get_current_user),
@@ -9433,7 +9486,7 @@ async def request_order_return(
 
 
 @app.post("/orders/{order_reference}/refund", response_model=OrderActionOut)
-async def request_order_refund(
+def request_order_refund(
     order_reference: str,
     payload: OrderActionRequest,
     current_user: User = Depends(get_current_user),
@@ -9466,7 +9519,7 @@ async def request_order_refund(
 
 
 @app.post("/feedback", response_model=MessageResponse)
-async def submit_feedback(
+def submit_feedback(
     request: Request,
     payload: FeedbackCreate,
     current_user: User = Depends(get_current_user),
@@ -9526,7 +9579,7 @@ async def submit_feedback(
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(
+def chat(
     request: Request,
     req: ChatRequest,
     current_user: User = Depends(get_current_user),
@@ -9689,7 +9742,7 @@ async def chat(
 
 @app.post("/forgot-password", response_model=MessageResponse)
 @limiter.limit("3/minute")
-async def forgot_password(
+def forgot_password(
     request: Request, req: ForgotPasswordRequest, db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.email == req.email).first()
@@ -9721,13 +9774,13 @@ async def forgot_password(
 
 
 @app.get("/reset-password", response_class=HTMLResponse)
-async def reset_password_page(token: str = Query(...)):
+def reset_password_page(token: str = Query(...)):
     return reset_password_form_html(token)
 
 
 @app.post("/reset-password", response_model=MessageResponse)
 @limiter.limit("5/minute")
-async def reset_password(
+def reset_password(
     request: Request, req: ResetPasswordRequest, db: Session = Depends(get_db)
 ):
     return reset_password_with_token(db, req.token, req.new_password, request)
@@ -9735,7 +9788,7 @@ async def reset_password(
 
 @app.post("/reset-password/form", response_class=HTMLResponse, include_in_schema=False)
 @limiter.limit("5/minute")
-async def reset_password_form_submit(
+def reset_password_form_submit(
     request: Request,
     token: str = Form(...),
     new_password: str = Form(...),
@@ -9753,7 +9806,7 @@ async def reset_password_form_submit(
 
 
 @app.post("/verify-email", response_model=MessageResponse)
-async def verify_email(
+def verify_email(
     request: Request,
     req: VerifyEmailRequest,
     db: Session = Depends(get_db),
@@ -9762,7 +9815,7 @@ async def verify_email(
 
 
 @app.get("/verify-email", response_class=HTMLResponse)
-async def verify_email_click(
+def verify_email_click(
     request: Request,
     token: str = Query(...),
     db: Session = Depends(get_db),
@@ -9780,7 +9833,7 @@ async def verify_email_click(
 
 @app.post("/resend-verification", response_model=MessageResponse)
 @limiter.limit("3/minute")
-async def resend_verification(
+def resend_verification(
     request: Request, req: ResendVerificationRequest, db: Session = Depends(get_db)
 ):
     generic_response = MessageResponse(
