@@ -17,7 +17,7 @@ from urllib.request import urlopen
 REPO = Path(__file__).resolve().parents[1]
 DATABASE = "snchatbot_staging"
 ROLE = "staging_owner"
-REVISION = "0017_system_notifications"
+REVISION = "0018_push_devices"
 
 
 def validate_url(value):
