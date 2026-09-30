@@ -1,10 +1,11 @@
 """Opt-in, session-owned device registry. No push sender is enabled here."""
 
 import hashlib
+import hmac
 import os
 
 from fastapi import Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.exc import IntegrityError
 
@@ -139,7 +140,55 @@ class DeviceInput(SessionInput):
         return value
 
 
+class LogoutProof(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token_jti: str = Field(min_length=1, max_length=100)
+    proof: SecretStr
+
+    @field_validator("proof")
+    @classmethod
+    def valid_proof(cls, value):
+        raw = value.get_secret_value()
+        if len(raw) != 64 or any(c not in "0123456789abcdef" for c in raw):
+            raise ValueError("Invalid logout proof")
+        return value
+
+
+def revoke_with_proof(db, token_jti, proof):
+    """Proof can only revoke the stored session family, never create a login.
+
+    Old/expired tokens may authorize revocation of their rotated family. Unknown
+    proofs are indistinguishable from already-cleaned sessions to the caller.
+    """
+    row = db.query(RefreshToken).filter_by(token_jti=token_jti).first()
+    if row is None:
+        return
+    lock_owner(db, row.user_id)
+    db.refresh(row)
+    expected = hashlib.sha256(("sona-logout-v1:" + row.token).encode()).hexdigest()
+    if not hmac.compare_digest(expected, proof):
+        return
+    family = db.query(RefreshToken).filter_by(user_id=row.user_id)
+    family = family.filter_by(family_id=row.family_id) if row.family_id else family.filter_by(id=row.id)
+    for session in family.populate_existing().all():
+        if not session.is_revoked:
+            session.is_revoked = True
+            session.revoked_at = utc_now()
+            session.revoked_reason = "deferred_logout"
+    if row.family_id:
+        detach_family(db, row.user_id, row.family_id)
+
+
 def install(app, get_db, get_current_user, limiter):
+    @app.post("/auth/sessions/revoke")
+    @limiter.limit("20/minute")
+    def revoke(request: Request, payload: LogoutProof, db=Depends(get_db)):
+        if not enabled():
+            raise HTTPException(503, "Device registration is disabled")
+        revoke_with_proof(db, payload.token_jti, payload.proof.get_secret_value())
+        db.commit()
+        return {"revocation_processed": True}
+
     def permitted(user=Depends(get_current_user)):
         if not enabled():
             raise HTTPException(503, "Device registration is disabled")
