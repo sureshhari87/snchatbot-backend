@@ -50,6 +50,7 @@ except Exception:  # pragma: no cover - optional production integration
     firebase_credentials = None
     firebase_firestore = None
 
+import push_devices
 from catalogue_admin import install as install_catalogue_admin
 from commerce import install as install_commerce_routes
 from config import (
@@ -1189,6 +1190,8 @@ def revoke_user_refresh_tokens(
     reason: str,
     request: Request | None = None,
 ) -> int:
+    if push_devices.enabled():
+        push_devices.lock_owner(db, user_id)
     tokens = (
         db.query(RefreshToken)
         .filter(
@@ -1199,6 +1202,8 @@ def revoke_user_refresh_tokens(
     )
     for token_row in tokens:
         revoke_refresh_token(token_row, reason, request)
+    if push_devices.enabled():
+        push_devices.detach_all(db, user_id)
     return len(tokens)
 
 
@@ -7094,7 +7099,13 @@ def refresh_token_endpoint(
         log_event("auth.refresh_failed", request, reason="jwt_decode_error")
         raise credentials_exception from None
 
-    stored_token = db.query(RefreshToken).filter(RefreshToken.token == req.refresh_token).first()
+    if push_devices.enabled():
+        # Same owner-first lock order as registration and logout.
+        db.query(User).filter(User.email == email).with_for_update().first()
+    stored_token = (
+        db.query(RefreshToken).filter(RefreshToken.token == req.refresh_token)
+        .populate_existing().first()
+    )
 
     if not stored_token:
         log_event("auth.refresh_failed", request, email=email, reason="token_not_found")
@@ -7207,17 +7218,31 @@ def logout(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if push_devices.enabled():
+        push_devices.lock_owner(db, current_user.id)
     token_row = (
         db.query(RefreshToken)
         .filter(
             RefreshToken.token == req.refresh_token,
             RefreshToken.user_id == current_user.id,
         )
+        .populate_existing()
         .first()
     )
 
     if token_row:
         revoke_refresh_token(token_row, "logout", request)
+        if push_devices.enabled():
+            # Revoke the family, including a replacement from a concurrent refresh.
+            family_tokens = (
+                db.query(RefreshToken)
+                .filter_by(user_id=current_user.id, family_id=token_row.family_id)
+                .populate_existing().all()
+                if token_row.family_id else [token_row]
+            )
+            for family_token in family_tokens:
+                revoke_refresh_token(family_token, "logout", request)
+            push_devices.detach_family(db, current_user.id, token_row.family_id)
         db.commit()
         log_event(
             "auth.logout",
@@ -9935,3 +9960,4 @@ install_commerce_routes(app, get_db, get_current_user)
 install_catalogue_admin(app, get_db, require_permission)
 install_review_api(app, get_db, get_current_user, require_permission)
 install_notification_api(app, get_db, get_current_user, require_permission, log_admin_action)
+push_devices.install(app, get_db, get_current_user, limiter)
