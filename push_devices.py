@@ -19,7 +19,9 @@ def enabled():
 
 def lock_owner(db, user_id):
     # Do not refresh this object: password reset can have pending User changes.
-    return db.query(User).filter_by(id=user_id).with_for_update().first()
+    # NO KEY UPDATE serializes lifecycle operations without conflicting with
+    # foreign-key KEY SHARE locks already held by parallel notification events.
+    return db.query(User).filter_by(id=user_id).with_for_update(key_share=True).first()
 
 
 class PushDevice(Base):
@@ -169,7 +171,9 @@ def revoke_with_proof(db, token_jti, proof):
     if not hmac.compare_digest(expected, proof):
         return
     family = db.query(RefreshToken).filter_by(user_id=row.user_id)
-    family = family.filter_by(family_id=row.family_id) if row.family_id else family.filter_by(id=row.id)
+    family = (
+        family.filter_by(family_id=row.family_id) if row.family_id else family.filter_by(id=row.id)
+    )
     for session in family.populate_existing().all():
         if not session.is_revoked:
             session.is_revoked = True

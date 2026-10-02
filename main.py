@@ -2323,17 +2323,26 @@ def clear_default_addresses(db: Session, user_id: int) -> None:
         address.updated_at = utc_now()
 
 
-def notification_settings_for_user(db: Session, user_id: int) -> NotificationSettings:
+def notification_settings_for_user(
+    db: Session, user_id: int, *, commit: bool = True
+) -> NotificationSettings:
+    # Serialize opt-outs with delivery/registration. Never release this lock
+    # between creating default settings and applying a PATCH.
+    push_devices.lock_owner(db, user_id)
     settings_row = (
-        db.query(NotificationSettings).filter(NotificationSettings.user_id == user_id).first()
+        db.query(NotificationSettings).filter(NotificationSettings.user_id == user_id)
+        .populate_existing().first()
     )
     if settings_row:
         return settings_row
 
     settings_row = NotificationSettings(user_id=user_id)
     db.add(settings_row)
-    db.commit()
-    db.refresh(settings_row)
+    if commit:
+        db.commit()
+        db.refresh(settings_row)
+    else:
+        db.flush()
     return settings_row
 
 
@@ -5359,13 +5368,16 @@ def reconcile_razorpay_orders(db: Session, limit: int = 50) -> dict[str, Any]:
             payment_id = str(captured_payment.get("id") or "").strip()
             if not payment_id:
                 raise HTTPException(status_code=409, detail="Captured payment is missing id")
-            finalization = finalize_razorpay_payment(
-                db,
-                order,
-                payment_id,
-                source="reconciliation",
-                payment=captured_payment,
-            )
+            # Reconciliation catches arbitrary failures and later commits its
+            # audit. Preserve payment/stock/inbox/outbox atomicity on that path.
+            with db.begin_nested():
+                finalization = finalize_razorpay_payment(
+                    db,
+                    order,
+                    payment_id,
+                    source="reconciliation",
+                    payment=captured_payment,
+                )
             if finalization["status"] == "idempotent":
                 result["already_finalized"] += 1
             else:
@@ -7375,7 +7387,7 @@ def update_my_notification_settings(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    settings_row = notification_settings_for_user(db, current_user.id)
+    settings_row = notification_settings_for_user(db, current_user.id, commit=False)
     apply_model_updates(settings_row, payload.model_dump(exclude_unset=True))
     settings_row.updated_at = utc_now()
     db.commit()

@@ -82,6 +82,8 @@ class LocalStagingTests(unittest.TestCase):
         self.assertNotIn("RAZORPAY_KEY_SECRET", env)
         self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", env)
         self.assertEqual(env["RUN_MIGRATIONS_ON_STARTUP"], "0")
+        self.assertEqual(env["PUSH_OUTBOX_ENABLED"], "0")
+        self.assertEqual(env["PUSH_DELIVERY_ENABLED"], "0")
 
 
 if __name__ == "__main__":

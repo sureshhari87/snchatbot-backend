@@ -1,6 +1,9 @@
 """Transactional admin order-status inbox messages; no payment assertions."""
 
 from models import CustomerNotification
+from push_controls import outbox_enabled
+from push_devices import lock_owner
+from push_outbox import enqueue
 
 
 def enqueue_verified_payment(db, order):
@@ -11,6 +14,9 @@ def enqueue_verified_payment(db, order):
     """
     if order.payment_status != "verified" or not order.payment_reference:
         raise ValueError("Payment notification requires verified payment")
+    push_enabled = outbox_enabled()
+    if push_enabled:
+        lock_owner(db, order.user_id)
     dialect = db.get_bind().dialect.name
     if dialect == "postgresql":
         from sqlalchemy.dialects.postgresql import insert
@@ -30,8 +36,17 @@ def enqueue_verified_payment(db, order):
             target="",
         )
         .on_conflict_do_nothing(index_elements=["user_id", "deduplication_key"])
+        .returning(CustomerNotification.id)
     )
-    db.execute(statement)
+    inserted = db.execute(statement).scalar_one_or_none()
+    if inserted is not None:
+        enqueue(
+            db,
+            user_id=order.user_id,
+            event_key=f"payment-verified:{order.id}",
+            kind="verified_payment",
+            enabled=push_enabled,
+        )
 
 
 STATUS_LABELS = {
@@ -50,6 +65,9 @@ def enqueue_admin_order_status(db, order, previous_status, admin_id):
     """
     if order.status == previous_status or order.status not in STATUS_LABELS:
         return
+    push_enabled = outbox_enabled()
+    if push_enabled:
+        lock_owner(db, order.user_id)
     key = f"order-status:{order.id}:{order.status}"
     if (
         db.query(CustomerNotification.id)
@@ -68,3 +86,4 @@ def enqueue_admin_order_status(db, order, previous_status, admin_id):
             target="",
         )
     )
+    enqueue(db, user_id=order.user_id, event_key=key, kind="order_status", enabled=push_enabled)

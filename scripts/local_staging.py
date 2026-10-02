@@ -17,7 +17,7 @@ from urllib.request import urlopen
 REPO = Path(__file__).resolve().parents[1]
 DATABASE = "snchatbot_staging"
 ROLE = "staging_owner"
-REVISION = "0018_push_devices"
+REVISION = "0019_push_outbox"
 
 
 def validate_url(value):
@@ -60,6 +60,8 @@ def clean_environment(url):
         HTTPS_REDIRECT="0",
         CORS_ORIGINS="http://127.0.0.1:8001",
         RUN_MIGRATIONS_ON_STARTUP="0",
+        PUSH_OUTBOX_ENABLED="0",
+        PUSH_DELIVERY_ENABLED="0",
         FIRESTORE_COMMERCE_ENABLED="0",
         FIREBASE_AUTH_ENABLED="0",
         LLM_ENABLED="0",
@@ -89,6 +91,8 @@ def preflight(url):
         versions = conn.execute("SELECT version_num FROM alembic_version").fetchall()
         if versions != [(REVISION,)]:
             raise ValueError("Unexpected schema revision; no automatic stamp or migration allowed")
+        if not {"push_devices", "push_events", "push_attempts"}.issubset(tables):
+            raise ValueError("Required push schema tables are missing")
         return "ready"
 
 
