@@ -12,6 +12,7 @@ BIND_HOST = "0.0.0.0"  # nosec B104
 sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
+    SAVINGS_REVISION,
     payment_test_environment,
     preflight,
     sms_staging_environment,
@@ -44,6 +45,14 @@ def render_environment(source):
         if not key_id:
             raise ValueError("Configure test payment keys before the test webhook")
         env.update(webhook_test_environment(env["RAZORPAY_WEBHOOK_SECRET"]))
+    if env.get("SAVINGS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}:
+        if not key_id or not key_secret or len(env.get("RAZORPAY_WEBHOOK_SECRET", "")) < 32:
+            raise ValueError("Savings staging requires dedicated test payment and webhook settings")
+        if any(
+            env.get(flag, "0").lower() not in {"0", "false", "no", "off"}
+            for flag in ("PUSH_OUTBOX_ENABLED", "PUSH_DELIVERY_ENABLED")
+        ):
+            raise ValueError("Keep push outbox and delivery disabled during savings staging")
     if env.get("SMS_OTP_ENABLED", "0").lower() in {"1", "true", "yes", "on"}:
         env.update(
             sms_staging_environment(
@@ -83,7 +92,7 @@ def render_environment(source):
 
 
 def verify_database(url):
-    if preflight(url) != "ready":
+    if preflight(url, expected_revision=SAVINGS_REVISION) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg
 

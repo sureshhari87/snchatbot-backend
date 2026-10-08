@@ -18,6 +18,18 @@ REPO = Path(__file__).resolve().parents[1]
 DATABASE = "snchatbot_staging"
 ROLE = "staging_owner"
 REVISION = "0019_push_outbox"
+SAVINGS_REVISION = "0024_savings_hold_review"
+SAVINGS_TABLES = {
+    "savings_schemes",
+    "savings_payments",
+    "savings_entries",
+    "savings_gold_rates",
+    "savings_audit",
+    "savings_checkout_attempts",
+    "savings_payment_resolutions",
+    "savings_holds",
+    "savings_hold_decisions",
+}
 
 
 def validate_url(value):
@@ -72,7 +84,9 @@ def clean_environment(url):
     return env
 
 
-def preflight(url):
+def preflight(url, *, expected_revision=REVISION):
+    if expected_revision not in (REVISION, SAVINGS_REVISION):
+        raise ValueError("Unsupported staging schema requirement")
     import psycopg
 
     with psycopg.connect(validate_url(url), connect_timeout=10) as conn:
@@ -89,10 +103,12 @@ def preflight(url):
         if "alembic_version" not in tables:
             raise ValueError("Existing database needs manual schema review")
         versions = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-        if versions != [(REVISION,)]:
+        if versions != [(expected_revision,)]:
             raise ValueError("Unexpected schema revision; no automatic stamp or migration allowed")
         if not {"push_devices", "push_events", "push_attempts"}.issubset(tables):
             raise ValueError("Required push schema tables are missing")
+        if expected_revision == SAVINGS_REVISION and not SAVINGS_TABLES.issubset(tables):
+            raise ValueError("Required savings schema tables are missing")
         return "ready"
 
 

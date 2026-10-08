@@ -33,6 +33,9 @@ def local_postgres(tmp_path_factory):
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     data = tmp_path / "postgres"
+    initdb_timeout = int(os.environ.get("LOCAL_POSTGRES_INITDB_TIMEOUT_SECONDS", "180"))
+    if not 30 <= initdb_timeout <= 900:
+        pytest.fail("Local PostgreSQL initdb timeout must be between 30 and 900 seconds")
     env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
 
     def run(tool, *args):
@@ -42,7 +45,7 @@ def local_postgres(tmp_path_factory):
             subprocess.run(
                 [str(binaries / (tool + ".exe")), *map(str, args)],
                 check=True, stdout=log, stderr=log,
-                timeout=180 if tool == "initdb" else 60, env=env,
+                timeout=initdb_timeout if tool == "initdb" else 60, env=env,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
 

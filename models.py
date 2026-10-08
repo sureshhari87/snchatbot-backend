@@ -575,3 +575,7 @@ class EmailVerificationToken(Base):
     is_used = Column(Boolean, default=False, nullable=False)
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+# Register local savings tables for Alembic and isolated test databases.
+import savings_models  # noqa: E402, F401

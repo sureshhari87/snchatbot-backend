@@ -51,6 +51,7 @@ except Exception:  # pragma: no cover - optional production integration
     firebase_firestore = None
 
 import push_devices
+import savings_api
 from catalogue_admin import install as install_catalogue_admin
 from commerce import install as install_commerce_routes
 from config import (
@@ -2215,6 +2216,7 @@ ADMIN_PERMISSIONS = {
     "leads:manage",
     "metrics:read",
     "support:manage",
+    "savings:manage",
     "knowledge:manage",
     "config:manage",
 }
@@ -9973,3 +9975,6 @@ install_catalogue_admin(app, get_db, require_permission)
 install_review_api(app, get_db, get_current_user, require_permission)
 install_notification_api(app, get_db, get_current_user, require_permission, log_admin_action)
 push_devices.install(app, get_db, get_current_user, limiter)
+
+
+savings_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])
