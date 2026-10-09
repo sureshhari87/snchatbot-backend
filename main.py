@@ -50,6 +50,8 @@ except Exception:  # pragma: no cover - optional production integration
     firebase_credentials = None
     firebase_firestore = None
 
+import custom_design_api
+import custom_design_payment_api
 import push_devices
 import savings_api
 from catalogue_admin import install as install_catalogue_admin
@@ -8442,6 +8444,7 @@ def admin_update_custom_order(
     custom_order = get_record_or_404(
         db, CustomOrderRequest, request_id, "Custom order request not found"
     )
+    custom_design_api.reject_legacy_status_update(db, request_id)
     custom_order.status = status_in.status
     db.commit()
     db.refresh(custom_order)
@@ -9978,3 +9981,9 @@ push_devices.install(app, get_db, get_current_user, limiter)
 
 
 savings_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])
+custom_design_api.install(
+    app, get_db, get_current_user, require_permission, sys.modules[__name__]
+)
+custom_design_payment_api.install(
+    app, get_db, get_current_user, require_permission, sys.modules[__name__]
+)
