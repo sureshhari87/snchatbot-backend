@@ -26,7 +26,13 @@ from savings import (
     utc,
     verify_razorpay,
 )
-from savings_checkout import CheckoutUnavailable, checkout, owned_payment, reconcile
+from savings_checkout import (
+    CheckoutUnavailable,
+    checkout,
+    owned_payment,
+    reconcile,
+    refresh_checkout,
+)
 from savings_models import (
     SavingsAudit,
     SavingsCheckoutAttempt,
@@ -385,6 +391,22 @@ def install(app, get_db, get_current_user, require_permission, provider):
             }
 
         return mutate(db, operation)
+
+    @app.post("/savings/payments/{payment_id}/refresh", dependencies=protected)
+    def refresh_payment(
+        payment_id: DatabaseId,
+        payload: Input | None = None,
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if not provider.razorpay_checkout_is_configured():
+            raise HTTPException(503, "Online savings verification is unavailable")
+        return mutate(
+            db,
+            lambda: payment_document(
+                refresh_checkout(db, payment_id, user.id, provider.call_razorpay, utc_now()), db
+            ),
+        )
 
     @app.post("/savings/payments/{payment_id}/verify", dependencies=protected)
     def verify(

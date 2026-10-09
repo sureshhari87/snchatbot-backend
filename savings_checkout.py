@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from models import utc_now
 from savings import SavingsConflict, audit, locked_scheme, verify_razorpay
-from savings_models import SavingsCheckoutAttempt, SavingsPayment
+from savings_models import SavingsCheckoutAttempt, SavingsPayment, SavingsScheme
 
 
 class CheckoutUnavailable(SavingsConflict):
@@ -125,28 +125,45 @@ def bind(db, payment, attempt, order, actor_id, now):
     db.flush()
 
 
+def refresh_checkout(db, payment_id, user_id, call_provider, now):
+    payment = owned_payment(db, payment_id, user_id)
+    return _reconcile(
+        db, payment_id, user_id, payment.provider_order_id, call_provider, now, owner_id=user_id
+    )
+
+
 def reconcile(db, payment_id, admin, provider_order_id, call_provider, now):
     if not admin.is_admin:
         raise PermissionError("Admin reconciliation required")
+    return _reconcile(db, payment_id, admin.id, provider_order_id, call_provider, now)
+
+
+def _reconcile(db, payment_id, actor_id, provider_order_id, call_provider, now, owner_id=None):
     payment = db.get(SavingsPayment, payment_id)
     if payment is None or payment.mode != "razorpay":
         raise SavingsConflict("Savings checkout unavailable")
-    locked_scheme(db, payment.scheme_id)
+    locked_scheme(db, payment.scheme_id, owner_id)
     db.refresh(payment)
+    if payment.state not in ("pending", "posted"):
+        raise SavingsConflict("Payment request has been closed")
     attempt = db.get(SavingsCheckoutAttempt, payment.id)
     if attempt is None:
         raise SavingsConflict("No checkout attempt exists")
-    if attempt.state == "ready":
-        if payment.provider_order_id != provider_order_id:
-            raise SavingsConflict("Checkout is already bound to another order")
-        return payment
+    if owner_id is not None and (attempt.state != "ready" or not payment.provider_order_id):
+        raise SavingsConflict("Checkout requires store reconciliation")
+    if attempt.state == "ready" and payment.provider_order_id != provider_order_id:
+        raise SavingsConflict("Checkout is already bound to another order")
     try:
         status, order = call_provider("GET", "orders/" + provider_order_id)
     except Exception:
         raise CheckoutUnavailable("Provider reconciliation unavailable") from None
     if status != 200:
         raise CheckoutUnavailable("Provider reconciliation unavailable")
-    bind(db, payment, attempt, order, admin.id, now)
+    if attempt.state == "ready":
+        if not order_matches(order, payment, attempt):
+            raise SavingsConflict("Provider order does not match the savings request")
+    else:
+        bind(db, payment, attempt, order, actor_id, now)
     if order.get("status") == "paid":
         try:
             code, collection = call_provider("GET", "orders/" + provider_order_id + "/payments")
@@ -156,6 +173,8 @@ def reconcile(db, payment_id, admin, provider_order_id, call_provider, now):
             code != 200
             or not isinstance(collection, dict)
             or not isinstance(collection.get("items"), list)
+            or len(collection["items"]) >= 100
+            or any(not isinstance(item, dict) for item in collection["items"])
         ):
             raise CheckoutUnavailable("Provider payment reconciliation unavailable")
         captures = [
@@ -178,6 +197,17 @@ def reconcile(db, payment_id, admin, provider_order_id, call_provider, now):
                 raise CheckoutUnavailable("Provider payment reconciliation unavailable")
             return code, evidence
 
+        was_pending = payment.state == "pending"
         verify_razorpay(db, payment.id, payment.user_id, provider_id, fetch, utc_now)
+        if was_pending:
+            audit(
+                db,
+                db.get(SavingsScheme, payment.scheme_id),
+                f"recover:{payment.id}",
+                "checkout_recovered",
+                actor_id,
+                provider_id,
+                utc_now(),
+            )
     db.flush()
     return payment

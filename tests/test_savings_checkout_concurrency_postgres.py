@@ -118,3 +118,75 @@ def test_verify_and_webhook_post_one_credit(local_postgres):
     with local_postgres() as db:
         assert balance(db, scheme_id) == (50000, 0, 0)
         assert db.query(SavingsEntry).filter_by(scheme_id=scheme_id).count() == 1
+
+
+def test_ready_refresh_and_webhook_credit_once(local_postgres):
+    from savings_checkout import refresh_checkout
+    from savings_models import SavingsAudit
+
+    user_id, scheme_id, payment_id = prepare(local_postgres, "ready_refresh_race")
+    order = {}
+
+    def create(method, path, payload=None):
+        assert (method, path) == ("POST", "orders")
+        order.update(payload, id="order_ready_refresh", entity="order", status="created")
+        return 200, order
+
+    with local_postgres() as db:
+        checkout(db, payment_id, user_id, create, START)
+        db.commit()
+    order["status"] = "paid"
+    evidence = dict(
+        id="pay_ready_refresh",
+        order_id=order["id"],
+        amount=50000,
+        currency="INR",
+        status="captured",
+        amount_refunded=0,
+        refunded=False,
+    )
+    reads = []
+
+    def provider_call(method, path, payload=None):
+        reads.append((method, path))
+        assert method == "GET"
+        if path == "orders/" + order["id"]:
+            return 200, order
+        if path == "orders/" + order["id"] + "/payments":
+            return 200, {"items": [evidence]}
+        if path == "payments/" + evidence["id"]:
+            return 200, evidence
+        raise AssertionError("Unexpected provider path")
+
+    provider = SimpleNamespace(fetch_razorpay_payment=lambda identity: (200, evidence))
+    start = Barrier(2)
+
+    def work(index):
+        with local_postgres() as db:
+            start.wait(timeout=20)
+            if index == 0:
+                refresh_checkout(db, payment_id, user_id, provider_call, utc_now())
+                db.commit()
+                return db.query(SavingsEntry).filter_by(payment_id=payment_id).one().id
+            return process_webhook(
+                db,
+                {"event": "payment.captured", "payload": {"payment": {"entity": evidence}}},
+                provider,
+            )["entry_id"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert len(set(pool.map(work, range(2)))) == 1
+    with local_postgres() as db:
+        assert balance(db, scheme_id) == (50000, 0, 0)
+        assert db.query(SavingsEntry).filter_by(payment_id=payment_id).count() == 1
+        assert (
+            db.query(SavingsAudit).filter_by(scheme_id=scheme_id, action="payment_posted").count()
+            == 1
+        )
+        assert (
+            db.query(SavingsAudit)
+            .filter_by(scheme_id=scheme_id, action="checkout_recovered")
+            .count()
+            <= 1
+        )
+    assert reads and all(method == "GET" for method, _ in reads)

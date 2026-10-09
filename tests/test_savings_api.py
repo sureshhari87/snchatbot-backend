@@ -122,6 +122,7 @@ def test_default_disabled_never_queries_savings_tables(client, test_engine, monk
     event.listen(test_engine, "before_cursor_execute", deny)
     try:
         assert client.get("/savings/schemes").status_code == 503
+        assert client.post("/savings/payments/1/refresh", json={}).status_code == 503
         assert client.post("/admin/savings/rates", json={}).status_code == 503
         assert client.post("/savings/payments/razorpay/webhook", content="{}").status_code == 503
     finally:
