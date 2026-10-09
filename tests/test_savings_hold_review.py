@@ -297,3 +297,27 @@ def test_release_rejects_nonadvancing_provider_pagination(
     monkeypatch.setattr(main, "call_razorpay", call)
     assert release(client, admin_headers, reviewed[2]).status_code == 409
     assert db.query(SavingsHoldDecision).count() == 0
+
+
+@pytest.mark.parametrize("include_count", [False, True])
+def test_release_rejects_null_test_dispute_collection_without_financial_writes(
+    client, auth_headers, admin_headers, reviewed, monkeypatch, db, include_count
+):
+    row, _, hold_id, _, _, _ = reviewed
+    original = main.call_razorpay
+
+    def call(method, path, payload=None):
+        if path.startswith("disputes?"):
+            data = {"entity": "collection", "items": None}
+            if include_count:
+                data["count"] = None
+            return 200, data
+        return original(method, path, payload)
+
+    monkeypatch.setattr(main, "call_razorpay", call)
+    assert release(client, admin_headers, hold_id).status_code == 409
+    state = client.get(f"/savings/schemes/{row['id']}", headers=auth_headers).json()
+    assert state["review_required"] and state["principal_paise"] == 50000
+    assert db.query(SavingsEntry).count() == 1
+    assert db.query(SavingsHoldDecision).count() == 0
+    assert db.query(SavingsAudit).filter_by(action="review_hold_released").count() == 0
