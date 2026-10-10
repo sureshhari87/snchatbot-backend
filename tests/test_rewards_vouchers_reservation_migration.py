@@ -17,9 +17,12 @@ from rewards_vouchers_reservation_models import FinancialReservation, FinancialR
 from rewards_vouchers_transactions import reserve
 
 
-def migrations(connection):
+def migrations(connection, *, include_funding=False):
     result = []
-    for filename in ("0027_rewards_vouchers_ledger.py", "0028_financial_reservations.py"):
+    filenames = ["0027_rewards_vouchers_ledger.py", "0028_financial_reservations.py"]
+    if include_funding:
+        filenames.append("0029_voucher_funding.py")
+    for filename in filenames:
         spec = importlib.util.spec_from_file_location(
             "financial_" + filename[:-3],
             Path(__file__).resolve().parents[1] / "alembic" / "versions" / filename,

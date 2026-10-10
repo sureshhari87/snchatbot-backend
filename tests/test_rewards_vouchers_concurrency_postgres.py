@@ -28,7 +28,12 @@ local_postgres = _pg
 @pytest.fixture(scope="module")
 def financial_postgres(local_postgres):
     engine = local_postgres.kw["bind"]
+    from voucher_funding_models import FinancialCheckoutAttempt, VoucherFunding, VoucherFundingEvent
+
     tables = [
+        FinancialCheckoutAttempt.__table__,
+        VoucherFundingEvent.__table__,
+        VoucherFunding.__table__,
         FinancialReservationEvent.__table__,
         FinancialReservation.__table__,
         RewardVoucherHold.__table__,
@@ -40,7 +45,7 @@ def financial_postgres(local_postgres):
     with engine.begin() as connection:
         for table in tables:
             table.drop(connection)
-        migrations(connection)
+        migrations(connection, include_funding=True)
     return local_postgres
 
 
@@ -368,3 +373,60 @@ def test_postgres_voucher_terms_cannot_change(financial_postgres, sql):
             db.execute(text(sql), dict(id=row_id))
         db.rollback()
         assert db.get(GiftVoucher, row_id).amount_paise == 20000
+
+
+@pytest.mark.parametrize("mode", ["manual", "razorpay"])
+def test_parallel_voucher_funding_posts_once(financial_postgres, monkeypatch, mode):
+    from cryptography.fernet import Fernet
+    from financial_test_provider import Provider
+
+    import voucher_funding as funding
+    from voucher_funding_models import VoucherFundingEvent
+
+    monkeypatch.setenv("VOUCHER_CODE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    factory = financial_postgres
+    user_id, actor_id = customers(factory, 2)
+    provider = Provider()
+    provider.call_razorpay = provider.call
+    with factory() as db:
+        db.get(User, actor_id).is_admin = True
+        row = funding.create(
+            db, purchaser_id=user_id, request_key="funding", amount_paise=50000, payment_mode=mode
+        )
+        voucher_id = row[0].id
+        db.commit()
+    payment_id = None
+    if mode == "razorpay":
+        with factory() as db:
+            _, checkout = funding.checkout(db, voucher_id, user_id, provider)
+            db.commit()
+            payment_id = provider.capture(checkout.provider_order_id)
+
+    def action(index):
+        with factory() as db:
+            if mode == "manual":
+                result = funding.fund_manual(
+                    db,
+                    voucher_id=voucher_id,
+                    actor_id=actor_id,
+                    confirmed_paise=50000,
+                    reference="verified-test-receipt",
+                    reason="Synthetic verified receipt",
+                )
+            else:
+                row, attempt = funding.locked(db, voucher_id, user_id)
+                result = funding.post_online(db, row, attempt, payment_id, provider)
+            db.commit()
+            return result["balance_paise"]
+
+    assert parallel(action) == [50000] * 4
+    with factory() as db:
+        assert db.get(GiftVoucher, voucher_id).balance_paise == 50000
+        assert db.query(GiftVoucherEntry).filter_by(voucher_id=voucher_id).count() == 1
+        assert (
+            db.query(VoucherFundingEvent)
+            .filter_by(voucher_id=voucher_id, action="funding_posted")
+            .count()
+            == 1
+        )
+        assert db.get(RewardAccount, user_id).balance_points == 100

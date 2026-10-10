@@ -92,7 +92,7 @@ opening-balance import/reset or production enablement was approved.
 - Audited holds are idempotent, require an administrator for manual review,
   and block new spending and unposted settlement. Holds never clear reservations
   or adjust balances. A provider adapter must authenticate and bind adverse
-  evidence before applying a refund/dispute hold; no public adapter exists yet.
+  evidence before applying a refund/dispute hold; the financial adapter now verifies evidence before holding.
 - Parallel tests prove customer reservations cannot over-reserve reward points,
   two customers cannot double-spend a bearer voucher, duplicate captures/holds
   create one posting/audit, and hold/reservation races preserve value.
@@ -100,8 +100,8 @@ opening-balance import/reset or production enablement was approved.
   synthetic isolated databases; they are not provider/device acceptance.
   Fresh backup/isolated restore and complete migration preservation acceptance
   remain required before an authorized staging rollout.
-- No reward/voucher endpoint, payment adapter or Flutter migration is installed.
-  SQL checkout continues to reject these unsupported financial requests.
+- Customer/admin APIs and a gated payment adapter are implemented locally below.
+  Flutter migration and live rollout remain pending.
   Referral/expiry, release and cash adjustment features are not implemented.
 
 ## Implementation constraints and acceptance
@@ -126,22 +126,58 @@ isolated restore, migration/deployment evidence and explicit rollout scope.
 Do not deploy production or alter existing staging push flags.
 
 
-## Remaining payment integration gates
+## Local voucher funding and payment APIs (unapplied 0029)
 
-Commit a durable reservation before any provider order creation. Reuse its
-receipt and recover an unknown creation/capture outcome before retrying; never
-release reserved value based on client cancellation or an arbitrary timeout.
-Bind the frozen catalogue items/coupon eligibility as well as money totals in
-the checkout adapter. Posting and inventory/cart finalization must share one
-transaction and a consistent global lock order; the current main checkout path
-has not been adapted and still rejects rewards/vouchers.
+Authenticated customer APIs now support one voucher per manual or Razorpay funding
+request, listing/history, explicit code recovery, validation, checkout, verification
+and refresh. Admin APIs require vouchers:manage or rewards:manage and provide audited
+manual confirmation, complimentary issuance, holds and reconciliation. Funding
+never earns rewards. Activation starts the approved 365-day expiry, with one ledger
+credit and posting audit. Bearer codes use 192 bits of randomness: only their hash
+and encrypted recovery copy persist. Codes are returned only by the explicit
+owner/assignee endpoint with no-store caching; they never enter provider notes.
 
-Provider adapters must use fresh authenticated reads, including refund/dispute
-review, rather than treating the internal payment dictionaries or a signed
-webhook payload as sufficient capture evidence. Persist an adverse hold in its
-own successful reconciliation transaction instead of raising an error that
-would roll the hold back. Verified/manual voucher funding, audited complimentary
-issuance, code issuance/recovery, customer/admin APIs, default-off feature gates,
-Flutter screens and controlled staging/provider/device acceptance remain work.
-No referral, automatic expiry of points, hold release or cash adjustment flow is
-enabled by this checkpoint.
+REWARDS_VOUCHERS_ENABLED defaults to 0. VOUCHER_CODE_ENCRYPTION_KEY must be supplied
+privately before issuing codes; retain that key for recovery. The example contains
+only a blank placeholder. Revisions 0027, 0028 and 0029 remain unapplied to live
+staging and production. No Flutter screens or live financial settings changed.
+
+The SQL /payments/razorpay/orders and verification flow now dispatch to a durable
+financial checkout when enabled. It requires a stable request_key, freezes server
+catalogue items and totals, reserves value before provider creation, and posts the
+ledger, stock, cart cleanup, order state and notification in one transaction.
+Coupon rules are still unconfigured and rejected; current SQL tax/delivery remain
+zero. The approved rules support separate charges but this phase invents none.
+Use /financial/checkout/quote for authoritative preview and the saved reservation
+refresh/admin reconciliation APIs for uncertain or callback-loss outcomes.
+
+A saved provider attempt is never replaced after a timeout. Only a freshly verified
+unattempted order can reopen checkout; a paid order recovers its original posting.
+Attempted/failed orders require review; no new-attempt or reservation-release policy
+is implemented. A voucher expiring after reservation blocks settlement and keeps
+its reservation for review. No automatic release, refund or balance adjustment
+exists. Holds remain held even after later clean provider reads.
+
+/financial/payments/razorpay/webhook validates the raw-body signature, then obtains
+fresh authenticated order, payment and refund/dispute evidence. The existing generic
+payment webhook also dispatches bound financial orders while enabled. Malformed,
+missing or bounded-pagination-exhausted evidence fails closed; signed payloads alone
+cannot credit balances. Adverse evidence records holds without reversing value.
+Legacy batch reconciliation excludes financial orders; use the dedicated recovery
+APIs to preserve the customer-first lock order.
+
+Provider protocol references: [create order](https://razorpay.com/docs/api/orders/create/),
+[order payments](https://razorpay.com/docs/api/orders/fetch-payments/),
+[disputes](https://razorpay.com/docs/api/disputes/fetch-all/), and
+[webhook validation](https://razorpay.com/docs/webhooks/validate-test/).
+
+Remaining gates: Flutter voucher/reward screens and typed payment request integration;
+separately authorized staging backup/isolated restore, migrations/deployment and TEST
+provider/device acceptance; failed-attempt and late-expiry reconciliation policy;
+referrals/reward expiry, hold release and balance adjustments. Legacy quantities,
+bulk funding and Firestore financial balances are not imported by this phase.
+
+Validation: 253 isolated API/ledger/payment/commerce/savings/custom-design tests
+passed, plus 18 disposable PostgreSQL reservation/hold/funding concurrency tests.
+Targeted Ruff and git diff --check passed. Provider calls were synthetic; these
+results do not establish live provider, webhook or phone acceptance.

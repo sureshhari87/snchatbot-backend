@@ -350,3 +350,21 @@ def test_hold_after_voucher_checkout_keeps_reserved_value(db):
     assert item.reserved_paise == 20000
     assert db.query(GiftVoucherEntry).count() == 0
     assert row.state == "ready"
+
+
+def test_expiry_after_reservation_blocks_late_posting_and_keeps_value(db, monkeypatch):
+    from datetime import timedelta
+
+    import rewards_vouchers_transactions
+    from rewards_vouchers_models import GiftVoucherEntry
+
+    item = voucher(db)
+    row, order, payment = ready(db, voucher_code="TEST-CODE")
+    monkeypatch.setattr(
+        rewards_vouchers_transactions, "utc_now", lambda: item.expires_at + timedelta(seconds=1)
+    )
+    with pytest.raises(HTTPException):
+        settle(db, reservation_id=row.id, user_id=1, provider_order=order, provider_payment=payment)
+    assert item.balance_paise == 20000 and item.reserved_paise == 20000
+    assert row.state == "ready"
+    assert db.query(GiftVoucherEntry).count() == 0

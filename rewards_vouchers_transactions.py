@@ -309,6 +309,12 @@ def settle(db, *, reservation_id, user_id, provider_order, provider_payment):
             "Voucher held for audited review",
         )
         require(
+            voucher.state == "active"
+            and voucher.expires_at is not None
+            and voucher.expires_at > utc_now(),
+            "Reserved voucher expired; audited review required",
+        )
+        require(
             voucher.reserved_paise >= row.voucher_paise
             and voucher.balance_paise >= row.voucher_paise,
             "Reserved voucher balance requires audited review",

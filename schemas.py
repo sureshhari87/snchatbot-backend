@@ -532,6 +532,7 @@ class OrderSyncRequest(BaseModel):
 
 
 class RazorpayOrderCreate(BaseModel):
+    request_key: Optional[str] = Field(default=None, min_length=1, max_length=100)
     commerce_source: Literal["auto", "fastapi"] = "auto"
     amount: Optional[int] = Field(default=None, ge=100)
     currency: str = Field(default="INR", min_length=3, max_length=3)
@@ -539,7 +540,7 @@ class RazorpayOrderCreate(BaseModel):
     notes: dict[str, Any] = Field(default_factory=dict)
     items: List[PaymentCartItem] = Field(default_factory=list)
     coupon_code: Optional[str] = Field(default=None, max_length=80)
-    reward_points_requested: int = Field(default=0, ge=0)
+    reward_points_requested: int = Field(default=0, strict=True, ge=0, le=9_223_372_036_854_775_807)
     gift_voucher_code: Optional[str] = Field(default=None, max_length=80)
     customer_name: Optional[str] = None
     customer_email: Optional[EmailStr] = None
@@ -579,6 +580,9 @@ class RazorpayOrderOut(BaseModel):
     reward_points_used: int = 0
     rewardPointsUsed: int = 0
     server_calculated: bool = True
+    voucher_redemption_paise: int = 0
+    reservation_id: Optional[int] = None
+    financial_quote: Optional[dict[str, Any]] = None
 
 
 class RazorpayPaymentVerifyRequest(BaseModel):

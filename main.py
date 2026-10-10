@@ -52,6 +52,9 @@ except Exception:  # pragma: no cover - optional production integration
 
 import custom_design_api
 import custom_design_payment_api
+import financial_api
+import financial_checkout
+import financial_events
 import push_devices
 import savings_api
 from catalogue_admin import install as install_catalogue_admin
@@ -2219,6 +2222,8 @@ ADMIN_PERMISSIONS = {
     "metrics:read",
     "support:manage",
     "savings:manage",
+    "vouchers:manage",
+    "rewards:manage",
     "knowledge:manage",
     "config:manage",
 }
@@ -4930,6 +4935,12 @@ def finalize_razorpay_payment(
     payment: dict[str, Any] | None = None,
     event_id: str | None = None,
 ) -> dict[str, Any]:
+    financial = financial_checkout.for_order(db, order)
+    if financial is not None:
+        return financial_checkout.finalize(
+            db, financial, order, payment_id, source, sys.modules[__name__], event_id
+        )
+
     # Serialize verify/webhook/reconciliation for this order. Refresh any stale
     # identity-map copy after waiting for the other transaction to commit.
     order = (
@@ -5193,6 +5204,10 @@ def apply_razorpay_webhook(
     db: Session,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    if financial_checkout.ENABLED:
+        result = financial_events.handle(db, payload, sys.modules[__name__])
+        if result is not None:
+            return result
     event_name = str(payload.get("event") or "unknown")
     payment = razorpay_entity(payload, "payment")
     refund = razorpay_entity(payload, "refund")
@@ -5352,6 +5367,16 @@ def reconcile_razorpay_orders(db: Session, limit: int = 50) -> dict[str, Any]:
         "errors": [],
     }
     for order in candidates:
+        metadata = order_raw_payload(order).get("metadata") or {}
+        if isinstance(metadata, dict) and metadata.get("financial_reservation_id"):
+            # Reconcile financial attempts individually to keep the global lock
+            # order consistent across customers, balances and inventory.
+            result["failed"] += 1
+            result["errors"].append({
+                "order_reference": order.order_reference,
+                "error": "dedicated_financial_reconciliation_required",
+            })
+            continue
         try:
             _, payments_response = call_razorpay(
                 "GET",
@@ -8938,6 +8963,11 @@ def create_razorpay_checkout_order(
     if not razorpay_checkout_is_configured():
         raise HTTPException(status_code=503, detail="Razorpay checkout API is not configured")
 
+    if financial_checkout.ENABLED and payload.commerce_source == "fastapi":
+        return financial_api.mutate(
+            db, lambda: financial_checkout.checkout(db, payload, current_user, sys.modules[__name__])
+        )
+
     hydrate_payment_firebase_identity(db, current_user, payload)
     calculation = authoritative_checkout_calculation(db, payload, current_user)
     request_payload = razorpay_order_request_payload(payload, current_user, calculation)
@@ -9213,6 +9243,10 @@ def verify_razorpay_checkout_payment(
     except HTTPException:
         db.commit()
         raise
+
+    if finalization["status"] == "held":
+        db.commit()
+        raise HTTPException(409, "Financial payment requires audited review")
 
     append_order_raw_payload(
         order,
@@ -9985,5 +10019,10 @@ custom_design_api.install(
     app, get_db, get_current_user, require_permission, sys.modules[__name__]
 )
 custom_design_payment_api.install(
+    app, get_db, get_current_user, require_permission, sys.modules[__name__]
+)
+
+
+financial_api.install(
     app, get_db, get_current_user, require_permission, sys.modules[__name__]
 )
