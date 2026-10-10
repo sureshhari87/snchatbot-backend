@@ -76,9 +76,30 @@ opening-balance import/reset or production enablement was approved.
   refuses downgrade when any new financial record exists.
 - Alembic metadata registers the models. The migration has NOT been applied.
   Live staging remains at revision 0026_custom_design_advances and backend e43ecf7.
-- 94 isolated arithmetic/migration tests passed. Ruff passed after import-order
-  correction. Tests exercise SQLite; PostgreSQL transaction/concurrency and
-  migration preservation tests remain required.
+- 154 financial tests passed: 138 local arithmetic, real SQLite migration and
+  transaction tests, plus 16 opt-in tests on disposable loopback PostgreSQL.
+  PostgreSQL tests never consume DATABASE_URL or contact staging/Neon. The
+  cluster was stopped successfully during fixture cleanup. Targeted Ruff passed.
+- Internal reservation/posting primitives reserve only available balances,
+  scope request keys to the authenticated customer, bind a provider receipt and
+  local order, and post debit/credit entries once. Posting rechecks provider
+  amount/currency/capture binding and recomputes earnings from the frozen quote.
+  Callers own the transaction; downstream failure rolls back the entire posting.
+- Draft revision 0028_financial_reservations freezes quote amounts/identity,
+  provider bindings after checkout, activation expiry and voucher identity.
+  Payment states move reserved -> ready -> posted. Audit entries are immutable,
+  and downgrade refuses to remove populated reservations.
+- Audited holds are idempotent, require an administrator for manual review,
+  and block new spending and unposted settlement. Holds never clear reservations
+  or adjust balances. A provider adapter must authenticate and bind adverse
+  evidence before applying a refund/dispute hold; no public adapter exists yet.
+- Parallel tests prove customer reservations cannot over-reserve reward points,
+  two customers cannot double-spend a bearer voucher, duplicate captures/holds
+  create one posting/audit, and hold/reservation races preserve value.
+- Revisions 0027/0028 remain unapplied to staging/production. These tests use
+  synthetic isolated databases; they are not provider/device acceptance.
+  Fresh backup/isolated restore and complete migration preservation acceptance
+  remain required before an authorized staging rollout.
 - No reward/voucher endpoint, payment adapter or Flutter migration is installed.
   SQL checkout continues to reject these unsupported financial requests.
   Referral/expiry, release and cash adjustment features are not implemented.
@@ -103,3 +124,24 @@ Keep new flows behind default-off flags until policy and staging acceptance pass
 A rewards/voucher staging rollout requires its own reviewed source, fresh backup,
 isolated restore, migration/deployment evidence and explicit rollout scope.
 Do not deploy production or alter existing staging push flags.
+
+
+## Remaining payment integration gates
+
+Commit a durable reservation before any provider order creation. Reuse its
+receipt and recover an unknown creation/capture outcome before retrying; never
+release reserved value based on client cancellation or an arbitrary timeout.
+Bind the frozen catalogue items/coupon eligibility as well as money totals in
+the checkout adapter. Posting and inventory/cart finalization must share one
+transaction and a consistent global lock order; the current main checkout path
+has not been adapted and still rejects rewards/vouchers.
+
+Provider adapters must use fresh authenticated reads, including refund/dispute
+review, rather than treating the internal payment dictionaries or a signed
+webhook payload as sufficient capture evidence. Persist an adverse hold in its
+own successful reconciliation transaction instead of raising an error that
+would roll the hold back. Verified/manual voucher funding, audited complimentary
+issuance, code issuance/recovery, customer/admin APIs, default-off feature gates,
+Flutter screens and controlled staging/provider/device acceptance remain work.
+No referral, automatic expiry of points, hold release or cash adjustment flow is
+enabled by this checkpoint.
