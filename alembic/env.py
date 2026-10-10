@@ -7,6 +7,7 @@ import custom_design_payments  # noqa: F401
 import models  # noqa: F401
 import push_devices  # noqa: F401
 import push_outbox  # noqa: F401
+import rewards_vouchers_models  # noqa: F401
 from alembic import context
 from config import DATABASE_URL
 from database import Base
