@@ -19,6 +19,12 @@ DATABASE = "snchatbot_staging"
 ROLE = "staging_owner"
 REVISION = "0019_push_outbox"
 SAVINGS_REVISION = "0024_savings_hold_review"
+CUSTOM_DESIGNS_REVISION = "0026_custom_design_advances"
+CUSTOM_DESIGNS_TABLES = {
+    "custom_designs", "custom_design_quotes", "custom_design_decisions",
+    "custom_design_audit", "custom_design_checkouts", "custom_design_advances",
+    "custom_design_holds",
+}
 SAVINGS_TABLES = {
     "savings_schemes",
     "savings_payments",
@@ -85,7 +91,7 @@ def clean_environment(url):
 
 
 def preflight(url, *, expected_revision=REVISION):
-    if expected_revision not in (REVISION, SAVINGS_REVISION):
+    if expected_revision not in (REVISION, SAVINGS_REVISION, CUSTOM_DESIGNS_REVISION):
         raise ValueError("Unsupported staging schema requirement")
     import psycopg
 
@@ -107,8 +113,10 @@ def preflight(url, *, expected_revision=REVISION):
             raise ValueError("Unexpected schema revision; no automatic stamp or migration allowed")
         if not {"push_devices", "push_events", "push_attempts"}.issubset(tables):
             raise ValueError("Required push schema tables are missing")
-        if expected_revision == SAVINGS_REVISION and not SAVINGS_TABLES.issubset(tables):
+        if expected_revision in (SAVINGS_REVISION, CUSTOM_DESIGNS_REVISION) and not SAVINGS_TABLES.issubset(tables):
             raise ValueError("Required savings schema tables are missing")
+        if expected_revision == CUSTOM_DESIGNS_REVISION and not CUSTOM_DESIGNS_TABLES.issubset(tables):
+            raise ValueError("Required custom-design schema tables are missing")
         return "ready"
 
 

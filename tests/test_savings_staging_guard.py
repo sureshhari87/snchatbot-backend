@@ -3,10 +3,17 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from scripts.local_staging import DATABASE, ROLE, SAVINGS_REVISION, SAVINGS_TABLES, preflight
-from scripts.render_staging import render_environment, verify_database
 from test_staging_push_revision import URL
+
+from scripts.local_staging import (
+    CUSTOM_DESIGNS_REVISION,
+    DATABASE,
+    ROLE,
+    SAVINGS_REVISION,
+    SAVINGS_TABLES,
+    preflight,
+)
+from scripts.render_staging import render_environment, verify_database
 
 
 def source(**updates):
@@ -45,11 +52,11 @@ def test_savings_schema_requires_every_table_read_only(missing):
         assert conn.execute.call_args_list[0].args == ("SET TRANSACTION READ ONLY",)
 
 
-def test_render_requires_savings_revision_even_while_feature_disabled():
+def test_render_requires_current_financial_revision_even_while_feature_disabled():
     with patch("scripts.render_staging.preflight", return_value="empty") as check:
         with pytest.raises(ValueError):
             verify_database(URL)
-        check.assert_called_once_with(URL, expected_revision=SAVINGS_REVISION)
+        check.assert_called_once_with(URL, expected_revision=CUSTOM_DESIGNS_REVISION)
 
 
 def test_unknown_schema_requirement_never_connects():
