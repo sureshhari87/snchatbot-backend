@@ -8,7 +8,7 @@ import psycopg
 
 from scripts.check_staging_delivery import diagnose, error_category
 from scripts.configure_staging_delivery import approved_routes
-from scripts.local_staging import REVISION
+from scripts.local_staging import FINANCIAL_REVISION
 
 URL = "postgresql://staging_owner:test-password@ep-example.neon.tech/snchatbot_staging?sslmode=require"
 HOST = "ep-example.neon.tech"
@@ -64,7 +64,7 @@ class DeliveryDiagnosticTests(unittest.TestCase):
                     row,
                     (True, True),
                 ]
-                conn.execute.return_value.fetchall.return_value = [(REVISION,)]
+                conn.execute.return_value.fetchall.return_value = [(FINANCIAL_REVISION,)]
                 result = diagnose(URL, HOST)
                 self.assertEqual(result["delivery"], expected)
                 sql = [call.args[0] for call in conn.execute.call_args_list]
@@ -90,7 +90,7 @@ class DeliveryDiagnosticTests(unittest.TestCase):
                 ("snchatbot_staging", "staging_owner"),
                 psycopg.errors.InsufficientPrivilege("private error " + URL),
             ]
-            conn.execute.return_value.fetchall.return_value = [(REVISION,)]
+            conn.execute.return_value.fetchall.return_value = [(FINANCIAL_REVISION,)]
             result = diagnose(URL, HOST)
         self.assertEqual(result["phase"], "DELIVERY_READ")
         self.assertEqual(result["category"], "PERMISSION")

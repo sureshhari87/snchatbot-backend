@@ -9,6 +9,7 @@ import pytest
 from commerce import DeliveryRequest, delivery_quote
 from models import AppConfigEntry, Product
 from scripts.configure_staging_delivery import approved_routes, configure, validate_existing
+from scripts.local_staging import FINANCIAL_REVISION
 
 URL = "postgresql://staging_owner:dummy@ep-example.neon.tech/snchatbot_staging?sslmode=require"
 
@@ -84,7 +85,9 @@ def test_wrong_host_or_production_target_never_connects():
 
 def test_existing_rules_are_not_overwritten():
     with (
-        patch("scripts.configure_staging_delivery.preflight", return_value="ready"),
+        patch(
+            "scripts.configure_staging_delivery.preflight", return_value="ready"
+        ) as preflight,
         patch("psycopg.connect") as connect,
     ):
         conn = connect.return_value.__enter__.return_value
@@ -94,6 +97,7 @@ def test_existing_rules_are_not_overwritten():
         ]
         with pytest.raises(ValueError):
             configure(URL, "ep-example.neon.tech")
+        preflight.assert_called_once_with(URL, expected_revision=FINANCIAL_REVISION)
         assert all(
             not call.args[0].startswith(("INSERT", "UPDATE", "DELETE"))
             for call in conn.execute.call_args_list
@@ -103,7 +107,9 @@ def test_existing_rules_are_not_overwritten():
 @pytest.mark.parametrize("existing,write", [(None, "INSERT"), (("[]", False), "UPDATE")])
 def test_configure_writes_only_approved_private_route(existing, write):
     with (
-        patch("scripts.configure_staging_delivery.preflight", return_value="ready"),
+        patch(
+            "scripts.configure_staging_delivery.preflight", return_value="ready"
+        ) as preflight,
         patch("psycopg.connect") as connect,
     ):
         conn = connect.return_value.__enter__.return_value
@@ -113,6 +119,7 @@ def test_configure_writes_only_approved_private_route(existing, write):
             (json.dumps(approved_routes()),),
         ]
         assert configure(URL, "ep-example.neon.tech") == "configured"
+        preflight.assert_called_once_with(URL, expected_revision=FINANCIAL_REVISION)
         writes = [
             c
             for c in conn.execute.call_args_list
@@ -125,7 +132,9 @@ def test_configure_writes_only_approved_private_route(existing, write):
 
 def test_configure_repeated_run_does_not_write():
     with (
-        patch("scripts.configure_staging_delivery.preflight", return_value="ready"),
+        patch(
+            "scripts.configure_staging_delivery.preflight", return_value="ready"
+        ) as preflight,
         patch("psycopg.connect") as connect,
     ):
         conn = connect.return_value.__enter__.return_value
@@ -134,6 +143,7 @@ def test_configure_repeated_run_does_not_write():
             (json.dumps(approved_routes()), False),
         ]
         assert configure(URL, "ep-example.neon.tech") == "already_configured"
+        preflight.assert_called_once_with(URL, expected_revision=FINANCIAL_REVISION)
         assert all(
             not c.args[0].startswith(("INSERT", "UPDATE", "DELETE"))
             for c in conn.execute.call_args_list

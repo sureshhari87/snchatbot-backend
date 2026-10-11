@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.configure_staging_delivery import KEY, validate_existing  # noqa: E402
-from scripts.local_staging import DATABASE, REVISION, ROLE, validate_url  # noqa: E402
+from scripts.local_staging import DATABASE, FINANCIAL_REVISION, ROLE, validate_url  # noqa: E402
 
 
 def error_category(error):
@@ -80,7 +80,9 @@ def diagnose(url, expected_host):
             ):
                 return {"status": "stopped", "phase": phase, "category": "IDENTITY_MISMATCH"}
             phase = "SCHEMA"
-            if conn.execute("SELECT version_num FROM alembic_version").fetchall() != [(REVISION,)]:
+            if conn.execute("SELECT version_num FROM alembic_version").fetchall() != [
+                (FINANCIAL_REVISION,)
+            ]:
                 return {"status": "stopped", "phase": phase, "category": "REVISION_MISMATCH"}
             phase = "DELIVERY_READ"
             row = conn.execute(

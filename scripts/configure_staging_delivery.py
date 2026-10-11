@@ -9,7 +9,13 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.local_staging import DATABASE, ROLE, preflight, validate_url  # noqa: E402
+from scripts.local_staging import (  # noqa: E402
+    DATABASE,
+    FINANCIAL_REVISION,
+    ROLE,
+    preflight,
+    validate_url,
+)
 
 KEY = "commerce.delivery_routes"
 PIN = "625009"
@@ -45,7 +51,7 @@ def configure(url, expected_host):
     url = validate_url(url)
     if not expected_host or urlparse(url).hostname != expected_host:
         raise ValueError("Expected hostname must match Render's staging hostname setting")
-    if preflight(url) != "ready":
+    if preflight(url, expected_revision=FINANCIAL_REVISION) != "ready":
         raise ValueError("Staging schema must already be migrated")
     with psycopg.connect(url, connect_timeout=10) as conn:
         identity = conn.execute("SELECT current_database(), current_user").fetchone()

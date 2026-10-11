@@ -60,6 +60,8 @@ At the prompts:
 The helper refuses non-staging role/database names, a different host, an unexpected schema,
 public config entries, or existing nonmatching delivery rules. It creates a private
 `commerce.delivery_routes` entry only if missing, or populates an existing empty array.
+The delivery helpers require the current staging schema revision `0029_voucher_funding`;
+they do not downgrade, stamp, or migrate the database.
 Running it again with the exact same route makes no change. It never resets inventory,
 changes schema, sends SMS, creates a payment, or configures production.
 
