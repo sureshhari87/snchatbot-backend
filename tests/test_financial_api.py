@@ -366,6 +366,40 @@ def test_provider_collection_failure_keeps_voucher_unfunded_then_recovers(
     assert db.query(GiftVoucherEntry).count() == 1
 
 
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"entity": "collection", "has_more": False},
+        {"entity": "collection", "items": None, "count": None},
+        {"entity": "collection", "items": [], "count": "0"},
+    ],
+)
+def test_incomplete_dispute_evidence_never_credits_voucher_then_recovers_once(
+    client, auth_headers, provider, db, monkeypatch, envelope
+):
+    row, proof = online(client, auth_headers, provider)
+    original = main.call_razorpay
+
+    def incomplete(method, path, *args, **kwargs):
+        if method == "GET" and path.split("?")[0] == "disputes":
+            return 200, envelope
+        return original(method, path, *args, **kwargs)
+
+    monkeypatch.setattr(main, "call_razorpay", incomplete)
+    for _ in range(2):
+        assert verify(client, auth_headers, row, proof).status_code == 503
+        assert db.get(GiftVoucher, row["id"]).state == "pending"
+        assert db.get(GiftVoucher, row["id"]).balance_paise == 0
+        assert db.query(GiftVoucherEntry).count() == 0
+        assert db.query(VoucherFundingEvent).filter_by(action="funding_posted").count() == 0
+    monkeypatch.setattr(main, "call_razorpay", original)
+    for _ in range(2):
+        assert verify(client, auth_headers, row, proof).status_code == 200
+    assert db.get(GiftVoucher, row["id"]).balance_paise == 50000
+    assert db.query(GiftVoucherEntry).count() == 1
+    assert db.query(VoucherFundingEvent).filter_by(action="funding_posted").count() == 1
+
+
 def test_refund_before_capture_event_persists_hold_without_credit(
     client, auth_headers, provider, db
 ):
