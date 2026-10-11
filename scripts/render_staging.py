@@ -12,7 +12,7 @@ BIND_HOST = "0.0.0.0"  # nosec B104
 sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
-    CUSTOM_DESIGNS_REVISION,
+    FINANCIAL_REVISION,
     payment_test_environment,
     preflight,
     sms_staging_environment,
@@ -47,7 +47,7 @@ def render_environment(source):
         env.update(webhook_test_environment(env["RAZORPAY_WEBHOOK_SECRET"]))
     if any(
         env.get(flag, "0").lower() in {"1", "true", "yes", "on"}
-        for flag in ("SAVINGS_ENABLED", "CUSTOM_DESIGNS_ENABLED")
+        for flag in ("SAVINGS_ENABLED", "CUSTOM_DESIGNS_ENABLED", "REWARDS_VOUCHERS_ENABLED")
     ):
         if not key_id or not key_secret or len(env.get("RAZORPAY_WEBHOOK_SECRET", "")) < 32:
             raise ValueError(
@@ -66,6 +66,16 @@ def render_environment(source):
                 env.get("PHONE_AUTH_PEPPER", ""),
             )
         )
+    financial = env.get("REWARDS_VOUCHERS_ENABLED", "0").lower()
+    if financial not in {"0", "false", "no", "off", "1", "true", "yes", "on"}:
+        raise ValueError("Invalid financial feature flag")
+    if financial in {"1", "true", "yes", "on"}:
+        from cryptography.fernet import Fernet
+
+        try:
+            Fernet(env.get("VOUCHER_CODE_ENCRYPTION_KEY", "").encode("ascii"))
+        except (ValueError, UnicodeError) as error:
+            raise ValueError("A dedicated voucher encryption key is required") from error
     admin_origin = env.get("STAGING_ADMIN_ORIGIN", "").strip()
     if admin_origin not in {"", "http://localhost:7357", "http://127.0.0.1:7357"}:
         raise ValueError("STAGING_ADMIN_ORIGIN must be the exact local review console origin")
@@ -97,7 +107,7 @@ def render_environment(source):
 
 
 def verify_database(url):
-    if preflight(url, expected_revision=CUSTOM_DESIGNS_REVISION) != "ready":
+    if preflight(url, expected_revision=FINANCIAL_REVISION) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg
 

@@ -6,8 +6,8 @@ import pytest
 from test_staging_push_revision import URL
 
 from scripts.local_staging import (
-    CUSTOM_DESIGNS_REVISION,
     DATABASE,
+    FINANCIAL_REVISION,
     ROLE,
     SAVINGS_REVISION,
     SAVINGS_TABLES,
@@ -56,7 +56,7 @@ def test_render_requires_current_financial_revision_even_while_feature_disabled(
     with patch("scripts.render_staging.preflight", return_value="empty") as check:
         with pytest.raises(ValueError):
             verify_database(URL)
-        check.assert_called_once_with(URL, expected_revision=CUSTOM_DESIGNS_REVISION)
+        check.assert_called_once_with(URL, expected_revision=FINANCIAL_REVISION)
 
 
 def test_unknown_schema_requirement_never_connects():
