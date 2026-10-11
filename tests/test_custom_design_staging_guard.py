@@ -55,8 +55,8 @@ def test_custom_only_activation_rejects_unsafe_provider_or_sending(changes):
         CUSTOM_DESIGNS_ENABLED="1",
         SAVINGS_ENABLED="0",
         RAZORPAY_KEY_ID="rzp_test_synthetic",
-        RAZORPAY_KEY_SECRET="synthetic",
-        RAZORPAY_WEBHOOK_SECRET="synthetic-only" * 4,
+        RAZORPAY_KEY_SECRET="test-synthetic",
+        RAZORPAY_WEBHOOK_SECRET="test-synthetic-only" * 4,
         PUSH_OUTBOX_ENABLED="0",
         PUSH_DELIVERY_ENABLED="0",
     )
@@ -70,8 +70,8 @@ def test_custom_only_activation_accepts_test_mode_without_enabling_push():
         CUSTOM_DESIGNS_ENABLED="1",
         SAVINGS_ENABLED="0",
         RAZORPAY_KEY_ID="rzp_test_synthetic",
-        RAZORPAY_KEY_SECRET="synthetic",
-        RAZORPAY_WEBHOOK_SECRET="synthetic-only" * 4,
+        RAZORPAY_KEY_SECRET="test-synthetic",
+        RAZORPAY_WEBHOOK_SECRET="test-synthetic-only" * 4,
         PUSH_OUTBOX_ENABLED="0",
         PUSH_DELIVERY_ENABLED="0",
     )
