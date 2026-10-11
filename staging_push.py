@@ -31,7 +31,8 @@ def verify_database(factory):
             if (
                 not expected_host.endswith(".neon.tech")
                 or db.get_bind().url.host != expected_host
-                or db.get_bind().url.query.get("sslmode") not in {"require", "verify-ca", "verify-full"}
+                or db.get_bind().url.query.get("sslmode")
+                not in {"require", "verify-ca", "verify-full"}
             ):
                 raise ValueError("Staging host confirmation required")
             db.execute(text("SET TRANSACTION READ ONLY"))

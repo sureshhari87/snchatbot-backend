@@ -89,7 +89,9 @@ class ReviewHelpfulVote(Base):
 
 class CustomerNotification(Base):
     __tablename__ = "customer_notifications"
-    __table_args__ = (UniqueConstraint("user_id", "deduplication_key", name="uq_notification_recipient_key"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "deduplication_key", name="uq_notification_recipient_key"),
+    )
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     # NULL denotes a backend-generated event, never a customer impersonating admin.

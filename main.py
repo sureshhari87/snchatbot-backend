@@ -2339,8 +2339,10 @@ def notification_settings_for_user(
     # between creating default settings and applying a PATCH.
     push_devices.lock_owner(db, user_id)
     settings_row = (
-        db.query(NotificationSettings).filter(NotificationSettings.user_id == user_id)
-        .populate_existing().first()
+        db.query(NotificationSettings)
+        .filter(NotificationSettings.user_id == user_id)
+        .populate_existing()
+        .first()
     )
     if settings_row:
         return settings_row
@@ -4967,7 +4969,8 @@ def finalize_razorpay_payment(
         return {"status": "idempotent", "order": order}
 
     if order_finalization(order).get("status") == "finalized" or order.payment_status in {
-        "verified", "paid"
+        "verified",
+        "paid",
     }:
         raise HTTPException(status_code=409, detail="Order already finalized with another payment")
 
@@ -5246,8 +5249,10 @@ def apply_razorpay_webhook(
     # Another delivery may have committed while this request waited for the order lock.
     if order is not None and razorpay_webhook_event_exists(db, event_id):
         return {
-            "event": event_name, "status": "duplicate",
-            "order_reference": razorpay_order_id or None, "payment_id": payment_id or None,
+            "event": event_name,
+            "status": "duplicate",
+            "order_reference": razorpay_order_id or None,
+            "payment_id": payment_id or None,
         }
     response_payload: dict[str, Any] = {}
     status_value = "unmatched"
@@ -5372,10 +5377,12 @@ def reconcile_razorpay_orders(db: Session, limit: int = 50) -> dict[str, Any]:
             # Reconcile financial attempts individually to keep the global lock
             # order consistent across customers, balances and inventory.
             result["failed"] += 1
-            result["errors"].append({
-                "order_reference": order.order_reference,
-                "error": "dedicated_financial_reconciliation_required",
-            })
+            result["errors"].append(
+                {
+                    "order_reference": order.order_reference,
+                    "error": "dedicated_financial_reconciliation_required",
+                }
+            )
             continue
         try:
             _, payments_response = call_razorpay(
@@ -7144,8 +7151,10 @@ def refresh_token_endpoint(
         # Same owner-first lock order as registration and logout.
         db.query(User).filter(User.email == email).with_for_update().first()
     stored_token = (
-        db.query(RefreshToken).filter(RefreshToken.token == req.refresh_token)
-        .populate_existing().first()
+        db.query(RefreshToken)
+        .filter(RefreshToken.token == req.refresh_token)
+        .populate_existing()
+        .first()
     )
 
     if not stored_token:
@@ -7278,8 +7287,10 @@ def logout(
             family_tokens = (
                 db.query(RefreshToken)
                 .filter_by(user_id=current_user.id, family_id=token_row.family_id)
-                .populate_existing().all()
-                if token_row.family_id else [token_row]
+                .populate_existing()
+                .all()
+                if token_row.family_id
+                else [token_row]
             )
             for family_token in family_tokens:
                 revoke_refresh_token(family_token, "logout", request)
@@ -8965,7 +8976,8 @@ def create_razorpay_checkout_order(
 
     if financial_checkout.ENABLED and payload.commerce_source == "fastapi":
         return financial_api.mutate(
-            db, lambda: financial_checkout.checkout(db, payload, current_user, sys.modules[__name__])
+            db,
+            lambda: financial_checkout.checkout(db, payload, current_user, sys.modules[__name__]),
         )
 
     hydrate_payment_firebase_identity(db, current_user, payload)
@@ -9818,9 +9830,7 @@ def chat(
 
 @app.post("/forgot-password", response_model=MessageResponse)
 @limiter.limit("3/minute")
-def forgot_password(
-    request: Request, req: ForgotPasswordRequest, db: Session = Depends(get_db)
-):
+def forgot_password(request: Request, req: ForgotPasswordRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == req.email).first()
 
     generic_response = MessageResponse(
@@ -9856,9 +9866,7 @@ def reset_password_page(token: str = Query(...)):
 
 @app.post("/reset-password", response_model=MessageResponse)
 @limiter.limit("5/minute")
-def reset_password(
-    request: Request, req: ResetPasswordRequest, db: Session = Depends(get_db)
-):
+def reset_password(request: Request, req: ResetPasswordRequest, db: Session = Depends(get_db)):
     return reset_password_with_token(db, req.token, req.new_password, request)
 
 
@@ -10015,14 +10023,10 @@ push_devices.install(app, get_db, get_current_user, limiter)
 
 
 savings_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])
-custom_design_api.install(
-    app, get_db, get_current_user, require_permission, sys.modules[__name__]
-)
+custom_design_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])
 custom_design_payment_api.install(
     app, get_db, get_current_user, require_permission, sys.modules[__name__]
 )
 
 
-financial_api.install(
-    app, get_db, get_current_user, require_permission, sys.modules[__name__]
-)
+financial_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])

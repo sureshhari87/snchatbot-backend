@@ -22,15 +22,31 @@ def main(argv=None):
         allowed = recipients()
         verify_database(SessionLocal)
         with SessionLocal() as db:
-            count = db.query(PushAttempt).join(PushEvent).filter(
-                PushEvent.user_id.in_(allowed), PushAttempt.state == "pending",
-                PushAttempt.due_at <= utc_now(),
-            ).count()
-        print(json.dumps({"staging_identity": "verified", "allowlisted_due_attempts": count,
-                          "send_requested": args.send, "limit": args.limit}))
+            count = (
+                db.query(PushAttempt)
+                .join(PushEvent)
+                .filter(
+                    PushEvent.user_id.in_(allowed),
+                    PushAttempt.state == "pending",
+                    PushAttempt.due_at <= utc_now(),
+                )
+                .count()
+            )
+        print(
+            json.dumps(
+                {
+                    "staging_identity": "verified",
+                    "allowlisted_due_attempts": count,
+                    "send_requested": args.send,
+                    "limit": args.limit,
+                }
+            )
+        )
         if not args.send or count == 0:
             return 0
-        confirmation = input("Real staging push to allowlisted devices only. Type SEND_STAGING_PUSH: ")
+        confirmation = input(
+            "Real staging push to allowlisted devices only. Type SEND_STAGING_PUSH: "
+        )
         if confirmation != "SEND_STAGING_PUSH":
             print("Cancelled. No push sent.")
             return 1
@@ -44,7 +60,9 @@ def main(argv=None):
         return 0
     except (Exception, KeyboardInterrupt):
         print("Staging push stopped. Inspect configuration privately; no credentials displayed.")
-        print("If sending had begun, provider acceptance may already have occurred. Check queue state.")
+        print(
+            "If sending had begun, provider acceptance may already have occurred. Check queue state."
+        )
         return 1
 
 

@@ -1,4 +1,5 @@
 """Add recipient-owned notification inbox. No legacy records are deleted."""
+
 import sqlalchemy as sa
 
 from alembic import op

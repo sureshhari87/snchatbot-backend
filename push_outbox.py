@@ -222,17 +222,14 @@ def run_batch(factory, sender, *, enabled=False, limit=25, allowed_user_ids=None
             query = query.filter(PushEvent.user_id.in_(allowed_user_ids))
         ids = [
             row.id
-            for row in query
-            .filter(PushAttempt.state == "pending", PushAttempt.due_at <= utc_now())
+            for row in query.filter(PushAttempt.state == "pending", PushAttempt.due_at <= utc_now())
             .order_by(PushAttempt.due_at, PushAttempt.id)
             .limit(limit)
             .all()
         ]
     outcomes = []
     for key in ids:
-        outcome = deliver_one(
-            factory, key, sender, enabled=True, allowed_user_ids=allowed_user_ids
-        )
+        outcome = deliver_one(factory, key, sender, enabled=True, allowed_user_ids=allowed_user_ids)
         outcomes.append(outcome)
         if outcome == "provider_unavailable":
             break

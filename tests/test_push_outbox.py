@@ -204,13 +204,16 @@ def test_provider_retry_after_is_honoured(queued):
 
 def test_unallowlisted_recipient_is_not_sent_or_mutated(queued):
     factory, uid, aid = queued
+
     def forbidden(*args):
         pytest.fail("Unapproved recipient reached sender")
+
     assert run_batch(factory, forbidden, enabled=True, allowed_user_ids={uid + 1}) == []
-    assert deliver_one(factory, aid, forbidden, enabled=True,
-                       allowed_user_ids=set()) == "recipient_not_allowed"
+    assert (
+        deliver_one(factory, aid, forbidden, enabled=True, allowed_user_ids=set())
+        == "recipient_not_allowed"
+    )
     with factory() as db:
         row = db.get(PushAttempt, aid)
         assert row.state == "pending" and row.attempts == 0 and row.reason is None
-    assert run_batch(factory, lambda *args: None, enabled=True,
-                     allowed_user_ids={uid}) == ["sent"]
+    assert run_batch(factory, lambda *args: None, enabled=True, allowed_user_ids={uid}) == ["sent"]

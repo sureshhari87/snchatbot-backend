@@ -41,9 +41,10 @@ class Database:
         pass
 
     def get_bind(self):
-        return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"),
-                               url=SimpleNamespace(host="ep-synthetic.neon.tech",
-                                                   query={"sslmode": "require"}))
+        return SimpleNamespace(
+            dialect=SimpleNamespace(name="postgresql"),
+            url=SimpleNamespace(host="ep-synthetic.neon.tech", query={"sslmode": "require"}),
+        )
 
     def execute(self, sql):
         self.statements.append(str(sql))
@@ -66,11 +67,14 @@ def test_identity_schema_check_is_read_only():
     assert recipients() == {3, 5}
 
 
-@pytest.mark.parametrize("identity,versions", [
-    (("neondb", "neondb_owner"), ["0019_push_outbox"]),
-    (("snchatbot_staging", "neondb_owner"), ["0019_push_outbox"]),
-    (("snchatbot_staging", "staging_owner"), ["0018_push_devices"]),
-])
+@pytest.mark.parametrize(
+    "identity,versions",
+    [
+        (("neondb", "neondb_owner"), ["0019_push_outbox"]),
+        (("snchatbot_staging", "neondb_owner"), ["0019_push_outbox"]),
+        (("snchatbot_staging", "staging_owner"), ["0018_push_devices"]),
+    ],
+)
 def test_wrong_database_role_or_revision_rejected(identity, versions):
     db = Database()
     db.identity, db.versions = identity, versions
@@ -86,8 +90,10 @@ def test_wrong_host_rejected(monkeypatch):
 
 def test_database_guard_runs_before_credentials(monkeypatch):
     monkeypatch.setattr(fcm_sender, "delivery_enabled", lambda: True)
+
     def reject(factory):
         raise DeliveryUnavailableError("Blocked")
+
     monkeypatch.setattr(fcm_sender, "verify_database", reject)
     monkeypatch.setattr(fcm_sender, "prepare_sender", lambda: pytest.fail("Credentials loaded"))
     with pytest.raises(DeliveryUnavailableError):
@@ -113,10 +119,13 @@ def test_operator_default_and_cancel_never_load_sender(monkeypatch):
     class Queue(Database):
         def query(self, *args):
             return self
+
         def join(self, *args):
             return self
+
         def filter(self, *args):
             return self
+
         def count(self):
             return 1
 
@@ -135,13 +144,17 @@ def test_batch_is_filtered_and_sender_closed(monkeypatch):
     calls = []
     monkeypatch.setattr(fcm_sender, "delivery_enabled", lambda: True)
     monkeypatch.setattr(fcm_sender, "verify_database", lambda factory: calls.append("verified"))
+
     def prepare():
         assert calls == ["verified"]
         return SimpleNamespace(close=lambda: calls.append("closed"))
+
     monkeypatch.setattr(fcm_sender, "prepare_sender", prepare)
+
     def batch(factory, sender, **kwargs):
         assert kwargs == {"enabled": True, "limit": 1, "allowed_user_ids": {3, 5}}
         return ["sent"]
+
     monkeypatch.setattr(push_outbox, "run_batch", batch)
     assert fcm_sender.run_configured_batch(None) == ["sent"]
     assert calls == ["verified", "closed"]

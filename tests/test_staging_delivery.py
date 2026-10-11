@@ -85,9 +85,7 @@ def test_wrong_host_or_production_target_never_connects():
 
 def test_existing_rules_are_not_overwritten():
     with (
-        patch(
-            "scripts.configure_staging_delivery.preflight", return_value="ready"
-        ) as preflight,
+        patch("scripts.configure_staging_delivery.preflight", return_value="ready") as preflight,
         patch("psycopg.connect") as connect,
     ):
         conn = connect.return_value.__enter__.return_value
@@ -107,9 +105,7 @@ def test_existing_rules_are_not_overwritten():
 @pytest.mark.parametrize("existing,write", [(None, "INSERT"), (("[]", False), "UPDATE")])
 def test_configure_writes_only_approved_private_route(existing, write):
     with (
-        patch(
-            "scripts.configure_staging_delivery.preflight", return_value="ready"
-        ) as preflight,
+        patch("scripts.configure_staging_delivery.preflight", return_value="ready") as preflight,
         patch("psycopg.connect") as connect,
     ):
         conn = connect.return_value.__enter__.return_value
@@ -132,9 +128,7 @@ def test_configure_writes_only_approved_private_route(existing, write):
 
 def test_configure_repeated_run_does_not_write():
     with (
-        patch(
-            "scripts.configure_staging_delivery.preflight", return_value="ready"
-        ) as preflight,
+        patch("scripts.configure_staging_delivery.preflight", return_value="ready") as preflight,
         patch("psycopg.connect") as connect,
     ):
         conn = connect.return_value.__enter__.return_value

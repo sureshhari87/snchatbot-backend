@@ -602,9 +602,11 @@ def test_razorpay_payment_verify_marks_order_paid(
     assert second_response.json()["verified"] is True
     db.refresh(product)
     assert product.stock_quantity == 4
-    message = db.query(CustomerNotification).filter_by(
-        deduplication_key=f"payment-verified:{order.id}"
-    ).one()
+    message = (
+        db.query(CustomerNotification)
+        .filter_by(deduplication_key=f"payment-verified:{order.id}")
+        .one()
+    )
     assert message.user_id == order.user_id
     assert message.created_by is None
     assert message.read_at is None
@@ -906,10 +908,15 @@ def test_razorpay_webhook_duplicate_capture_is_idempotent(
         signature = hmac.new(
             b"rzp_test_secret", b"order_dup_1001|pay_dup_1001", hashlib.sha256
         ).hexdigest()
-        response = client.post("/payments/razorpay/verify", headers=auth_headers, json={
-            "razorpay_order_id": "order_dup_1001", "razorpay_payment_id": "pay_dup_1001",
-            "razorpay_signature": signature,
-        })
+        response = client.post(
+            "/payments/razorpay/verify",
+            headers=auth_headers,
+            json={
+                "razorpay_order_id": "order_dup_1001",
+                "razorpay_payment_id": "pay_dup_1001",
+                "razorpay_signature": signature,
+            },
+        )
         assert response.status_code == 200
 
     if verify_first:
@@ -938,9 +945,17 @@ def test_razorpay_webhook_duplicate_capture_is_idempotent(
     # A different delivery ID must not repeat inventory or the notification.
     webhook_payload["id"] = "evt_duplicate_capture_new_delivery"
     raw_body, signature = razorpay_signature(webhook_payload, "test_webhook_secret")
-    assert client.post("/payments/razorpay/webhook", content=raw_body, headers={
-        "Content-Type": "application/json", "X-Razorpay-Signature": signature,
-    }).status_code == 200
+    assert (
+        client.post(
+            "/payments/razorpay/webhook",
+            content=raw_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Razorpay-Signature": signature,
+            },
+        ).status_code
+        == 200
+    )
     product = db.query(Product).filter(Product.id == 1).one()
     assert product.stock_quantity == 7
     finalized_events = (
@@ -955,9 +970,11 @@ def test_razorpay_webhook_duplicate_capture_is_idempotent(
         .all()
     )
     assert len(webhook_events) == 1
-    messages = db.query(CustomerNotification).filter(
-        CustomerNotification.deduplication_key.like("payment-verified:%")
-    ).all()
+    messages = (
+        db.query(CustomerNotification)
+        .filter(CustomerNotification.deduplication_key.like("payment-verified:%"))
+        .all()
+    )
     assert len(messages) == 1
     assert messages[0].created_by is None
 

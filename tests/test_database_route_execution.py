@@ -29,8 +29,11 @@ def test_concurrent_requests_release_small_pool(tmp_path, monkeypatch):
 
     engine = create_engine(
         "sqlite:///" + str(tmp_path / "concurrency.db"),
-        connect_args={"check_same_thread": False}, poolclass=QueuePool,
-        pool_size=2, max_overflow=0, pool_timeout=1,
+        connect_args={"check_same_thread": False},
+        poolclass=QueuePool,
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=1,
     )
     factory = sessionmaker(bind=engine)
     Base.metadata.create_all(engine)

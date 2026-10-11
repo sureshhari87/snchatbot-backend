@@ -18,7 +18,9 @@ class ReviewInput(BaseModel):
     title: str = Field(default="", max_length=120)
     body: str = Field(min_length=10, max_length=2000)
     fit: Literal["notApplicable", "runsSmall", "trueToSize", "runsLarge"] = "notApplicable"
-    size_feedback: Literal["notApplicable", "comfortable", "tight", "loose", "adjustable"] = "notApplicable"
+    size_feedback: Literal["notApplicable", "comfortable", "tight", "loose", "adjustable"] = (
+        "notApplicable"
+    )
 
 
 class ModerationInput(BaseModel):

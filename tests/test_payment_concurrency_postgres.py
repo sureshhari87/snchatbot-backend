@@ -44,18 +44,41 @@ def local_postgres(tmp_path_factory):
         with (tmp_path / f"{tool}.log").open("ab") as log:
             subprocess.run(
                 [str(binaries / (tool + ".exe")), *map(str, args)],
-                check=True, stdout=log, stderr=log,
-                timeout=initdb_timeout if tool == "initdb" else 60, env=env,
+                check=True,
+                stdout=log,
+                stderr=log,
+                timeout=initdb_timeout if tool == "initdb" else 60,
+                env=env,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
 
     # Durability is unnecessary for this disposable synthetic test database.
-    run("initdb", "-D", data, "-U", "postgres", "-A", "trust", "--no-locale", "-E", "UTF8",
-        "--no-sync")
+    run(
+        "initdb",
+        "-D",
+        data,
+        "-U",
+        "postgres",
+        "-A",
+        "trust",
+        "--no-locale",
+        "-E",
+        "UTF8",
+        "--no-sync",
+    )
     engine = None
     try:
-        run("pg_ctl", "-D", data, "-l", tmp_path / "server.log", "-w", "start",
-            "-o", f"-h 127.0.0.1 -p {port} -F")
+        run(
+            "pg_ctl",
+            "-D",
+            data,
+            "-l",
+            tmp_path / "server.log",
+            "-w",
+            "start",
+            "-o",
+            f"-h 127.0.0.1 -p {port} -F",
+        )
         engine = create_engine(f"postgresql+psycopg://postgres@127.0.0.1:{port}/postgres")
         Base.metadata.create_all(engine)
         yield sessionmaker(bind=engine, autoflush=False)
@@ -71,19 +94,37 @@ def test_parallel_verify_and_webhook_inventory_once(local_postgres, monkeypatch,
     factory = local_postgres
     with factory() as db:
         main.seed_products(db)
-        user = User(username=f"parallel_{same_order}",
-                    email=f"parallel_{same_order}@example.test", hashed_password="unused")
+        user = User(
+            username=f"parallel_{same_order}",
+            email=f"parallel_{same_order}@example.test",
+            hashed_password="unused",
+        )
         db.add(user)
         db.commit()
         user_id = user.id
         orders = []
         for index in range(1 if same_order else 2):
-            order = main.upsert_local_order_snapshot(db, user, OrderSyncRequest(
-                order_reference=f"order_parallel_{same_order}_{index}", status="payment_pending",
-                total=200, currency="INR", payment_status="pending", source="razorpay_checkout",
-                items=[{"product_id": "snchatbot_1", "backend_product_id": 1,
-                        "name": "Synthetic product", "qty": 2, "price": 100}],
-            ))
+            order = main.upsert_local_order_snapshot(
+                db,
+                user,
+                OrderSyncRequest(
+                    order_reference=f"order_parallel_{same_order}_{index}",
+                    status="payment_pending",
+                    total=200,
+                    currency="INR",
+                    payment_status="pending",
+                    source="razorpay_checkout",
+                    items=[
+                        {
+                            "product_id": "snchatbot_1",
+                            "backend_product_id": 1,
+                            "name": "Synthetic product",
+                            "qty": 2,
+                            "price": 100,
+                        }
+                    ],
+                ),
+            )
             db.commit()
             orders.append(order.id)
         initial = db.get(Product, 1).stock_quantity
@@ -102,13 +143,24 @@ def test_parallel_verify_and_webhook_inventory_once(local_postgres, monkeypatch,
             if index == 0:
                 result = main.finalize_razorpay_payment(db, order, payment_id, "verify")
             else:
-                result = main.apply_razorpay_webhook(db, {
-                    "id": f"evt_parallel_{same_order}", "event": "payment.captured",
-                    "payload": {"payment": {"entity": {
-                        "id": payment_id, "order_id": order.order_reference,
-                        "status": "captured", "amount": 20000, "currency": "INR",
-                    }}},
-                })
+                result = main.apply_razorpay_webhook(
+                    db,
+                    {
+                        "id": f"evt_parallel_{same_order}",
+                        "event": "payment.captured",
+                        "payload": {
+                            "payment": {
+                                "entity": {
+                                    "id": payment_id,
+                                    "order_id": order.order_reference,
+                                    "status": "captured",
+                                    "amount": 20000,
+                                    "currency": "INR",
+                                }
+                            }
+                        },
+                    },
+                )
             db.commit()
             return result["status"]
 
@@ -119,5 +171,7 @@ def test_parallel_verify_and_webhook_inventory_once(local_postgres, monkeypatch,
         expected = 1 if same_order else 2
         assert db.get(Product, 1).stock_quantity == initial - 2 * expected
         assert db.query(CustomerNotification).filter_by(user_id=user_id).count() == expected
-        assert all(order.payment_status == "verified"
-                   for order in db.query(OrderSnapshot).filter_by(user_id=user_id))
+        assert all(
+            order.payment_status == "verified"
+            for order in db.query(OrderSnapshot).filter_by(user_id=user_id)
+        )

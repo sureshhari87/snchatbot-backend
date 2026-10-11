@@ -42,26 +42,45 @@ def paths(db):
     return f"/products/{product.id}/reviews"
 
 
-def test_fit_reply_and_rejection_reason_preserve_moderation_boundary(client, db, auth_headers, admin_headers):
+def test_fit_reply_and_rejection_reason_preserve_moderation_boundary(
+    client, db, auth_headers, admin_headers
+):
     path = paths(db)
-    row = client.post(path, headers=auth_headers,
-                      json=content(fit="trueToSize", size_feedback="comfortable")).json()
+    row = client.post(
+        path, headers=auth_headers, json=content(fit="trueToSize", size_feedback="comfortable")
+    ).json()
     assert row["fit"] == "trueToSize" and row["sizeFeedback"] == "comfortable"
     endpoint = f"/admin/reviews/{row['id']}/moderation"
     payload = {"status": "rejected", "expected_updated_at": row["updatedAt"]}
     assert client.patch(endpoint, headers=admin_headers, json=payload).status_code == 422
-    assert client.patch(endpoint, headers=admin_headers, json={**payload, "reason": "   "}).status_code == 422
-    rejected = client.patch(endpoint, headers=admin_headers, json={**payload, "reason": "Needs correction"})
+    assert (
+        client.patch(endpoint, headers=admin_headers, json={**payload, "reason": "   "}).status_code
+        == 422
+    )
+    rejected = client.patch(
+        endpoint, headers=admin_headers, json={**payload, "reason": "Needs correction"}
+    )
     assert rejected.status_code == 200
     assert "moderation_reason" not in rejected.json()
-    approved = client.patch(endpoint, headers=admin_headers, json={
-        "status": "approved", "expected_updated_at": rejected.json()["updatedAt"],
-        "seller_response": "Thank you for your feedback.",
-    })
+    approved = client.patch(
+        endpoint,
+        headers=admin_headers,
+        json={
+            "status": "approved",
+            "expected_updated_at": rejected.json()["updatedAt"],
+            "seller_response": "Thank you for your feedback.",
+        },
+    )
     assert approved.status_code == 200
     assert client.get(path).json()["items"][0]["sellerResponse"] == "Thank you for your feedback."
-    assert client.patch(f"/reviews/{row['id']}", headers=auth_headers,
-                        json=content(seller_response="Forged seller response")).status_code == 422
+    assert (
+        client.patch(
+            f"/reviews/{row['id']}",
+            headers=auth_headers,
+            json=content(seller_response="Forged seller response"),
+        ).status_code
+        == 422
+    )
     edited = client.patch(f"/reviews/{row['id']}", headers=auth_headers, json=content())
     assert edited.json()["moderationStatus"] == "pending"
     assert edited.json()["sellerResponse"] is None
