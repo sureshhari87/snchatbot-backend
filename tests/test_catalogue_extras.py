@@ -233,3 +233,11 @@ def test_layout_versions_preserve_other_toggles_and_disable_campaign(
         == 409
     )
     assert db.query(CatalogueContentAudit).filter_by(resource="home_layout").count() == 1
+
+
+def test_gifts_campaign_uses_existing_catalogue_destination(client, admin_headers):
+    created = client.post(
+        "/admin/catalogue/campaigns", headers=admin_headers, json=campaign(target="Gifts")
+    )
+    assert created.status_code == 201
+    assert client.get("/catalogue/home").json()["campaign"]["data"]["target"] == "Gifts"

@@ -62,6 +62,7 @@ class CampaignInput(BaseModel):
         "Diamond",
         "Silver",
         "Platinum",
+        "Gifts",
         "Men",
         "Women",
         "Kids",
