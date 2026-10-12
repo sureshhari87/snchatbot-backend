@@ -2249,6 +2249,14 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return require_permission("catalog:manage")(current_user)
 
 
+@app.get("/admin/capabilities")
+def admin_capabilities(current_user: User = Depends(get_current_user)):
+    permissions = user_permissions(current_user) & ADMIN_PERMISSIONS
+    if not permissions:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"permissions": sorted(permissions)}
+
+
 def log_admin_action(
     request: Request,
     admin_user: User,
