@@ -32,11 +32,15 @@ def collection(provider, path, *, paginated=True):
         )
         data = get(provider, endpoint)
         items = data.get("items")
+        response_count = data.get("count")
         if (
             data.get("entity") != "collection"
             or not isinstance(items, list)
-            or type(data.get("count")) is not int
-            or data["count"] != len(items)
+            or type(response_count) is not int
+            # Razorpay collection endpoints are inconsistent about whether
+            # count describes this page or the full matching collection.  A
+            # total count may therefore exceed the returned page length.
+            or response_count < len(items)
             or len(items) > 100
             or any(not isinstance(item, dict) for item in items)
         ):
