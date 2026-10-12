@@ -58,6 +58,7 @@ import financial_events
 import push_devices
 import savings_api
 from catalogue_admin import install as install_catalogue_admin
+from catalogue_extras import install as install_catalogue_extras
 from commerce import install as install_commerce_routes
 from config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
@@ -10030,3 +10031,7 @@ custom_design_payment_api.install(
 
 
 financial_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])
+
+
+# Catalogue extras use backend ownership and server-selected campaign audiences.
+install_catalogue_extras(app, get_db, get_current_user, require_permission)

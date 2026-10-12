@@ -581,3 +581,59 @@ class EmailVerificationToken(Base):
 
 # Register local savings tables for Alembic and isolated test databases.
 import savings_models  # noqa: E402, F401
+
+
+class RecentlyViewedProduct(Base):
+    __tablename__ = "recently_viewed_products"
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), primary_key=True)
+    viewed_at = Column(DateTime, nullable=False, default=utc_now)
+
+
+class CatalogueHomeLayout(Base):
+    __tablename__ = "catalogue_home_layout"
+    id = Column(Integer, primary_key=True)
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_catalogue_home_layout_singleton"),
+        CheckConstraint("version >= 1", name="ck_catalogue_home_layout_version"),
+    )
+    version = Column(Integer, nullable=False, default=1)
+    sections = Column(JSON, nullable=False)
+
+
+class CatalogueCampaign(Base):
+    __tablename__ = "catalogue_campaigns"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_catalogue_campaign_version"),
+        CheckConstraint("audience IN ('global','customer')", name="ck_catalogue_campaign_audience"),
+        CheckConstraint("ends_at > starts_at", name="ck_catalogue_campaign_dates"),
+    )
+    id = Column(Integer, primary_key=True)
+    version = Column(Integer, nullable=False, default=1)
+    active = Column(Boolean, nullable=False, default=False)
+    audience = Column(String(20), nullable=False)
+    starts_at = Column(DateTime, nullable=False)
+    ends_at = Column(DateTime, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    content = Column(JSON, nullable=False)
+
+
+class CatalogueCampaignRecipient(Base):
+    __tablename__ = "catalogue_campaign_recipients"
+    campaign_id = Column(
+        Integer, ForeignKey("catalogue_campaigns.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+
+
+class CatalogueContentAudit(Base):
+    __tablename__ = "catalogue_content_audit"
+    id = Column(Integer, primary_key=True)
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    resource = Column(String(20), nullable=False)
+    resource_id = Column(Integer, nullable=False)
+    version = Column(Integer, nullable=False)
+    reason = Column(String(500), nullable=False)
+    before = Column(JSON, nullable=True)
+    after = Column(JSON, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
