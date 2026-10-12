@@ -16,9 +16,9 @@ class TotalCountProvider:
 
 
 def test_collection_accepts_provider_total_count_for_single_page():
-    assert collection(
-        TotalCountProvider(), "orders/order_Test/payments", paginated=False
-    ) == [{"id": "pay_Test"}]
+    assert collection(TotalCountProvider(), "orders/order_Test/payments", paginated=False) == [
+        {"id": "pay_Test"}
+    ]
 
 
 class MalformedDisputesProvider:
