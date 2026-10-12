@@ -21,6 +21,27 @@ def get(provider, path):
     return data
 
 
+def collection_kind(path):
+    route = path.partition("?")[0]
+    if route == "disputes":
+        return "disputes"
+    if re.fullmatch(r"orders/[^/]+/payments", route):
+        return "order_payments"
+    if re.fullmatch(r"payments/[^/]+/refunds", route):
+        return "payment_refunds"
+    return "unknown"
+
+
+def invalid_collection(path, reason):
+    # Return only a bounded route category and validation reason. Provider
+    # payloads and identifiers remain private while operators can identify
+    # the incompatible envelope safely from an API response or request log.
+    raise HTTPException(
+        503,
+        f"Financial provider collection unavailable [{collection_kind(path)}:{reason}]",
+    )
+
+
 def collection(provider, path, *, paginated=True):
     seen = set()
     result = []
@@ -33,22 +54,27 @@ def collection(provider, path, *, paginated=True):
         data = get(provider, endpoint)
         items = data.get("items")
         response_count = data.get("count")
-        if (
-            data.get("entity") != "collection"
-            or not isinstance(items, list)
-            or type(response_count) is not int
-            # Razorpay collection endpoints are inconsistent about whether
-            # count describes this page or the full matching collection.  A
-            # total count may therefore exceed the returned page length.
-            or response_count < len(items)
-            or len(items) > 100
-            or any(not isinstance(item, dict) for item in items)
-        ):
-            raise HTTPException(503, "Financial provider collection unavailable")
+        if data.get("entity") != "collection":
+            invalid_collection(path, "entity")
+        if not isinstance(items, list):
+            invalid_collection(path, "items")
+        if type(response_count) is not int:
+            invalid_collection(path, "count_type")
+        # Razorpay collection endpoints are inconsistent about whether count
+        # describes this page or the full matching collection. A total count
+        # may therefore exceed the returned page length.
+        if response_count < len(items):
+            invalid_collection(path, "count_range")
+        if len(items) > 100:
+            invalid_collection(path, "page_size")
+        if any(not isinstance(item, dict) for item in items):
+            invalid_collection(path, "item_type")
         for item in items:
             key = item.get("id")
-            if not isinstance(key, str) or key in seen:
-                raise HTTPException(503, "Financial provider collection unavailable")
+            if not isinstance(key, str):
+                invalid_collection(path, "item_id")
+            if key in seen:
+                invalid_collection(path, "duplicate_id")
             seen.add(key)
             result.append(item)
         if len(items) < 100:
