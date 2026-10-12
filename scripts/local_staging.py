@@ -21,6 +21,14 @@ REVISION = "0019_push_outbox"
 SAVINGS_REVISION = "0024_savings_hold_review"
 CUSTOM_DESIGNS_REVISION = "0026_custom_design_advances"
 FINANCIAL_REVISION = "0029_voucher_funding"
+CATALOGUE_REVISION = "0030_catalogue_extras"
+CATALOGUE_TABLES = {
+    "recently_viewed_products",
+    "catalogue_home_layout",
+    "catalogue_campaigns",
+    "catalogue_campaign_recipients",
+    "catalogue_content_audit",
+}
 FINANCIAL_TABLES = {
     "reward_accounts",
     "reward_entries",
@@ -113,6 +121,7 @@ def preflight(url, *, expected_revision=REVISION):
         SAVINGS_REVISION,
         CUSTOM_DESIGNS_REVISION,
         FINANCIAL_REVISION,
+        CATALOGUE_REVISION,
     ):
         raise ValueError("Unsupported staging schema requirement")
     import psycopg
@@ -139,15 +148,22 @@ def preflight(url, *, expected_revision=REVISION):
             SAVINGS_REVISION,
             CUSTOM_DESIGNS_REVISION,
             FINANCIAL_REVISION,
+            CATALOGUE_REVISION,
         ) and not SAVINGS_TABLES.issubset(tables):
             raise ValueError("Required savings schema tables are missing")
         if expected_revision in (
             CUSTOM_DESIGNS_REVISION,
             FINANCIAL_REVISION,
+            CATALOGUE_REVISION,
         ) and not CUSTOM_DESIGNS_TABLES.issubset(tables):
             raise ValueError("Required custom-design schema tables are missing")
-        if expected_revision == FINANCIAL_REVISION and not FINANCIAL_TABLES.issubset(tables):
+        if expected_revision in (
+            FINANCIAL_REVISION,
+            CATALOGUE_REVISION,
+        ) and not FINANCIAL_TABLES.issubset(tables):
             raise ValueError("Required rewards/voucher schema tables are missing")
+        if expected_revision == CATALOGUE_REVISION and not CATALOGUE_TABLES.issubset(tables):
+            raise ValueError("Required catalogue schema tables are missing")
         return "ready"
 
 

@@ -12,7 +12,7 @@ BIND_HOST = "0.0.0.0"  # nosec B104
 sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
-    FINANCIAL_REVISION,
+    CATALOGUE_REVISION,
     payment_test_environment,
     preflight,
     sms_staging_environment,
@@ -107,7 +107,7 @@ def render_environment(source):
 
 
 def verify_database(url):
-    if preflight(url, expected_revision=FINANCIAL_REVISION) != "ready":
+    if preflight(url, expected_revision=CATALOGUE_REVISION) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg
 

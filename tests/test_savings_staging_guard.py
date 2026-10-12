@@ -6,8 +6,8 @@ import pytest
 from test_staging_push_revision import URL
 
 from scripts.local_staging import (
+    CATALOGUE_REVISION,
     DATABASE,
-    FINANCIAL_REVISION,
     ROLE,
     SAVINGS_REVISION,
     SAVINGS_TABLES,
@@ -52,11 +52,11 @@ def test_savings_schema_requires_every_table_read_only(missing):
         assert conn.execute.call_args_list[0].args == ("SET TRANSACTION READ ONLY",)
 
 
-def test_render_requires_current_financial_revision_even_while_feature_disabled():
+def test_render_requires_current_catalogue_revision_even_while_feature_disabled():
     with patch("scripts.render_staging.preflight", return_value="empty") as check:
         with pytest.raises(ValueError):
             verify_database(URL)
-        check.assert_called_once_with(URL, expected_revision=FINANCIAL_REVISION)
+        check.assert_called_once_with(URL, expected_revision=CATALOGUE_REVISION)
 
 
 def test_unknown_schema_requirement_never_connects():
