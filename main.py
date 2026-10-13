@@ -57,6 +57,7 @@ import financial_checkout
 import financial_events
 import push_devices
 import savings_api
+from admin_directory import install as install_admin_directory
 from catalogue_admin import install as install_catalogue_admin
 from catalogue_extras import install as install_catalogue_extras
 from commerce import install as install_commerce_routes
@@ -10026,6 +10027,7 @@ def hash_opaque_token(token: str) -> str:
 
 install_commerce_routes(app, get_db, get_current_user)
 install_catalogue_admin(app, get_db, require_permission)
+install_admin_directory(app, get_db, require_permission, serialize_order_snapshot)
 install_review_api(app, get_db, get_current_user, require_permission)
 install_notification_api(app, get_db, get_current_user, require_permission, log_admin_action)
 push_devices.install(app, get_db, get_current_user, limiter)
