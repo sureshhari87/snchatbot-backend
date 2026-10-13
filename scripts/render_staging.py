@@ -12,7 +12,9 @@ BIND_HOST = "0.0.0.0"  # nosec B104
 sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
+    BALANCE_REVISION,
     CATALOGUE_REVISION,
+    INBOX_REVISION,
     payment_test_environment,
     preflight,
     sms_staging_environment,
@@ -76,6 +78,28 @@ def render_environment(source):
             Fernet(env.get("VOUCHER_CODE_ENCRYPTION_KEY", "").encode("ascii"))
         except (ValueError, UnicodeError) as error:
             raise ValueError("A dedicated voucher encryption key is required") from error
+    for flag in (
+        "INBOX_BROADCAST_ENABLED",
+        "CUSTOM_DESIGN_BALANCE_ENABLED",
+        "CUSTOM_DESIGN_BALANCE_RAZORPAY_ENABLED",
+    ):
+        if env.get(flag, "0").strip() not in {"0", "1"}:
+            raise ValueError("New feature flags must be 0 or 1")
+        env[flag] = env.get(flag, "0").strip()
+    if env["CUSTOM_DESIGN_BALANCE_ENABLED"] == "1" and env.get(
+        "CUSTOM_DESIGNS_ENABLED", "0"
+    ).lower() not in {"1", "true", "yes", "on"}:
+        raise ValueError("Balance requires the structured custom-design feature")
+    if (
+        env["CUSTOM_DESIGN_BALANCE_RAZORPAY_ENABLED"] == "1"
+        and env["CUSTOM_DESIGN_BALANCE_ENABLED"] != "1"
+    ):
+        raise ValueError("Online balance requires the balance feature")
+    if env["INBOX_BROADCAST_ENABLED"] == "1" and any(
+        env.get(flag, "0").lower() not in {"0", "false", "no", "off"}
+        for flag in ("PUSH_OUTBOX_ENABLED", "PUSH_DELIVERY_ENABLED")
+    ):
+        raise ValueError("Keep push disabled during limited inbox staging")
     admin_origin = env.get("STAGING_ADMIN_ORIGIN", "").strip()
     if admin_origin not in {"", "http://localhost:7357", "http://127.0.0.1:7357"}:
         raise ValueError("STAGING_ADMIN_ORIGIN must be the exact local review console origin")
@@ -107,7 +131,16 @@ def render_environment(source):
 
 
 def verify_database(url):
-    if preflight(url, expected_revision=CATALOGUE_REVISION) != "ready":
+    revision = (
+        BALANCE_REVISION
+        if os.getenv("CUSTOM_DESIGN_BALANCE_ENABLED", "0").strip() == "1"
+        else (
+            INBOX_REVISION
+            if os.getenv("INBOX_BROADCAST_ENABLED", "0").strip() == "1"
+            else CATALOGUE_REVISION
+        )
+    )
+    if preflight(url, expected_revision=revision, allow_descendants=True) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg
 

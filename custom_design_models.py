@@ -6,10 +6,12 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 
 from database import Base
@@ -80,6 +82,13 @@ class CustomDesignAudit(Base):
     __tablename__ = "custom_design_audit"
     __table_args__ = (
         UniqueConstraint("design_id", "event_key", name="uq_custom_design_audit_event"),
+        Index(
+            "uq_custom_design_completed",
+            "design_id",
+            unique=True,
+            postgresql_where=text("action = 'completed'"),
+            sqlite_where=text("action = 'completed'"),
+        ),
     )
     id = Column(Integer, primary_key=True)
     design_id = Column(Integer, ForeignKey("custom_designs.id"), nullable=False, index=True)

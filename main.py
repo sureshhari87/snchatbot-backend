@@ -41,6 +41,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+import delivery_admin_api
+
 try:
     import firebase_admin
     from firebase_admin import credentials as firebase_credentials
@@ -51,10 +53,12 @@ except Exception:  # pragma: no cover - optional production integration
     firebase_firestore = None
 
 import custom_design_api
+import custom_design_balance_api
 import custom_design_payment_api
 import financial_api
 import financial_checkout
 import financial_events
+import inbox_broadcast_api
 import push_devices
 import savings_api
 from admin_directory import install as install_admin_directory
@@ -5217,6 +5221,10 @@ def apply_razorpay_webhook(
     db: Session,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    if custom_design_api.ENABLED:
+        result = custom_design_payment_api.generic_operation(db, payload, sys.modules[__name__])
+        if result is not None:
+            return result
     if financial_checkout.ENABLED:
         result = financial_events.handle(db, payload, sys.modules[__name__])
         if result is not None:
@@ -10028,6 +10036,7 @@ def hash_opaque_token(token: str) -> str:
 install_commerce_routes(app, get_db, get_current_user)
 install_catalogue_admin(app, get_db, require_permission)
 install_admin_directory(app, get_db, require_permission, serialize_order_snapshot)
+inbox_broadcast_api.install(app, get_db, require_permission, log_admin_action)
 install_review_api(app, get_db, get_current_user, require_permission)
 install_notification_api(app, get_db, get_current_user, require_permission, log_admin_action)
 push_devices.install(app, get_db, get_current_user, limiter)
@@ -10038,6 +10047,11 @@ custom_design_api.install(app, get_db, get_current_user, require_permission, sys
 custom_design_payment_api.install(
     app, get_db, get_current_user, require_permission, sys.modules[__name__]
 )
+custom_design_balance_api.install(
+    app, get_db, get_current_user, require_permission, sys.modules[__name__]
+)
+
+delivery_admin_api.install(app, get_db, require_permission)
 
 
 financial_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])

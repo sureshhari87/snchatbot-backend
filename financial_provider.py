@@ -45,6 +45,7 @@ def invalid_collection(path, reason):
 def collection(provider, path, *, paginated=True):
     seen = set()
     result = []
+    advertised_total = None
     for page in range(10 if paginated else 1):
         endpoint = (
             path + ("&" if "?" in path else "?") + f"count=100&skip={page * 100}"
@@ -60,9 +61,8 @@ def collection(provider, path, *, paginated=True):
             invalid_collection(path, "items")
         if type(response_count) is not int:
             invalid_collection(path, "count_type")
-        # Razorpay collection endpoints are inconsistent about whether count
-        # describes this page or the full matching collection. A total count
-        # may therefore exceed the returned page length.
+        # Accept a page count or an advertised total. Paginated adverse
+        # evidence must retrieve that advertised total before it is complete.
         if response_count < len(items):
             invalid_collection(path, "count_range")
         if len(items) > 100:
@@ -77,7 +77,17 @@ def collection(provider, path, *, paginated=True):
                 invalid_collection(path, "duplicate_id")
             seen.add(key)
             result.append(item)
+        if paginated and response_count > len(items):
+            if advertised_total is not None and advertised_total != response_count:
+                invalid_collection(path, "total_changed")
+            advertised_total = response_count
+        if paginated and advertised_total is not None and len(result) > advertised_total:
+            invalid_collection(path, "count_range")
         if len(items) < 100:
+            if paginated and advertised_total is not None and len(result) != advertised_total:
+                invalid_collection(path, "incomplete_collection")
+            return result
+        if paginated and advertised_total is not None and len(result) == advertised_total:
             return result
         if not paginated:
             break

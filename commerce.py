@@ -8,6 +8,8 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from delivery_rules import calendar as delivery_calendar
+from delivery_rules import route_header
 from models import AppConfigEntry, CommerceCartItem, Product, utc_now
 from schemas import ProductOut
 
@@ -85,13 +87,15 @@ def delivery_quote(db, request, now=None):
         routes = json.loads(entry.value) if entry else []
         if not isinstance(routes, list):
             raise ValueError("Expected routes list")
-        matching = [
-            r
-            for r in routes
-            if r.get("active", True)
-            and request.destination_pin.startswith(str(r["pin_prefix"]))
-            and r.get("method", "standard") == request.delivery_method
-        ]
+        if len(routes) > 1000:
+            raise ValueError("Too many delivery routes")
+        matching = []
+        for candidate in routes:
+            header = route_header(candidate)
+            if header is not None:
+                prefix, method = header
+                if request.destination_pin.startswith(prefix) and method == request.delivery_method:
+                    matching.append(candidate)
         matching.sort(key=lambda r: len(str(r["pin_prefix"])), reverse=True)
     except (ValueError, TypeError, KeyError, AttributeError):
         raise HTTPException(503, "Delivery service configuration is invalid") from None
@@ -101,18 +105,13 @@ def delivery_quote(db, request, now=None):
         raise HTTPException(409, "Delivery is not available for this PIN code")
     route = matching[0]
     try:
-        handling, minimum, maximum = (
-            int(route[k]) for k in ("handling_days", "minimum_transit_days", "maximum_transit_days")
-        )
-        if not 0 <= handling <= 365 or not 0 <= minimum <= maximum <= 365:
-            raise ValueError("Invalid transit days")
-        weekdays = route.get("working_weekdays", [0, 1, 2, 3, 4, 5])
-        if not weekdays or any(type(d) is not int or not 0 <= d <= 6 for d in weekdays):
-            raise ValueError("Invalid working calendar")
-        holidays = set(route.get("holidays", []))
-        hour, minute = map(int, route.get("cutoff", "16:00").split(":"))
-        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
-            raise ValueError("Invalid cutoff")
+        validated = delivery_calendar(route)
+        handling = validated["handling_days"]
+        minimum = validated["minimum_transit_days"]
+        maximum = validated["maximum_transit_days"]
+        weekdays = validated["working_weekdays"]
+        holidays = set(validated["holidays"])
+        hour, minute = map(int, validated["cutoff"].split(":"))
     except (ValueError, TypeError, KeyError):
         raise HTTPException(503, "Delivery service configuration is invalid") from None
     now = now or datetime.now(timezone.utc)
@@ -138,7 +137,7 @@ def delivery_quote(db, request, now=None):
     return {
         "serviceable": True,
         "destinationPin": request.destination_pin,
-        "fulfilmentGroup": str(route.get("fulfilment_group", "store")),
+        "fulfilmentGroup": validated["fulfilment_group"],
         "handlingBusinessDays": handling,
         "courierTransitBusinessDays": {"minimum": minimum, "maximum": maximum},
         "earliestDeliveryDate": advance(dispatch, minimum).isoformat(),

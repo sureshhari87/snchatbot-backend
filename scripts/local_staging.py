@@ -22,6 +22,8 @@ SAVINGS_REVISION = "0024_savings_hold_review"
 CUSTOM_DESIGNS_REVISION = "0026_custom_design_advances"
 FINANCIAL_REVISION = "0029_voucher_funding"
 CATALOGUE_REVISION = "0030_catalogue_extras"
+INBOX_REVISION = "0031_inbox_broadcast"
+BALANCE_REVISION = "0032_custom_design_balances"
 CATALOGUE_TABLES = {
     "recently_viewed_products",
     "catalogue_home_layout",
@@ -115,13 +117,15 @@ def clean_environment(url):
     return env
 
 
-def preflight(url, *, expected_revision=REVISION):
+def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
     if expected_revision not in (
         REVISION,
         SAVINGS_REVISION,
         CUSTOM_DESIGNS_REVISION,
         FINANCIAL_REVISION,
         CATALOGUE_REVISION,
+        INBOX_REVISION,
+        BALANCE_REVISION,
     ):
         raise ValueError("Unsupported staging schema requirement")
     import psycopg
@@ -140,8 +144,26 @@ def preflight(url, *, expected_revision=REVISION):
         if "alembic_version" not in tables:
             raise ValueError("Existing database needs manual schema review")
         versions = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+        supported = [
+            REVISION,
+            SAVINGS_REVISION,
+            CUSTOM_DESIGNS_REVISION,
+            FINANCIAL_REVISION,
+            CATALOGUE_REVISION,
+            INBOX_REVISION,
+            BALANCE_REVISION,
+        ]
         if versions != [(expected_revision,)]:
-            raise ValueError("Unexpected schema revision; no automatic stamp or migration allowed")
+            if (
+                not allow_descendants
+                or len(versions) != 1
+                or versions[0][0] not in supported
+                or supported.index(versions[0][0]) < supported.index(expected_revision)
+            ):
+                raise ValueError(
+                    "Unexpected schema revision; no automatic stamp or migration allowed"
+                )
+            expected_revision = versions[0][0]
         if not {"push_devices", "push_events", "push_attempts"}.issubset(tables):
             raise ValueError("Required push schema tables are missing")
         if expected_revision in (
@@ -149,21 +171,42 @@ def preflight(url, *, expected_revision=REVISION):
             CUSTOM_DESIGNS_REVISION,
             FINANCIAL_REVISION,
             CATALOGUE_REVISION,
+            INBOX_REVISION,
+            BALANCE_REVISION,
         ) and not SAVINGS_TABLES.issubset(tables):
             raise ValueError("Required savings schema tables are missing")
         if expected_revision in (
             CUSTOM_DESIGNS_REVISION,
             FINANCIAL_REVISION,
             CATALOGUE_REVISION,
+            INBOX_REVISION,
+            BALANCE_REVISION,
         ) and not CUSTOM_DESIGNS_TABLES.issubset(tables):
             raise ValueError("Required custom-design schema tables are missing")
         if expected_revision in (
             FINANCIAL_REVISION,
             CATALOGUE_REVISION,
+            INBOX_REVISION,
+            BALANCE_REVISION,
         ) and not FINANCIAL_TABLES.issubset(tables):
             raise ValueError("Required rewards/voucher schema tables are missing")
-        if expected_revision == CATALOGUE_REVISION and not CATALOGUE_TABLES.issubset(tables):
+        if expected_revision in (
+            CATALOGUE_REVISION,
+            INBOX_REVISION,
+            BALANCE_REVISION,
+        ) and not CATALOGUE_TABLES.issubset(tables):
             raise ValueError("Required catalogue schema tables are missing")
+        if (
+            expected_revision in (INBOX_REVISION, BALANCE_REVISION)
+            and "inbox_broadcasts" not in tables
+        ):
+            raise ValueError("Required inbox audit schema is missing")
+        if expected_revision == BALANCE_REVISION and not {
+            "custom_design_balance_requests",
+            "custom_design_balance_checkouts",
+            "custom_design_balance_entries",
+        }.issubset(tables):
+            raise ValueError("Required balance schema tables are missing")
         return "ready"
 
 

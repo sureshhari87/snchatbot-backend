@@ -122,6 +122,11 @@ def manufacturing_start(db, design_id, admin, payload):
 
 
 def event_operation(db, payload, provider):
+    from custom_design_balance_api import event_operation as balance_event
+
+    result = balance_event(db, payload, provider)
+    if result["status"] != "ignored":
+        return result
     event = payload.get("event")
     if event in ("payment.captured", "order.paid"):
         try:
@@ -179,6 +184,43 @@ def event_operation(db, payload, provider):
 class CustomerReviewInput(Input):
     request_key: str = Field(min_length=1, max_length=80)
     reason: str = Field(min_length=1, max_length=200)
+
+
+def generic_operation(db, payload, provider):
+    """Route only saved custom capture orders; unrelated order.paid shapes pass through."""
+    from custom_design_api import mutate
+    from custom_design_balance import ENABLED as balance_enabled
+    from custom_design_balance import storage_ready
+    from custom_design_balance_models import CustomDesignBalanceCheckout
+    from custom_design_payments import CustomDesignCheckout
+    from financial_provider import capture_id, identifier
+
+    event = payload.get("event")
+    envelope = payload.get("payload")
+    envelope = envelope if isinstance(envelope, dict) else {}
+    payment_envelope = envelope.get("payment")
+    payment = payment_envelope.get("entity") if isinstance(payment_envelope, dict) else {}
+    payment = payment if isinstance(payment, dict) else {}
+    order_envelope = envelope.get("order")
+    order = order_envelope.get("entity") if isinstance(order_envelope, dict) else {}
+    order = order if isinstance(order, dict) else {}
+    order_id = payment.get("order_id") or order.get("id")
+    if event in ("payment.captured", "order.paid"):
+        if not identifier(order_id, "order"):
+            return None
+        known = db.query(CustomDesignCheckout.design_id).filter_by(provider_order_id=order_id).first()
+        if not known and balance_enabled and storage_ready(db):
+            known = db.query(CustomDesignBalanceCheckout.id).filter_by(provider_order_id=order_id).first()
+        if not known:
+            return None
+        if payment.get("id") is None:
+            payment = {**payment, "id": capture_id(provider, order_id), "order_id": order_id}
+            payload = {**payload, "payload": {**envelope, "payment": {"entity": payment}}}
+    result = mutate(db, lambda: event_operation(db, payload, provider))
+    if result.get("status") == "ignored":
+        return None
+    return dict(event=str(event or "unknown"), status=result["status"],
+                order_reference=order_id, payment_id=payment.get("id"))
 
 
 def install(app, get_db, get_current_user, require_permission, provider):
@@ -378,8 +420,14 @@ def install(app, get_db, get_current_user, require_permission, provider):
     ):
         def operation():
             row = locked(db, design_id, user.id)
-            if not db.query(CustomDesignAdvance).filter_by(design_id=row.id).first():
-                raise HTTPException(409, "Paid cancellation review requires a posted advance")
+            from custom_design_balance import paid_or_observed
+
+            if not db.query(CustomDesignAdvance).filter_by(
+                design_id=row.id
+            ).first() and not paid_or_observed(db, row):
+                raise HTTPException(
+                    409, "Paid cancellation review requires verified or observed payment evidence"
+                )
             hold(db, row, "customer-cancel:" + payload.request_key, payload.reason, user.id)
             return document(row, db)
 

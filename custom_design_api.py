@@ -167,7 +167,7 @@ def document(row, db):
         and credit.quote_id == quote.id
         and credit.amount_paise == quote.advance_paise
     )
-    return dict(
+    result = dict(
         id=row.id,
         custom_order_id=row.custom_order_id,
         user_id=row.user_id,
@@ -208,6 +208,11 @@ def document(row, db):
         ),
         completion_available=False,
     )
+
+    from custom_design_balance import snapshot
+
+    result.update(snapshot(db, row))
+    return result
 
 
 def mutate(db, operation):
@@ -345,9 +350,11 @@ def decide(db, design_id, user, payload):
 
 
 def financial_change_guard(db, row):
+    from custom_design_balance import freeze_guard
     from custom_design_payments import CustomDesignCheckout, available
 
     available(db, row)
+    freeze_guard(db, row)
     if (
         db.query(CustomDesignCheckout).filter_by(design_id=row.id).first()
         or db.query(CustomDesignAudit)
