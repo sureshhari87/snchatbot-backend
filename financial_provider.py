@@ -56,10 +56,15 @@ def collection(provider, path, *, paginated=True):
         response_count = data.get("count")
         if data.get("entity") != "collection":
             invalid_collection(path, "entity")
-        if not isinstance(items, list):
-            invalid_collection(path, "items")
         if type(response_count) is not int:
             invalid_collection(path, "count_type")
+        # Razorpay TEST can represent an empty disputes collection as
+        # {"entity": "collection", "count": 0} without an items member.
+        # Accept only that unambiguously empty, route-specific shape.
+        if items is None and response_count == 0 and collection_kind(path) == "disputes":
+            items = []
+        if not isinstance(items, list):
+            invalid_collection(path, "items")
         # Razorpay collection endpoints are inconsistent about whether count
         # describes this page or the full matching collection. A total count
         # may therefore exceed the returned page length.
