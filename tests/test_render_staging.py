@@ -44,6 +44,7 @@ class RenderStagingTests(unittest.TestCase):
         self.assertEqual(env["WEB_CONCURRENCY"], "1")
         self.assertEqual(env["LLM_ENABLED"], "0")
         self.assertEqual(env["SMS_OTP_ENABLED"], "0")
+        self.assertEqual(env["RAZORPAY_TEST_NULL_DISPUTES_COMPAT"], "1")
 
     def test_rejects_wrong_targets_and_missing_identity(self):
         for key, value in (

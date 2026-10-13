@@ -1,5 +1,6 @@
 """Fail-closed authenticated Razorpay reads. Never logs provider bodies."""
 
+import os
 import re
 
 from fastapi import HTTPException
@@ -42,6 +43,14 @@ def invalid_collection(path, reason):
     )
 
 
+def allow_null_test_disputes(provider):
+    return (
+        os.getenv("RAZORPAY_TEST_NULL_DISPUTES_COMPAT") == "1"
+        and os.getenv("APP_ENV") == "staging"
+        and str(getattr(provider, "RAZORPAY_KEY_ID", "")).startswith("rzp_test_")
+    )
+
+
 def collection(provider, path, *, paginated=True):
     seen = set()
     result = []
@@ -56,6 +65,17 @@ def collection(provider, path, *, paginated=True):
         response_count = data.get("count")
         if data.get("entity") != "collection":
             invalid_collection(path, "entity")
+        # Razorpay TEST may return both collection fields as null when there
+        # are no disputes. This compatibility shape is never accepted for a
+        # live key or for payment/refund collections.
+        if (
+            items is None
+            and response_count is None
+            and collection_kind(path) == "disputes"
+            and allow_null_test_disputes(provider)
+        ):
+            items = []
+            response_count = 0
         if type(response_count) is not int:
             invalid_collection(path, "count_type")
         # Razorpay TEST can represent an empty disputes collection as

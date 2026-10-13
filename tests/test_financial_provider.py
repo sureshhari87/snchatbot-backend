@@ -46,6 +46,41 @@ def test_collection_accepts_unambiguously_empty_disputes_without_items():
     assert collection(EmptyDisputesProvider(), "disputes") == []
 
 
+class NullEmptyTestDisputesProvider:
+    RAZORPAY_KEY_ID = "rzp_test_example"
+
+    def call_razorpay(self, method, path):
+        return 200, {"entity": "collection", "count": None, "items": None}
+
+
+def test_collection_accepts_null_empty_disputes_for_staging_compat_only(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.setenv("RAZORPAY_TEST_NULL_DISPUTES_COMPAT", "1")
+    assert collection(NullEmptyTestDisputesProvider(), "disputes") == []
+
+
+class NullEmptyLiveDisputesProvider(NullEmptyTestDisputesProvider):
+    RAZORPAY_KEY_ID = "rzp_live_example"
+
+
+def test_collection_rejects_null_empty_disputes_for_live_key(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.setenv("RAZORPAY_TEST_NULL_DISPUTES_COMPAT", "1")
+    with pytest.raises(HTTPException) as caught:
+        collection(NullEmptyLiveDisputesProvider(), "disputes")
+    assert caught.value.detail == (
+        "Financial provider collection unavailable [disputes:count_type]"
+    )
+
+
+def test_collection_rejects_null_empty_test_disputes_without_explicit_compat():
+    with pytest.raises(HTTPException) as caught:
+        collection(NullEmptyTestDisputesProvider(), "disputes")
+    assert caught.value.detail == (
+        "Financial provider collection unavailable [disputes:count_type]"
+    )
+
+
 class EmptyOtherCollectionProvider:
     def call_razorpay(self, method, path):
         return 200, {"entity": "collection", "count": 0}
