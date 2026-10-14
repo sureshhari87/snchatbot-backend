@@ -6,8 +6,9 @@ import os
 import time
 from typing import Annotated, Literal
 
+import jwt
 from fastapi import Depends, HTTPException, Path, Request
-from jose import JWTError, jwt
+from jwt import PyJWTError as JWTError
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session

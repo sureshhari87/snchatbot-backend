@@ -208,9 +208,15 @@ def generic_operation(db, payload, provider):
     if event in ("payment.captured", "order.paid"):
         if not identifier(order_id, "order"):
             return None
-        known = db.query(CustomDesignCheckout.design_id).filter_by(provider_order_id=order_id).first()
+        known = (
+            db.query(CustomDesignCheckout.design_id).filter_by(provider_order_id=order_id).first()
+        )
         if not known and balance_enabled and storage_ready(db):
-            known = db.query(CustomDesignBalanceCheckout.id).filter_by(provider_order_id=order_id).first()
+            known = (
+                db.query(CustomDesignBalanceCheckout.id)
+                .filter_by(provider_order_id=order_id)
+                .first()
+            )
         if not known:
             return None
         if payment.get("id") is None:
@@ -219,8 +225,12 @@ def generic_operation(db, payload, provider):
     result = mutate(db, lambda: event_operation(db, payload, provider))
     if result.get("status") == "ignored":
         return None
-    return dict(event=str(event or "unknown"), status=result["status"],
-                order_reference=order_id, payment_id=payment.get("id"))
+    return dict(
+        event=str(event or "unknown"),
+        status=result["status"],
+        order_reference=order_id,
+        payment_id=payment.get("id"),
+    )
 
 
 def install(app, get_db, get_current_user, require_permission, provider):
