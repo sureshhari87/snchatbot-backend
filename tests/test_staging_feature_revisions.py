@@ -19,6 +19,8 @@ def database(monkeypatch, revision, missing=None):
         "push_events",
         "push_attempts",
         "inbox_broadcasts",
+        "delivery_drafts",
+        "delivery_draft_audits",
         "custom_design_balance_requests",
         "custom_design_balance_checkouts",
         "custom_design_balance_entries",
@@ -45,7 +47,13 @@ def database(monkeypatch, revision, missing=None):
 
 
 @pytest.mark.parametrize(
-    "revision", [local.CATALOGUE_REVISION, local.INBOX_REVISION, local.BALANCE_REVISION]
+    "revision",
+    [
+        local.CATALOGUE_REVISION,
+        local.INBOX_REVISION,
+        local.BALANCE_REVISION,
+        local.DELIVERY_DRAFT_REVISION,
+    ],
 )
 def test_known_descendants_are_read_only_and_explicit(monkeypatch, revision):
     conn = database(monkeypatch, revision)
@@ -97,12 +105,14 @@ def test_feature_flags_default_off_and_invalid_combinations_fail():
     env = render.render_environment(source())
     for flag in [
         "INBOX_BROADCAST_ENABLED",
+        "DELIVERY_DRAFTS_ENABLED",
         "CUSTOM_DESIGN_BALANCE_ENABLED",
         "CUSTOM_DESIGN_BALANCE_RAZORPAY_ENABLED",
     ]:
         assert env[flag] == "0"
     for values in [
         {"INBOX_BROADCAST_ENABLED": "true"},
+        {"DELIVERY_DRAFTS_ENABLED": "true"},
         {"INBOX_BROADCAST_ENABLED": "1", "PUSH_DELIVERY_ENABLED": "1"},
         {"CUSTOM_DESIGN_BALANCE_ENABLED": "1"},
         {"CUSTOM_DESIGN_BALANCE_RAZORPAY_ENABLED": "1"},
@@ -115,6 +125,7 @@ def test_feature_flags_default_off_and_invalid_combinations_fail():
     "flag,revision",
     [
         ("INBOX_BROADCAST_ENABLED", local.INBOX_REVISION),
+        ("DELIVERY_DRAFTS_ENABLED", local.DELIVERY_DRAFT_REVISION),
         ("CUSTOM_DESIGN_BALANCE_ENABLED", local.BALANCE_REVISION),
     ],
 )
@@ -128,3 +139,27 @@ def test_enabled_feature_requires_its_revision(monkeypatch, flag, revision):
     with pytest.raises(ValueError):
         render.verify_database(URL)
     check.assert_called_once_with(URL, expected_revision=revision, allow_descendants=True)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "delivery_drafts",
+        "delivery_draft_audits",
+        "inbox_broadcasts",
+        "custom_design_balance_entries",
+        "custom_design_quotes",
+    ],
+)
+def test_draft_revision_requires_draft_and_predecessor_tables(monkeypatch, missing):
+    database(monkeypatch, local.DELIVERY_DRAFT_REVISION, missing)
+    with pytest.raises(ValueError):
+        local.preflight(URL, expected_revision=local.DELIVERY_DRAFT_REVISION)
+
+
+def test_balance_revision_cannot_enable_draft_feature(monkeypatch):
+    database(monkeypatch, local.BALANCE_REVISION)
+    with pytest.raises(ValueError):
+        local.preflight(
+            URL, expected_revision=local.DELIVERY_DRAFT_REVISION, allow_descendants=True
+        )

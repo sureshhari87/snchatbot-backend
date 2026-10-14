@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPO))
 from scripts.local_staging import (  # noqa: E402
     BALANCE_REVISION,
     CATALOGUE_REVISION,
+    DELIVERY_DRAFT_REVISION,
     INBOX_REVISION,
     payment_test_environment,
     preflight,
@@ -80,6 +81,7 @@ def render_environment(source):
             raise ValueError("A dedicated voucher encryption key is required") from error
     for flag in (
         "INBOX_BROADCAST_ENABLED",
+        "DELIVERY_DRAFTS_ENABLED",
         "CUSTOM_DESIGN_BALANCE_ENABLED",
         "CUSTOM_DESIGN_BALANCE_RAZORPAY_ENABLED",
     ):
@@ -141,6 +143,8 @@ def verify_database(url):
             else CATALOGUE_REVISION
         )
     )
+    if os.getenv("DELIVERY_DRAFTS_ENABLED", "0").strip() == "1":
+        revision = DELIVERY_DRAFT_REVISION
     if preflight(url, expected_revision=revision, allow_descendants=True) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg

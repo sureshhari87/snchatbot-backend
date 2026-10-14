@@ -42,6 +42,7 @@ from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import delivery_admin_api
+import delivery_draft_api
 
 try:
     import firebase_admin
@@ -10052,6 +10053,7 @@ custom_design_balance_api.install(
 )
 
 delivery_admin_api.install(app, get_db, require_permission)
+delivery_draft_api.install(app, get_db, require_permission)
 
 
 financial_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])

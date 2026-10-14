@@ -24,6 +24,7 @@ FINANCIAL_REVISION = "0029_voucher_funding"
 CATALOGUE_REVISION = "0030_catalogue_extras"
 INBOX_REVISION = "0031_inbox_broadcast"
 BALANCE_REVISION = "0032_custom_design_balances"
+DELIVERY_DRAFT_REVISION = "0033_delivery_drafts"
 CATALOGUE_TABLES = {
     "recently_viewed_products",
     "catalogue_home_layout",
@@ -126,6 +127,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
         CATALOGUE_REVISION,
         INBOX_REVISION,
         BALANCE_REVISION,
+        DELIVERY_DRAFT_REVISION,
     ):
         raise ValueError("Unsupported staging schema requirement")
     import psycopg
@@ -152,6 +154,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             CATALOGUE_REVISION,
             INBOX_REVISION,
             BALANCE_REVISION,
+            DELIVERY_DRAFT_REVISION,
         ]
         if versions != [(expected_revision,)]:
             if (
@@ -173,6 +176,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             CATALOGUE_REVISION,
             INBOX_REVISION,
             BALANCE_REVISION,
+            DELIVERY_DRAFT_REVISION,
         ) and not SAVINGS_TABLES.issubset(tables):
             raise ValueError("Required savings schema tables are missing")
         if expected_revision in (
@@ -181,6 +185,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             CATALOGUE_REVISION,
             INBOX_REVISION,
             BALANCE_REVISION,
+            DELIVERY_DRAFT_REVISION,
         ) and not CUSTOM_DESIGNS_TABLES.issubset(tables):
             raise ValueError("Required custom-design schema tables are missing")
         if expected_revision in (
@@ -188,25 +193,32 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             CATALOGUE_REVISION,
             INBOX_REVISION,
             BALANCE_REVISION,
+            DELIVERY_DRAFT_REVISION,
         ) and not FINANCIAL_TABLES.issubset(tables):
             raise ValueError("Required rewards/voucher schema tables are missing")
         if expected_revision in (
             CATALOGUE_REVISION,
             INBOX_REVISION,
             BALANCE_REVISION,
+            DELIVERY_DRAFT_REVISION,
         ) and not CATALOGUE_TABLES.issubset(tables):
             raise ValueError("Required catalogue schema tables are missing")
         if (
-            expected_revision in (INBOX_REVISION, BALANCE_REVISION)
+            expected_revision in (INBOX_REVISION, BALANCE_REVISION, DELIVERY_DRAFT_REVISION)
             and "inbox_broadcasts" not in tables
         ):
             raise ValueError("Required inbox audit schema is missing")
-        if expected_revision == BALANCE_REVISION and not {
+        if expected_revision in (BALANCE_REVISION, DELIVERY_DRAFT_REVISION) and not {
             "custom_design_balance_requests",
             "custom_design_balance_checkouts",
             "custom_design_balance_entries",
         }.issubset(tables):
             raise ValueError("Required balance schema tables are missing")
+        if expected_revision == DELIVERY_DRAFT_REVISION and not {
+            "delivery_drafts",
+            "delivery_draft_audits",
+        }.issubset(tables):
+            raise ValueError("Required inactive delivery draft schema tables are missing")
         return "ready"
 
 
