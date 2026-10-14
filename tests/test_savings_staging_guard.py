@@ -52,11 +52,17 @@ def test_savings_schema_requires_every_table_read_only(missing):
         assert conn.execute.call_args_list[0].args == ("SET TRANSACTION READ ONLY",)
 
 
-def test_render_requires_current_catalogue_revision_even_while_feature_disabled():
+def test_render_requires_current_catalogue_or_validated_descendant_while_feature_disabled(
+    monkeypatch,
+):
+    monkeypatch.delenv("CUSTOM_DESIGN_BALANCE_ENABLED", raising=False)
+    monkeypatch.delenv("INBOX_BROADCAST_ENABLED", raising=False)
     with patch("scripts.render_staging.preflight", return_value="empty") as check:
         with pytest.raises(ValueError):
             verify_database(URL)
-        check.assert_called_once_with(URL, expected_revision=CATALOGUE_REVISION)
+        check.assert_called_once_with(
+            URL, expected_revision=CATALOGUE_REVISION, allow_descendants=True
+        )
 
 
 def test_unknown_schema_requirement_never_connects():
