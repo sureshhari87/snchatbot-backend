@@ -4,8 +4,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import jwt
 from custom_balance_fakes import Provider
-from jose import jwt
 from test_payment_concurrency_postgres import local_postgres as _pg
 
 import config
