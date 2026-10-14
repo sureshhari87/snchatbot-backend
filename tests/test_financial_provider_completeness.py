@@ -50,3 +50,31 @@ def test_changed_total_does_not_infer_complete_snapshot():
     assert (
         error.value.detail == "Financial provider collection unavailable [disputes:total_changed]"
     )
+
+
+def test_staging_null_compat_cannot_hide_unretrieved_disputes(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.setenv("RAZORPAY_TEST_NULL_DISPUTES_COMPAT", "1")
+    provider = Provider(
+        [
+            page(101, ["disp_" + str(i) for i in range(100)]),
+            {"entity": "collection", "count": None, "items": None},
+        ]
+    )
+    provider.RAZORPAY_KEY_ID = "rzp_test_synthetic"
+    with pytest.raises(HTTPException) as error:
+        collection(provider, "disputes")
+    assert (
+        error.value.detail
+        == "Financial provider collection unavailable [disputes:incomplete_collection]"
+    )
+
+
+def test_staging_null_compat_does_not_apply_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("RAZORPAY_TEST_NULL_DISPUTES_COMPAT", "1")
+    provider = Provider([{"entity": "collection", "count": None, "items": None}])
+    provider.RAZORPAY_KEY_ID = "rzp_test_synthetic"
+    with pytest.raises(HTTPException) as error:
+        collection(provider, "disputes")
+    assert error.value.detail == "Financial provider collection unavailable [disputes:count_type]"

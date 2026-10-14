@@ -121,6 +121,7 @@ def render_environment(source):
         HTTPS_REDIRECT="1",
         PROXY_HEADERS="1",
         FORWARDED_ALLOW_IPS="*",
+        RAZORPAY_TEST_NULL_DISPUTES_COMPAT="1",
         HOST=BIND_HOST,
         PORT=str(port),
         WEB_CONCURRENCY="1",
