@@ -20,6 +20,16 @@ def install(db):
             key="commerce.delivery_routes", value=json.dumps(approved_routes()), is_public=False
         )
     )
+    # Explicit synthetic readiness; never change runtime seed metadata.
+    for product in db.query(Product).all():
+        product.source_data = {
+            **(product.source_data or {}),
+            "readyToShip": True,
+            "madeToOrder": False,
+            "handlingDays": 0,
+            "manufacturingDays": 0,
+            "sizeAdjustmentDays": 0,
+        }
     db.commit()
     return db.query(Product).filter(Product.in_stock.is_(True)).first()
 

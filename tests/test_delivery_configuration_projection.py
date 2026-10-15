@@ -93,10 +93,27 @@ def test_quote_preserves_dates_and_skips_incomplete_inactive_draft(db, monkeypat
         )
     )
     db.commit()
-    monkeypatch.setattr(commerce, "product_or_error", lambda *args: object())
+    monkeypatch.setattr(
+        commerce,
+        "product_or_error",
+        lambda *args: SimpleNamespace(
+            source_data={
+                "readyToShip": True,
+                "madeToOrder": False,
+                "handlingDays": 0,
+                "manufacturingDays": 0,
+                "sizeAdjustmentDays": 0,
+            }
+        ),
+    )
     monkeypatch.setattr(commerce, "check_stock", lambda *args: None)
     request = SimpleNamespace(
-        product_id=1, quantity=1, destination_pin="625009", delivery_method="standard"
+        product_id=1,
+        quantity=1,
+        destination_pin="625009",
+        delivery_method="standard",
+        selected_size="",
+        selected_variant="",
     )
     now = datetime(2026, 10, 13, 10, 0, tzinfo=timezone.utc)
     result = commerce.delivery_quote(db, request, now)
@@ -116,10 +133,27 @@ def test_invalid_active_header_does_not_enable_broad_coverage(db, monkeypatch):
         )
     )
     db.commit()
-    monkeypatch.setattr(commerce, "product_or_error", lambda *args: object())
+    monkeypatch.setattr(
+        commerce,
+        "product_or_error",
+        lambda *args: SimpleNamespace(
+            source_data={
+                "readyToShip": True,
+                "madeToOrder": False,
+                "handlingDays": 0,
+                "manufacturingDays": 0,
+                "sizeAdjustmentDays": 0,
+            }
+        ),
+    )
     monkeypatch.setattr(commerce, "check_stock", lambda *args: None)
     request = SimpleNamespace(
-        product_id=1, quantity=1, destination_pin="625009", delivery_method="standard"
+        product_id=1,
+        quantity=1,
+        destination_pin="625009",
+        delivery_method="standard",
+        selected_size="",
+        selected_variant="",
     )
     with pytest.raises(HTTPException) as error:
         commerce.delivery_quote(db, request)

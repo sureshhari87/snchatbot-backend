@@ -23,6 +23,16 @@ def configure_delivery(db):
             is_public=False,
         )
     )
+    # Explicit synthetic readiness; never change runtime seed metadata.
+    for product in db.query(Product).all():
+        product.source_data = {
+            **(product.source_data or {}),
+            "readyToShip": True,
+            "madeToOrder": False,
+            "handlingDays": 0,
+            "manufacturingDays": 0,
+            "sizeAdjustmentDays": 0,
+        }
     db.commit()
 
 

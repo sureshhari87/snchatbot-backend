@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from delivery_rules import calendar as delivery_calendar
 from delivery_rules import route_header
 from models import AppConfigEntry, CommerceCartItem, Product, utc_now
+from product_readiness import readiness
 from schemas import ProductOut
 
 
@@ -28,6 +29,7 @@ class CartQuantity(BaseModel):
 
 
 class DeliveryRequest(BaseModel):
+    selected_size: str = Field(default="", max_length=80)
     product_id: int = Field(gt=0)
     destination_pin: str = Field(pattern=r"^[1-9][0-9]{5}$")
     quantity: int = Field(default=1, ge=1, le=20)
@@ -80,8 +82,17 @@ def owned_item(db, user_id, item_id):
 
 
 def delivery_quote(db, request, now=None):
+    try:
+        return _delivery_quote(db, request, now)
+    except OverflowError:
+        raise HTTPException(409, "Delivery calendar requires admin review") from None
+
+
+def _delivery_quote(db, request, now=None):
     product = product_or_error(db, request.product_id)
     check_stock(product, request.quantity)
+    if request.selected_size or request.selected_variant:
+        check_selection(product, request.selected_size, request.selected_variant)
     entry = db.query(AppConfigEntry).filter_by(key="commerce.delivery_routes").first()
     try:
         routes = json.loads(entry.value) if entry else []
@@ -114,6 +125,13 @@ def delivery_quote(db, request, now=None):
         hour, minute = map(int, validated["cutoff"].split(":"))
     except (ValueError, TypeError, KeyError):
         raise HTTPException(503, "Delivery service configuration is invalid") from None
+    try:
+        product_handling, extra_days, earliest, made = readiness(
+            product.source_data, request.selected_size
+        )
+    except (ValueError, TypeError, OverflowError):
+        raise HTTPException(409, "Product readiness requires admin review") from None
+    handling = max(handling, product_handling) + extra_days
     now = now or datetime.now(timezone.utc)
     local = now.astimezone(timezone(timedelta(minutes=330)))
     start = local.date()
@@ -134,16 +152,21 @@ def delivery_quote(db, request, now=None):
         return day
 
     dispatch = advance(start, handling)
+    if earliest is not None and earliest > dispatch:
+        dispatch = earliest
+        while not working(dispatch):
+            dispatch += timedelta(days=1)
     return {
         "serviceable": True,
         "destinationPin": request.destination_pin,
         "fulfilmentGroup": validated["fulfilment_group"],
         "handlingBusinessDays": handling,
+        "preparationBusinessDays": handling,
         "courierTransitBusinessDays": {"minimum": minimum, "maximum": maximum},
         "earliestDeliveryDate": advance(dispatch, minimum).isoformat(),
         "latestDeliveryDate": advance(dispatch, maximum).isoformat(),
         "estimatedDispatchDate": dispatch.isoformat(),
-        "madeToOrder": False,
+        "madeToOrder": made,
         "deliveryMethod": request.delivery_method,
         "confidence": "estimated",
         "estimateSource": "configured_sla",
@@ -166,12 +189,15 @@ def validate_checkout(db, payload, user):
     if len(pin) != 6 or not pin.isdigit() or pin.startswith("0"):
         raise HTTPException(422, "Enter a valid 6-digit delivery PIN code")
     totals, versions, quotes, options = {}, {}, [], {}
+    selections = {}
     for item in payload.items:
         if not item.backend_product_id or str(item.backend_product_id) != item.product_id:
             raise HTTPException(422, "Use the same numeric product ID throughout checkout")
         product_id = item.backend_product_id
         check_selection(product_or_error(db, product_id), item.selected_size, item.selected_variant)
         totals[product_id] = totals.get(product_id, 0) + item.qty
+        selection = (product_id, item.selected_size or "")
+        selections[selection] = selections.get(selection, 0) + item.qty
         if item.cart_item_id:
             try:
                 cart_id = int(item.cart_item_id)
@@ -187,8 +213,16 @@ def validate_checkout(db, payload, user):
     for product_id, quantity in totals.items():
         if quantity > 20:
             raise HTTPException(422, "Maximum quantity per product is 20")
+        check_stock(product_or_error(db, product_id), quantity)
+    for (product_id, selected_size), quantity in selections.items():
         quote = delivery_quote(
-            db, DeliveryRequest(product_id=product_id, quantity=quantity, destination_pin=pin)
+            db,
+            DeliveryRequest(
+                product_id=product_id,
+                quantity=quantity,
+                destination_pin=pin,
+                selected_size=selected_size,
+            ),
         )
         quotes.append(
             {
