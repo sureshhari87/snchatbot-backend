@@ -10,7 +10,7 @@ from decimal import Decimal
 from fastapi import Depends, HTTPException, Query, Response
 from sqlalchemy import func, or_
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 import config
 from custom_design_balance import accounting
@@ -150,18 +150,91 @@ def frozen_quote(row):
     return quote
 
 
-def reservation_proof(db, row):
+def prepare_proofs(db, rows, context):
+    orders, events, reservations = context["orders"], context["events"], context["reservations"]
+    order_ids = {row.order_id for row in rows if row.order_id is not None} - orders.keys()
+    event_ids = {row.id for row in rows} - events.keys()
+    for row in rows:
+        if row.order_id is not None:
+            linked = reservations.setdefault(row.order_id, [])
+            if not any(saved.id == row.id for saved in linked):
+                linked.append(row)
+    for identity in order_ids:
+        orders[identity] = None
+    if order_ids:
+        saved = (
+            db.query(OrderSnapshot)
+            .options(
+                load_only(
+                    OrderSnapshot.id,
+                    OrderSnapshot.user_id,
+                    OrderSnapshot.currency,
+                    OrderSnapshot.order_reference,
+                    OrderSnapshot.payment_reference,
+                    OrderSnapshot.payment_status,
+                )
+            )
+            .filter(OrderSnapshot.id.in_(order_ids))
+            .all()
+        )
+        orders.update({row.id: row for row in saved})
+    for identity in event_ids:
+        events[identity] = []
+    if event_ids:
+        saved = (
+            db.query(FinancialReservationEvent)
+            .filter(
+                FinancialReservationEvent.reservation_id.in_(event_ids),
+                FinancialReservationEvent.action == "payment_posted",
+            )
+            .all()
+        )
+        for row in saved:
+            events[row.reservation_id].append(row)
+
+
+def load_order_proofs(db, order_ids, context):
+    missing = set(order_ids) - context["reservations"].keys()
+    for identity in missing:
+        context["reservations"][identity] = []
+    if missing:
+        rows = (
+            db.query(FinancialReservation)
+            .options(
+                load_only(
+                    FinancialReservation.id,
+                    FinancialReservation.order_id,
+                    FinancialReservation.user_id,
+                    FinancialReservation.state,
+                    FinancialReservation.provider_order_id,
+                    FinancialReservation.provider_payment_id,
+                    FinancialReservation.quote_json,
+                    FinancialReservation.payable_paise,
+                    FinancialReservation.voucher_id,
+                    FinancialReservation.voucher_paise,
+                    FinancialReservation.reward_points,
+                )
+            )
+            .filter(FinancialReservation.order_id.in_(missing))
+            .all()
+        )
+        prepare_proofs(db, rows, context)
+
+
+def reservation_proof(db, row, context):
     require(
         row is not None
         and row.state == "posted"
         and row.provider_payment_id
         and row.provider_order_id
     )
+    if row.id in context["proofs"]:
+        require(context["proofs"][row.id] is not None)
+        return context["proofs"][row.id]
+    context["proofs"][row.id] = None
+    prepare_proofs(db, [row], context)
     quote = frozen_quote(row)
-    require(type(quote.get("payable_paise")) is int and quote["payable_paise"] == row.payable_paise)
-    require(quote.get("voucher_redemption_paise") == row.voucher_paise)
-    require(quote.get("reward_points_used") == row.reward_points)
-    order = db.get(OrderSnapshot, row.order_id)
+    order = context["orders"].get(row.order_id)
     require(order is not None and order.user_id == row.user_id and order.currency == "INR")
     require(
         order.order_reference == row.provider_order_id
@@ -176,37 +249,31 @@ def reservation_proof(db, row):
             quote=quote,
         )
     )
-    event = one(
-        db.query(FinancialReservationEvent).filter_by(
-            reservation_id=row.id, action="payment_posted"
-        )
-    )
+    events = context["events"].get(row.id, [])
+    require(len(events) == 1)
     require(
-        event.evidence_sha256
+        events[0].evidence_sha256
         == digest(dict(payment_id=row.provider_payment_id, evidence_sha256=evidence))
     )
+    context["proofs"][row.id] = evidence, quote
     return evidence, quote
 
 
-def merchandise(db, row):
+def merchandise(db, row, context):
     frozen_quote(row)
     measures = dict(posted_payment_paise=0, pending_payment_paise=0)
     if row.state == "posted":
-        reservation_proof(db, row)
+        reservation_proof(db, row, context)
         measures["posted_payment_paise"] = row.payable_paise
         status = "posted"
     else:
-        require(
-            not db.query(FinancialReservationEvent.id)
-            .filter_by(reservation_id=row.id, action="payment_posted")
-            .first()
-        )
+        require(not context["events"].get(row.id))
         measures["pending_payment_paise"] = row.payable_paise
         status = "pending"
     return measures, status, held(db, row.user_id, row.voucher_id)
 
 
-def savings(db, row):
+def savings(db, row, context):
     scheme = db.get(SavingsScheme, row.scheme_id)
     require(scheme is not None and row.user_id == scheme.user_id)
     hold = active_holds(db, scheme.id).count() > 0
@@ -283,7 +350,7 @@ def savings(db, row):
     return measures, status, hold
 
 
-def custom_designs(db, row):
+def custom_designs(db, row, context):
     quote, advance, request, entry, _, _ = accounting(db, row)
     measures = dict(
         posted_advance_paise=advance.amount_paise if advance else 0,
@@ -320,11 +387,14 @@ def custom_designs(db, row):
     )
 
 
-def redemption_proof(db, entry, user_id=None):
-    reservation = one(db.query(FinancialReservation).filter_by(order_id=entry.order_id))
+def redemption_proof(db, entry, context, user_id=None):
+    load_order_proofs(db, [entry.order_id], context)
+    linked = context["reservations"].get(entry.order_id, [])
+    require(len(linked) == 1)
+    reservation = linked[0]
     if user_id is not None:
         require(reservation.user_id == user_id)
-    evidence, quote = reservation_proof(db, reservation)
+    evidence, quote = reservation_proof(db, reservation, context)
     require(
         entry.evidence_reference == reservation.provider_payment_id
         and entry.evidence_sha256 == evidence
@@ -332,7 +402,7 @@ def redemption_proof(db, entry, user_id=None):
     return reservation, quote
 
 
-def vouchers(db, row):
+def vouchers(db, row, context):
     entries = (
         db.query(GiftVoucherEntry)
         .filter_by(voucher_id=row.id)
@@ -405,9 +475,12 @@ def vouchers(db, row):
         require(funding.state != "posted" and not credits and not events.first())
         measures["pending_funding_paise"] = row.amount_paise
         status = "pending"
+    load_order_proofs(
+        db, [entry.order_id for entry in entries if entry.kind == "redemption"], context
+    )
     for entry in entries:
         if entry.kind == "redemption":
-            reservation, _ = redemption_proof(db, entry)
+            reservation, _ = redemption_proof(db, entry, context)
             require(
                 reservation.voucher_id == row.id
                 and entry.amount_delta_paise == -reservation.voucher_paise
@@ -417,7 +490,7 @@ def vouchers(db, row):
     return measures, status, held(db, voucher_id=row.id)
 
 
-def rewards(db, row):
+def rewards(db, row, context):
     entries = (
         db.query(RewardEntry)
         .filter_by(user_id=row.user_id)
@@ -436,8 +509,9 @@ def rewards(db, row):
     )
     require(reserved == row.reserved_points)
     measures = dict(issued_points=0, used_points=0, reserved_points=reserved)
+    load_order_proofs(db, [entry.order_id for entry in entries], context)
     for entry in entries:
-        reservation, quote = redemption_proof(db, entry, row.user_id)
+        reservation, quote = redemption_proof(db, entry, context, row.user_id)
         if entry.kind == "purchase_credit":
             require(
                 type(quote.get("reward_points_earned")) is int
@@ -465,7 +539,13 @@ def report(db, area, after=0, limit=20):
     with db.no_autoflush:
         rows = db.query(model).filter(identity > after).order_by(identity).limit(limit + 1).all()
         items = []
+        context = {"orders": {}, "events": {}, "reservations": {}, "proofs": {}}
+        if area == "merchandise":
+            prepare_proofs(db, rows[:limit], context)
         for row in rows[:limit]:
+            if area in {"vouchers", "rewards"}:
+                # Bound private proof memory to one account, not the whole page.
+                context = {"orders": {}, "events": {}, "reservations": {}, "proofs": {}}
             record_id = getattr(row, identity.key)
             item = dict(
                 id=record_id,
@@ -476,7 +556,7 @@ def report(db, area, after=0, limit=20):
                 evidence_valid=False,
             )
             try:
-                measures, status, hold = BUILDERS[area](db, row)
+                measures, status, hold = BUILDERS[area](db, row, context)
                 require(
                     set(measures) == set(fields)
                     and all(type(value) is int and value >= 0 for value in measures.values())

@@ -772,3 +772,43 @@ def test_closed_savings_request_requires_saved_resolution(
     item = get(client, admin_headers, "savings").json()["items"][0]
     assert item["status"] == "closed"
     assert item["measures"]["posted_principal_paise"] == "0"
+
+
+def test_reward_posting_proof_queries_are_batched(client, db, admin_headers, verified_user):
+    db.add(
+        RewardAccount(
+            user_id=verified_user.id, balance_points=200, reserved_points=0, created_at=utc_now()
+        )
+    )
+    db.commit()
+    for number in range(20):
+        reservation, evidence, quote = merchandise(db, verified_user)
+        db.add(
+            RewardEntry(
+                user_id=verified_user.id,
+                order_id=reservation.order_id,
+                event_key=f"batch-earned:{number}",
+                kind="purchase_credit",
+                points_delta=quote["reward_points_earned"],
+                evidence_reference=reservation.provider_payment_id,
+                evidence_sha256=evidence,
+                created_at=utc_now(),
+            )
+        )
+        db.commit()
+    reads = []
+
+    def observe(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().lower().startswith("select"):
+            reads.append(statement)
+
+    event.listen(db.get_bind(), "before_cursor_execute", observe)
+    try:
+        response = get(client, admin_headers, "rewards")
+    finally:
+        event.remove(db.get_bind(), "before_cursor_execute", observe)
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["evidence_valid"] is True
+    assert item["measures"]["issued_points"] == "200"
+    assert len(reads) <= 12

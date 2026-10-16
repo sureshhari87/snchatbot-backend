@@ -57,10 +57,13 @@ provider IDs, voucher codes, receipt reasons and customer contact/address data.
 
 ## Local validation and rollout boundary
 
-107 focused reporting/financial/custom-balance/savings regression tests passed.
+108 focused reporting/financial/custom-balance/savings regression tests passed.
 They include no-provider/no-DML reads, permission/environment guards, missing or
 tampered audits, high-value integer precision, held history, cursor pagination,
-distinct complimentary funding and safe unavailable responses.
+distinct complimentary funding and safe unavailable responses. Posting evidence
+reads are batched, and caches are scoped to a single request/account. A
+20-posting reward account is verified in at most 12 SELECTs, avoiding one
+database round-trip per ledger entry.
 
 The separate admin entry point uses the default-off
 SNCHATBOT_FINANCIAL_REPORTING_ENABLED build flag. Production, staging service
