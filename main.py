@@ -59,6 +59,7 @@ import custom_design_payment_api
 import financial_api
 import financial_checkout
 import financial_events
+import financial_reporting
 import inbox_broadcast_api
 import push_devices
 import savings_api
@@ -10053,6 +10054,7 @@ custom_design_balance_api.install(
 )
 
 delivery_admin_api.install(app, get_db, require_permission)
+financial_reporting.install(app, get_db, require_permission)
 delivery_draft_api.install(app, get_db, require_permission)
 
 
