@@ -10,6 +10,7 @@ import inbox_broadcast_models  # noqa: F401
 import models  # noqa: F401
 import push_devices  # noqa: F401
 import push_outbox  # noqa: F401
+import referral_models  # noqa: F401
 import rewards_vouchers_models  # noqa: F401
 import rewards_vouchers_reservation_models  # noqa: F401
 import voucher_funding_models  # noqa: F401

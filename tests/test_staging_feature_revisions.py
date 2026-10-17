@@ -12,7 +12,7 @@ URL = "postgresql://staging_owner:dummy@ep-example.neon.tech/snchatbot_staging?s
 
 def database(monkeypatch, revision, missing=None):
     tables = set(local.SAVINGS_TABLES) | set(local.CUSTOM_DESIGNS_TABLES)
-    tables |= local.FINANCIAL_TABLES | local.CATALOGUE_TABLES
+    tables |= local.FINANCIAL_TABLES | local.CATALOGUE_TABLES | local.REFERRAL_TABLES
     tables |= {
         "alembic_version",
         "push_devices",
@@ -53,6 +53,7 @@ def database(monkeypatch, revision, missing=None):
         local.INBOX_REVISION,
         local.BALANCE_REVISION,
         local.DELIVERY_DRAFT_REVISION,
+        local.REFERRAL_REVISION,
     ],
 )
 def test_known_descendants_are_read_only_and_explicit(monkeypatch, revision):

@@ -62,6 +62,7 @@ import financial_events
 import financial_reporting
 import inbox_broadcast_api
 import push_devices
+import referral_api
 import savings_api
 from admin_directory import install as install_admin_directory
 from catalogue_admin import install as install_catalogue_admin
@@ -10059,6 +10060,7 @@ delivery_draft_api.install(app, get_db, require_permission)
 
 
 financial_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])
+referral_api.install(app, get_db, get_current_user, require_permission)
 
 
 # Catalogue extras use backend ownership and server-selected campaign audiences.

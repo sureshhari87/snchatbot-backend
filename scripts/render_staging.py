@@ -16,6 +16,7 @@ from scripts.local_staging import (  # noqa: E402
     CATALOGUE_REVISION,
     DELIVERY_DRAFT_REVISION,
     INBOX_REVISION,
+    REFERRAL_REVISION,
     payment_test_environment,
     preflight,
     sms_staging_environment,
@@ -80,6 +81,7 @@ def render_environment(source):
         except (ValueError, UnicodeError) as error:
             raise ValueError("A dedicated voucher encryption key is required") from error
     for flag in (
+        "REFERRALS_ENABLED",
         "INBOX_BROADCAST_ENABLED",
         "DELIVERY_DRAFTS_ENABLED",
         "CUSTOM_DESIGN_BALANCE_ENABLED",
@@ -88,6 +90,8 @@ def render_environment(source):
         if env.get(flag, "0").strip() not in {"0", "1"}:
             raise ValueError("New feature flags must be 0 or 1")
         env[flag] = env.get(flag, "0").strip()
+    if env["REFERRALS_ENABLED"] == "1" and financial not in {"1", "true", "yes", "on"}:
+        raise ValueError("Referrals require the SQL rewards/vouchers feature")
     if env["CUSTOM_DESIGN_BALANCE_ENABLED"] == "1" and env.get(
         "CUSTOM_DESIGNS_ENABLED", "0"
     ).lower() not in {"1", "true", "yes", "on"}:
@@ -145,6 +149,8 @@ def verify_database(url):
     )
     if os.getenv("DELIVERY_DRAFTS_ENABLED", "0").strip() == "1":
         revision = DELIVERY_DRAFT_REVISION
+    if os.getenv("REFERRALS_ENABLED", "0").strip() == "1":
+        revision = REFERRAL_REVISION
     if preflight(url, expected_revision=revision, allow_descendants=True) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg

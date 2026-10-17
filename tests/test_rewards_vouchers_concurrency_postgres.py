@@ -28,9 +28,14 @@ local_postgres = _pg
 @pytest.fixture(scope="module")
 def financial_postgres(local_postgres):
     engine = local_postgres.kw["bind"]
+    from referral_models import ReferralApplication, ReferralCode, ReferralCredit, ReferralOutcome
     from voucher_funding_models import FinancialCheckoutAttempt, VoucherFunding, VoucherFundingEvent
 
     tables = [
+        ReferralCredit.__table__,
+        ReferralOutcome.__table__,
+        ReferralApplication.__table__,
+        ReferralCode.__table__,
         FinancialCheckoutAttempt.__table__,
         VoucherFundingEvent.__table__,
         VoucherFunding.__table__,

@@ -179,21 +179,51 @@ def install(app, get_db, get_current_user, require_permission, provider):
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        return [
-            dict(
-                id=row.id,
-                kind=row.kind,
-                points_delta=row.points_delta,
-                order_id=row.order_id,
-                created_at=row.created_at,
-            )
-            for row in db.query(RewardEntry)
-            .filter_by(user_id=user.id)
-            .order_by(RewardEntry.id.desc())
+        from sqlalchemy import case, literal, select, union_all
+
+        import referrals
+        from referral_models import ReferralCredit
+
+        if not referrals.schema_available(db):
+            return [
+                dict(
+                    id=row.id,
+                    kind=row.kind,
+                    points_delta=row.points_delta,
+                    order_id=row.order_id,
+                    created_at=row.created_at,
+                )
+                for row in db.query(RewardEntry)
+                .filter_by(user_id=user.id)
+                .order_by(RewardEntry.id.desc())
+                .offset(offset)
+                .limit(limit)
+                .all()
+            ]
+        normal = select(
+            RewardEntry.id.label("id"),
+            RewardEntry.kind.label("kind"),
+            RewardEntry.points_delta.label("points_delta"),
+            RewardEntry.order_id.label("order_id"),
+            RewardEntry.created_at.label("created_at"),
+        ).where(RewardEntry.user_id == user.id)
+        referral = select(
+            (-ReferralCredit.id).label("id"),
+            literal("referral_credit").label("kind"),
+            ReferralCredit.points_delta.label("points_delta"),
+            case(
+                (ReferralCredit.role == "new_customer", ReferralCredit.order_id), else_=None
+            ).label("order_id"),
+            ReferralCredit.created_at.label("created_at"),
+        ).where(ReferralCredit.user_id == user.id)
+        combined = union_all(normal, referral).subquery()
+        rows = db.execute(
+            select(combined)
+            .order_by(combined.c.created_at.desc(), combined.c.id.desc())
             .offset(offset)
             .limit(limit)
-            .all()
-        ]
+        )
+        return [dict(row._mapping) for row in rows]
 
     @app.post("/vouchers", dependencies=protected)
     def purchase(

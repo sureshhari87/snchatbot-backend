@@ -286,6 +286,9 @@ def settle(db, *, reservation_id, user_id, provider_order, provider_payment):
             "Reservation posted against a different payment",
         )
         return row
+    import referrals
+
+    referral_context = referrals.prepare(db, user_id)
     points = account(db, user_id)
     require(
         not db.query(RewardVoucherHold).filter_by(reward_user_id=user_id).first(),
@@ -385,6 +388,7 @@ def settle(db, *, reservation_id, user_id, provider_order, provider_payment):
         )
         voucher.balance_paise -= row.voucher_paise
         voucher.reserved_paise -= row.voucher_paise
+    referrals.post(db, referral_context, row, payment, evidence)
     row.provider_payment_id = payment["id"]
     row.state = "posted"
     event(db, row, "payment_posted", dict(payment_id=payment["id"], evidence_sha256=evidence))

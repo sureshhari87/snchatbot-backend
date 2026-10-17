@@ -387,6 +387,9 @@ def for_order(db, order):
 
 
 def hold_targets(db, row, adverse):
+    import referrals
+
+    referrals.propagate_holds(db, row, adverse)
     for kind, reference, reason in adverse:
         place_hold(db, kind=kind, reference=reference, reason=reason, reward_user_id=row.user_id)
     if row.voucher_id is not None:
@@ -421,11 +424,25 @@ def post(db, row, order, payment):
         provider_order=order,
         provider_payment=payment,
     )
+    import referrals
+
+    referral_points = 0
+    if referrals.schema_available(db):
+        from sqlalchemy import func
+
+        from referral_models import ReferralCredit
+
+        referral_points = (
+            db.query(func.coalesce(func.sum(ReferralCredit.points_delta), 0))
+            .filter_by(order_id=row.order_id, role="referrer")
+            .scalar()
+        )
+
     quote = json.loads(row.quote_json)
     return dict(
         reward_points_consumed=row.reward_points,
         purchase_rewards_awarded=quote["reward_points_earned"],
-        referral_rewards_awarded=0,
+        referral_rewards_awarded=referral_points,
         gift_voucher_redeemed=bool(row.voucher_paise),
         voucher_redemption_paise=row.voucher_paise,
     )

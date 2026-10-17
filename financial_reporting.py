@@ -498,8 +498,12 @@ def rewards(db, row, context):
         .limit(1001)
         .all()
     )
+    import referrals
+
+    referral_entries = referrals.credits(db, row.user_id)
     require(
-        len(entries) <= 1000 and sum(entry.points_delta for entry in entries) == row.balance_points
+        len(entries) + len(referral_entries) <= 1000
+        and sum(entry.points_delta for entry in entries + referral_entries) == row.balance_points
     )
     reserved = total(
         db.query(FinancialReservation).filter(
@@ -509,7 +513,7 @@ def rewards(db, row, context):
     )
     require(reserved == row.reserved_points)
     measures = dict(issued_points=0, used_points=0, reserved_points=reserved)
-    load_order_proofs(db, [entry.order_id for entry in entries], context)
+    load_order_proofs(db, [entry.order_id for entry in entries + referral_entries], context)
     for entry in entries:
         reservation, quote = redemption_proof(db, entry, context, row.user_id)
         if entry.kind == "purchase_credit":
@@ -521,7 +525,21 @@ def rewards(db, row, context):
         else:
             require(entry.kind == "redemption" and entry.points_delta == -reservation.reward_points)
             measures["used_points"] -= entry.points_delta
-    return measures, "posted" if entries else "not_started", held(db, row.user_id)
+    for entry in referral_entries:
+        application, outcome = referrals.validate_credit(db, entry)
+        reservation, quote = redemption_proof(db, entry, context)
+        require(
+            reservation.user_id == application.referred_id
+            and outcome.merchandise_after_coupon_paise
+            == quote["merchandise_paise"] - quote["coupon_discount_paise"]
+            and outcome.merchandise_after_coupon_paise >= application.minimum_merchandise_paise
+        )
+        measures["issued_points"] += entry.points_delta
+    return (
+        measures,
+        "posted" if entries or referral_entries else "not_started",
+        held(db, row.user_id),
+    )
 
 
 BUILDERS = dict(
