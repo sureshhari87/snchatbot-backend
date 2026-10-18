@@ -6,8 +6,8 @@ import pytest
 from test_staging_push_revision import URL
 
 from scripts.local_staging import (
-    CATALOGUE_REVISION,
     DATABASE,
+    REVIEW_PHOTOS_REVISION,
     ROLE,
     SAVINGS_REVISION,
     SAVINGS_TABLES,
@@ -52,7 +52,7 @@ def test_savings_schema_requires_every_table_read_only(missing):
         assert conn.execute.call_args_list[0].args == ("SET TRANSACTION READ ONLY",)
 
 
-def test_render_requires_current_catalogue_or_validated_descendant_while_feature_disabled(
+def test_render_requires_current_review_schema_or_validated_descendant_while_feature_disabled(
     monkeypatch,
 ):
     monkeypatch.delenv("CUSTOM_DESIGN_BALANCE_ENABLED", raising=False)
@@ -61,7 +61,7 @@ def test_render_requires_current_catalogue_or_validated_descendant_while_feature
         with pytest.raises(ValueError):
             verify_database(URL)
         check.assert_called_once_with(
-            URL, expected_revision=CATALOGUE_REVISION, allow_descendants=True
+            URL, expected_revision=REVIEW_PHOTOS_REVISION, allow_descendants=True
         )
 
 
