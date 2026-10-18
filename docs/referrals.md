@@ -112,3 +112,16 @@ The separate GET-only TEST preflight, using an existing savings capture and excl
 voucher funding, fails closed at disputes:count_type. No new referral payment or
 credit is verified; do not bypass this provider gate. Production, active routes,
 push sending, online custom-design balance creation and voucher 2 remain unchanged.
+
+The follow-up authenticated admin audit verifies one pending application with
+referrer customer 6 and referred customer 5, zero credits, approved frozen terms
+and valid saved evidence. Earlier phone account labels did not prove backend IDs;
+the original-sharing-account phone counter recheck remains open. Code application
+has no inbox notification side effect. No code/binding/balance was reset or
+reassigned during this read-only investigation.
+
+A separate read-only lookup matched the current phone personal code to customer 3
+and read 0/0/0 counters, consistent with the app. The pending referral remains 6-to-5.
+No same-account code replacement or counter bug is established; no code, binding
+or balance was reset/reassigned. Customer 6's phone counter check is not independently
+observed, and provider payment acceptance remains blocked.
