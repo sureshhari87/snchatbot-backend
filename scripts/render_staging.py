@@ -12,7 +12,7 @@ BIND_HOST = "0.0.0.0"  # nosec B104
 sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
-    REVIEW_PURCHASE_REVISION,
+    REVIEW_PHOTOS_REVISION,
     payment_test_environment,
     preflight,
     sms_staging_environment,
@@ -78,6 +78,7 @@ def render_environment(source):
             raise ValueError("A dedicated voucher encryption key is required") from error
     for flag in (
         "REFERRALS_ENABLED",
+        "REVIEW_PHOTOS_ENABLED",
         "INBOX_BROADCAST_ENABLED",
         "DELIVERY_DRAFTS_ENABLED",
         "CUSTOM_DESIGN_BALANCE_ENABLED",
@@ -134,7 +135,7 @@ def render_environment(source):
 
 
 def verify_database(url):
-    revision = REVIEW_PURCHASE_REVISION
+    revision = REVIEW_PHOTOS_REVISION
     if preflight(url, expected_revision=revision, allow_descendants=True) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg

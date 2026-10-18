@@ -205,6 +205,7 @@ from models import (
 )
 from notification_api import install as install_notification_api
 from review_api import install as install_review_api
+from review_photo_api import install as install_review_photo_api
 from safe_http import http_urlopen
 from schemas import (
     AiGeneratedConceptCreate,
@@ -10041,6 +10042,7 @@ install_catalogue_admin(app, get_db, require_permission)
 install_admin_directory(app, get_db, require_permission, serialize_order_snapshot)
 inbox_broadcast_api.install(app, get_db, require_permission, log_admin_action)
 install_review_api(app, get_db, get_current_user, require_permission)
+install_review_photo_api(app, get_db, get_current_user, require_permission, limiter)
 install_notification_api(app, get_db, get_current_user, require_permission, log_admin_action)
 push_devices.install(app, get_db, get_current_user, limiter)
 

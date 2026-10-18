@@ -17,3 +17,5 @@ pydantic-settings
 firebase-admin>=6.5.0
 google-auth[requests]>=2.0.0
 cryptography>=50.0.0,<51
+
+Pillow>=13.0.0,<14

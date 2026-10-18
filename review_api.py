@@ -1,20 +1,24 @@
 """Moderated text reviews with server-owned purchase attribution."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+import review_photos as photos
 from models import Product, ProductReview, ReviewHelpfulVote, User, utc_now
 from review_purchase import eligible_order, verified, verified_expression, verified_ids
 
 
 class ReviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    photo_ids: list[Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]] = Field(
+        default_factory=list, max_length=5
+    )
     rating: int = Field(ge=1, le=5, strict=True)
     title: str = Field(default="", max_length=120)
     body: str = Field(min_length=10, max_length=2000)
@@ -37,7 +41,7 @@ class HelpfulInput(BaseModel):
     helpful: bool = Field(strict=True)
 
 
-def document(row, helpful_count=0, *, verified_purchase=False):
+def document(row, helpful_count=0, *, verified_purchase=False, photo_data=None):
     # Never publish user IDs, email addresses, or admin identifiers.
     return {
         "id": str(row.id),
@@ -50,7 +54,7 @@ def document(row, helpful_count=0, *, verified_purchase=False):
         "createdAt": row.created_at,
         "updatedAt": row.updated_at,
         "verifiedPurchase": verified_purchase,
-        "photoUrls": [],
+        **(photo_data or {"photoUrls": [], "photoIds": []}),
         "helpfulCount": helpful_count,
         "fit": row.fit,
         "sizeFeedback": row.size_feedback,
@@ -80,19 +84,21 @@ def install(app, get_db, get_current_user, require_permission):
         total = sum(counts.values())
         return {
             "approvedCount": total,
-            "photoReviewCount": 0,
+            "photoReviewCount": photos.review_count(db, product_id),
             "averageRating": sum(k * v for k, v in counts.items()) / total if total else 0,
             "starCounts": {str(k): counts.get(k, 0) for k in range(1, 6)},
         }
 
     @app.get("/products/{product_id}/reviews")
     def public_reviews(
+        request: Request,
         product_id: int,
         offset: int = Query(0, ge=0, le=10000),
         limit: int = Query(10, ge=1, le=50),
         sort: Literal["newest", "highest", "lowest", "mostHelpful"] = "newest",
         stars: int | None = Query(None, ge=1, le=5),
         verified_only: bool = False,
+        photos_only: bool = False,
         db: Session = Depends(get_db),
     ):
         product_exists(db, product_id)
@@ -101,6 +107,10 @@ def install(app, get_db, get_current_user, require_permission):
             query = query.filter_by(rating=stars)
         if verified_only:
             query = query.filter(verified_expression(db, ProductReview))
+        if photos_only:
+            if not photos.ENABLED:
+                raise HTTPException(503, "Review photos are not enabled")
+            query = query.filter(photos.exists_for(db, ProductReview))
         if sort == "mostHelpful":
             votes = (
                 db.query(func.count(ReviewHelpfulVote.user_id))
@@ -121,6 +131,7 @@ def install(app, get_db, get_current_user, require_permission):
         )
         page = rows[:limit]
         purchase_ids = verified_ids(db, page)
+        photo_data = photos.documents(db, page, request)
         vote_counts = (
             dict(
                 db.query(ReviewHelpfulVote.review_id, func.count(ReviewHelpfulVote.user_id))
@@ -133,7 +144,12 @@ def install(app, get_db, get_current_user, require_permission):
         )
         return {
             "items": [
-                document(row, vote_counts.get(row.id, 0), verified_purchase=row.id in purchase_ids)
+                document(
+                    row,
+                    vote_counts.get(row.id, 0),
+                    verified_purchase=row.id in purchase_ids,
+                    photo_data=photo_data[row.id],
+                )
                 for row in page
             ],
             "next_offset": offset + limit if len(rows) > limit else None,
@@ -141,33 +157,53 @@ def install(app, get_db, get_current_user, require_permission):
 
     @app.get("/products/{product_id}/reviews/me")
     def own_review(
-        product_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+        request: Request,
+        product_id: int,
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
     ):
         row = db.query(ProductReview).filter_by(product_id=product_id, user_id=user.id).first()
         if row is None:
             raise HTTPException(404, "Review not found")
-        return document(row, verified_purchase=verified(db, row))
+        return document(
+            row,
+            verified_purchase=verified(db, row),
+            photo_data=photos.documents(db, [row], request)[row.id],
+        )
 
     @app.post("/products/{product_id}/reviews", status_code=201)
     def create_review(
+        request: Request,
         product_id: int,
         payload: ReviewInput,
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
         product_exists(db, product_id)
-        row = ProductReview(product_id=product_id, user_id=user.id, **payload.model_dump())
+        photos.lock_owner(db, user.id)
+        row = ProductReview(
+            product_id=product_id, user_id=user.id, **payload.model_dump(exclude={"photo_ids"})
+        )
         row.verified_order_id = eligible_order(db, user.id, product_id)
         # An explicit public display-name workflow is not migrated yet.
         row.display_name = "Sona customer"
         db.add(row)
         try:
+            db.flush()
+            photos.bind(db, row, payload.photo_ids)
             db.commit()
+        except HTTPException:
+            db.rollback()
+            raise
         except IntegrityError:
             db.rollback()
             raise HTTPException(409, "Review already exists; edit the existing review") from None
         db.refresh(row)
-        return document(row, verified_purchase=verified(db, row))
+        return document(
+            row,
+            verified_purchase=verified(db, row),
+            photo_data=photos.documents(db, [row], request)[row.id],
+        )
 
     def owned_review(db, review_id, user):
         row = (
@@ -182,13 +218,17 @@ def install(app, get_db, get_current_user, require_permission):
 
     @app.patch("/reviews/{review_id}")
     def edit_review(
+        request: Request,
         review_id: int,
         payload: ReviewInput,
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
+        photos.lock_owner(db, user.id)
         row = owned_review(db, review_id, user)
-        for name, value in payload.model_dump().items():
+        if "photo_ids" in payload.model_fields_set:
+            photos.bind(db, row, payload.photo_ids)
+        for name, value in payload.model_dump(exclude={"photo_ids"}).items():
             setattr(row, name, value)
         row.status = "pending"
         row.updated_at = utc_now()
@@ -198,13 +238,19 @@ def install(app, get_db, get_current_user, require_permission):
         row.seller_response = None
         db.commit()
         db.refresh(row)
-        return document(row, verified_purchase=verified(db, row))
+        return document(
+            row,
+            verified_purchase=verified(db, row),
+            photo_data=photos.documents(db, [row], request)[row.id],
+        )
 
     @app.delete("/reviews/{review_id}")
     def delete_review(
         review_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
     ):
+        photos.lock_owner(db, user.id)
         row = owned_review(db, review_id, user)
+        photos.bind(db, row, [])
         db.query(ReviewHelpfulVote).filter_by(review_id=row.id).delete()
         db.delete(row)
         db.commit()
@@ -244,6 +290,7 @@ def install(app, get_db, get_current_user, require_permission):
 
     @app.get("/admin/reviews")
     def moderation_queue(
+        request: Request,
         status: Literal["pending", "approved", "rejected", "hidden"] = "pending",
         offset: int = Query(0, ge=0, le=10000),
         limit: int = Query(20, ge=1, le=50),
@@ -259,10 +306,15 @@ def install(app, get_db, get_current_user, require_permission):
             .all()
         )
         purchase_ids = verified_ids(db, rows)
-        return [document(row, verified_purchase=row.id in purchase_ids) for row in rows]
+        photo_data = photos.documents(db, rows, request)
+        return [
+            document(row, verified_purchase=row.id in purchase_ids, photo_data=photo_data[row.id])
+            for row in rows
+        ]
 
     @app.patch("/admin/reviews/{review_id}/moderation")
     def moderate(
+        request: Request,
         review_id: int,
         payload: ModerationInput,
         admin: User = Depends(admin_permission),
@@ -284,4 +336,8 @@ def install(app, get_db, get_current_user, require_permission):
         row.updated_at = row.moderated_at
         db.commit()
         db.refresh(row)
-        return document(row, verified_purchase=verified(db, row))
+        return document(
+            row,
+            verified_purchase=verified(db, row),
+            photo_data=photos.documents(db, [row], request)[row.id],
+        )

@@ -72,5 +72,5 @@ def test_referral_feature_requires_current_review_schema_without_migration(monke
     with pytest.raises(ValueError):
         render.verify_database(URL)
     check.assert_called_once_with(
-        URL, expected_revision=local.REVIEW_PURCHASE_REVISION, allow_descendants=True
+        URL, expected_revision=local.REVIEW_PHOTOS_REVISION, allow_descendants=True
     )

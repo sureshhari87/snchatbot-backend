@@ -18,8 +18,8 @@ link. API input rejects client-supplied attribution fields.
 
 Migration 0035_review_purchase adds a nullable named foreign key and preserves
 existing reviews. Staging remains at 0034; deployment requires a separately
-reviewed source and backup/restore rollout. Review-photo scope is still awaiting
-an owner decision. Verified-only filtering is implemented in FastAPI and Flutter;
+reviewed source and backup/restore rollout. Secure review photos were subsequently approved for local implementation;
+see review-photos.md. Photo enablement and staging acceptance remain pending. Verified-only filtering is implemented in FastAPI and Flutter;
 it applies the same evidence predicate before pagination. The Flutter repository
 fails safely if an older server returns unverified rows for this filter.
 The new staging launcher requires schema 0035 and the attribution column,
