@@ -7,7 +7,8 @@ does not reduce this after-coupon eligibility threshold. Other purchase rewards
 continue using their existing eligible-paid-merchandise calculation.
 
 REFERRALS_ENABLED defaults to 0 and the API also requires REWARDS_VOUCHERS_ENABLED.
-Revision 0034_referrals is local and unapplied. This document authorizes no live
+Revision 0034_referrals was initially local and unapplied. The separately approved
+staging checkpoint is recorded below. This document itself authorizes no live
 migration, configuration, deployment, provider request, charge or balance import.
 
 ## Ownership and immutable terms
@@ -94,3 +95,20 @@ loopback PostgreSQL run passed 13 referral concurrency/immutability cases; all
 disposable servers were stopped. This is local verification, not deployment.
 SQL coupon configuration is still unavailable in financial checkout; the approved
 after-coupon eligibility formula does not authorize enabling coupon inputs.
+
+## Separately authorized staging checkpoint - 2026-10-18
+
+Backend a3ad87c is live on staging at revision 0034 after exact-commit CI, fresh
+backup and isolated restore/migration/data-preservation verification. Staging
+referrals were enabled after saved current-ledger checks and a read-only review
+that preserves customer 3's eleven older orders as prior-purchase exclusions.
+This does not import balances, award legacy credits or complete historical financial
+reconciliation. The matched 191879d customer APK was signature-checked and installed
+without data clearing. Code/terms/reload/self-referral checks passed by user report;
+second-account binding also passed by user report. Persistence/pending-count and
+final admin acceptance remain pending.
+
+The separate GET-only TEST preflight, using an existing savings capture and excluding
+voucher funding, fails closed at disputes:count_type. No new referral payment or
+credit is verified; do not bypass this provider gate. Production, active routes,
+push sending, online custom-design balance creation and voucher 2 remain unchanged.
