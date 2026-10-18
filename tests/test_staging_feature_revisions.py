@@ -139,7 +139,9 @@ def test_enabled_feature_requires_its_revision(monkeypatch, flag, revision):
     monkeypatch.setattr(render, "preflight", check)
     with pytest.raises(ValueError):
         render.verify_database(URL)
-    check.assert_called_once_with(URL, expected_revision=revision, allow_descendants=True)
+    check.assert_called_once_with(
+        URL, expected_revision=local.REVIEW_PURCHASE_REVISION, allow_descendants=True
+    )
 
 
 @pytest.mark.parametrize(

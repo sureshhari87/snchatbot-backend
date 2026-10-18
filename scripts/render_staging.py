@@ -12,11 +12,7 @@ BIND_HOST = "0.0.0.0"  # nosec B104
 sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
-    BALANCE_REVISION,
-    CATALOGUE_REVISION,
-    DELIVERY_DRAFT_REVISION,
-    INBOX_REVISION,
-    REFERRAL_REVISION,
+    REVIEW_PURCHASE_REVISION,
     payment_test_environment,
     preflight,
     sms_staging_environment,
@@ -138,19 +134,7 @@ def render_environment(source):
 
 
 def verify_database(url):
-    revision = (
-        BALANCE_REVISION
-        if os.getenv("CUSTOM_DESIGN_BALANCE_ENABLED", "0").strip() == "1"
-        else (
-            INBOX_REVISION
-            if os.getenv("INBOX_BROADCAST_ENABLED", "0").strip() == "1"
-            else CATALOGUE_REVISION
-        )
-    )
-    if os.getenv("DELIVERY_DRAFTS_ENABLED", "0").strip() == "1":
-        revision = DELIVERY_DRAFT_REVISION
-    if os.getenv("REFERRALS_ENABLED", "0").strip() == "1":
-        revision = REFERRAL_REVISION
+    revision = REVIEW_PURCHASE_REVISION
     if preflight(url, expected_revision=revision, allow_descendants=True) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg

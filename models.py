@@ -63,6 +63,9 @@ class ProductReview(Base):
     id = Column(Integer, primary_key=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    verified_order_id = Column(
+        Integer, ForeignKey("order_snapshots.id", name="fk_review_verified_order"), nullable=True
+    )
     rating = Column(Integer, nullable=False)
     title = Column(String(120), nullable=False, default="")
     body = Column(Text, nullable=False)

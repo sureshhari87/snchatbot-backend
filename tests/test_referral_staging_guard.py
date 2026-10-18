@@ -64,7 +64,7 @@ def test_referrals_require_financial_feature():
         )
 
 
-def test_referral_feature_selects_0034_without_migration(monkeypatch):
+def test_referral_feature_requires_current_review_schema_without_migration(monkeypatch):
     monkeypatch.setenv("REFERRALS_ENABLED", "1")
     monkeypatch.setenv("DELIVERY_DRAFTS_ENABLED", "1")
     check = MagicMock(return_value="empty")
@@ -72,5 +72,5 @@ def test_referral_feature_selects_0034_without_migration(monkeypatch):
     with pytest.raises(ValueError):
         render.verify_database(URL)
     check.assert_called_once_with(
-        URL, expected_revision=local.REFERRAL_REVISION, allow_descendants=True
+        URL, expected_revision=local.REVIEW_PURCHASE_REVISION, allow_descendants=True
     )

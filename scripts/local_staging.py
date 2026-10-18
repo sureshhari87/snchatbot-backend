@@ -26,6 +26,7 @@ INBOX_REVISION = "0031_inbox_broadcast"
 BALANCE_REVISION = "0032_custom_design_balances"
 DELIVERY_DRAFT_REVISION = "0033_delivery_drafts"
 REFERRAL_REVISION = "0034_referrals"
+REVIEW_PURCHASE_REVISION = "0035_review_purchase"
 REFERRAL_TABLES = {
     "referral_codes",
     "referral_applications",
@@ -137,6 +138,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
         BALANCE_REVISION,
         DELIVERY_DRAFT_REVISION,
         REFERRAL_REVISION,
+        REVIEW_PURCHASE_REVISION,
     ):
         raise ValueError("Unsupported staging schema requirement")
     import psycopg
@@ -165,6 +167,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             BALANCE_REVISION,
             DELIVERY_DRAFT_REVISION,
             REFERRAL_REVISION,
+            REVIEW_PURCHASE_REVISION,
         ]
         if versions != [(expected_revision,)]:
             if (
@@ -188,6 +191,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             BALANCE_REVISION,
             DELIVERY_DRAFT_REVISION,
             REFERRAL_REVISION,
+            REVIEW_PURCHASE_REVISION,
         ) and not SAVINGS_TABLES.issubset(tables):
             raise ValueError("Required savings schema tables are missing")
         if expected_revision in (
@@ -198,6 +202,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             BALANCE_REVISION,
             DELIVERY_DRAFT_REVISION,
             REFERRAL_REVISION,
+            REVIEW_PURCHASE_REVISION,
         ) and not CUSTOM_DESIGNS_TABLES.issubset(tables):
             raise ValueError("Required custom-design schema tables are missing")
         if expected_revision in (
@@ -207,6 +212,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             BALANCE_REVISION,
             DELIVERY_DRAFT_REVISION,
             REFERRAL_REVISION,
+            REVIEW_PURCHASE_REVISION,
         ) and not FINANCIAL_TABLES.issubset(tables):
             raise ValueError("Required rewards/voucher schema tables are missing")
         if expected_revision in (
@@ -215,11 +221,18 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             BALANCE_REVISION,
             DELIVERY_DRAFT_REVISION,
             REFERRAL_REVISION,
+            REVIEW_PURCHASE_REVISION,
         ) and not CATALOGUE_TABLES.issubset(tables):
             raise ValueError("Required catalogue schema tables are missing")
         if (
             expected_revision
-            in (INBOX_REVISION, BALANCE_REVISION, DELIVERY_DRAFT_REVISION, REFERRAL_REVISION)
+            in (
+                INBOX_REVISION,
+                BALANCE_REVISION,
+                DELIVERY_DRAFT_REVISION,
+                REFERRAL_REVISION,
+                REVIEW_PURCHASE_REVISION,
+            )
             and "inbox_broadcasts" not in tables
         ):
             raise ValueError("Required inbox audit schema is missing")
@@ -227,19 +240,34 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             BALANCE_REVISION,
             DELIVERY_DRAFT_REVISION,
             REFERRAL_REVISION,
+            REVIEW_PURCHASE_REVISION,
         ) and not {
             "custom_design_balance_requests",
             "custom_design_balance_checkouts",
             "custom_design_balance_entries",
         }.issubset(tables):
             raise ValueError("Required balance schema tables are missing")
-        if expected_revision in (DELIVERY_DRAFT_REVISION, REFERRAL_REVISION) and not {
+        if expected_revision in (
+            DELIVERY_DRAFT_REVISION,
+            REFERRAL_REVISION,
+            REVIEW_PURCHASE_REVISION,
+        ) and not {
             "delivery_drafts",
             "delivery_draft_audits",
         }.issubset(tables):
             raise ValueError("Required inactive delivery draft schema tables are missing")
-        if expected_revision == REFERRAL_REVISION and not REFERRAL_TABLES.issubset(tables):
+        if expected_revision in (
+            REFERRAL_REVISION,
+            REVIEW_PURCHASE_REVISION,
+        ) and not REFERRAL_TABLES.issubset(tables):
             raise ValueError("Required referral schema tables are missing")
+        if expected_revision == REVIEW_PURCHASE_REVISION:
+            columns = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'product_reviews'"
+            ).fetchall()
+            if ("verified_order_id",) not in columns:
+                raise ValueError("Required review purchase attribution column is missing")
         return "ready"
 
 

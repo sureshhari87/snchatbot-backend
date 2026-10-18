@@ -1,4 +1,4 @@
-"""First-stage text review API. Legacy photo/vote/purchase migration stays gated."""
+"""Moderated text reviews with server-owned purchase attribution."""
 
 from datetime import datetime
 from typing import Literal
@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models import Product, ProductReview, ReviewHelpfulVote, User, utc_now
+from review_purchase import eligible_order, verified, verified_expression, verified_ids
 
 
 class ReviewInput(BaseModel):
@@ -36,7 +37,7 @@ class HelpfulInput(BaseModel):
     helpful: bool = Field(strict=True)
 
 
-def document(row, helpful_count=0):
+def document(row, helpful_count=0, *, verified_purchase=False):
     # Never publish user IDs, email addresses, or admin identifiers.
     return {
         "id": str(row.id),
@@ -48,7 +49,7 @@ def document(row, helpful_count=0):
         "moderationStatus": row.status,
         "createdAt": row.created_at,
         "updatedAt": row.updated_at,
-        "verifiedPurchase": False,
+        "verifiedPurchase": verified_purchase,
         "photoUrls": [],
         "helpfulCount": helpful_count,
         "fit": row.fit,
@@ -91,12 +92,15 @@ def install(app, get_db, get_current_user, require_permission):
         limit: int = Query(10, ge=1, le=50),
         sort: Literal["newest", "highest", "lowest", "mostHelpful"] = "newest",
         stars: int | None = Query(None, ge=1, le=5),
+        verified_only: bool = False,
         db: Session = Depends(get_db),
     ):
         product_exists(db, product_id)
         query = db.query(ProductReview).filter_by(product_id=product_id, status="approved")
         if stars is not None:
             query = query.filter_by(rating=stars)
+        if verified_only:
+            query = query.filter(verified_expression(db, ProductReview))
         if sort == "mostHelpful":
             votes = (
                 db.query(func.count(ReviewHelpfulVote.user_id))
@@ -116,6 +120,7 @@ def install(app, get_db, get_current_user, require_permission):
             .all()
         )
         page = rows[:limit]
+        purchase_ids = verified_ids(db, page)
         vote_counts = (
             dict(
                 db.query(ReviewHelpfulVote.review_id, func.count(ReviewHelpfulVote.user_id))
@@ -127,7 +132,10 @@ def install(app, get_db, get_current_user, require_permission):
             else {}
         )
         return {
-            "items": [document(row, vote_counts.get(row.id, 0)) for row in page],
+            "items": [
+                document(row, vote_counts.get(row.id, 0), verified_purchase=row.id in purchase_ids)
+                for row in page
+            ],
             "next_offset": offset + limit if len(rows) > limit else None,
         }
 
@@ -138,7 +146,7 @@ def install(app, get_db, get_current_user, require_permission):
         row = db.query(ProductReview).filter_by(product_id=product_id, user_id=user.id).first()
         if row is None:
             raise HTTPException(404, "Review not found")
-        return document(row)
+        return document(row, verified_purchase=verified(db, row))
 
     @app.post("/products/{product_id}/reviews", status_code=201)
     def create_review(
@@ -149,6 +157,7 @@ def install(app, get_db, get_current_user, require_permission):
     ):
         product_exists(db, product_id)
         row = ProductReview(product_id=product_id, user_id=user.id, **payload.model_dump())
+        row.verified_order_id = eligible_order(db, user.id, product_id)
         # An explicit public display-name workflow is not migrated yet.
         row.display_name = "Sona customer"
         db.add(row)
@@ -158,7 +167,7 @@ def install(app, get_db, get_current_user, require_permission):
             db.rollback()
             raise HTTPException(409, "Review already exists; edit the existing review") from None
         db.refresh(row)
-        return document(row)
+        return document(row, verified_purchase=verified(db, row))
 
     def owned_review(db, review_id, user):
         row = (
@@ -189,7 +198,7 @@ def install(app, get_db, get_current_user, require_permission):
         row.seller_response = None
         db.commit()
         db.refresh(row)
-        return document(row)
+        return document(row, verified_purchase=verified(db, row))
 
     @app.delete("/reviews/{review_id}")
     def delete_review(
@@ -249,7 +258,8 @@ def install(app, get_db, get_current_user, require_permission):
             .limit(limit)
             .all()
         )
-        return [document(row) for row in rows]
+        purchase_ids = verified_ids(db, rows)
+        return [document(row, verified_purchase=row.id in purchase_ids) for row in rows]
 
     @app.patch("/admin/reviews/{review_id}/moderation")
     def moderate(
@@ -274,4 +284,4 @@ def install(app, get_db, get_current_user, require_permission):
         row.updated_at = row.moderated_at
         db.commit()
         db.refresh(row)
-        return document(row)
+        return document(row, verified_purchase=verified(db, row))
