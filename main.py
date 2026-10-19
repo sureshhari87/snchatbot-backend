@@ -1800,11 +1800,9 @@ def send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
             to_email=to_email,
             subject=subject,
             status_code=status_code,
-            response=response_body,
         )
         return False
     except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
         log_event(
             "email.send_failed",
             level=logging.ERROR,
@@ -1813,7 +1811,6 @@ def send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
             subject=subject,
             status_code=exc.code,
             error_type=exc.__class__.__name__,
-            error_body=error_body[:500],
         )
         return False
     except Exception as exc:
@@ -1867,11 +1864,9 @@ def send_email_via_brevo(to_email: str, subject: str, body: str) -> bool:
             to_email=to_email,
             subject=subject,
             status_code=status_code,
-            response=response_body,
         )
         return False
     except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
         log_event(
             "email.send_failed",
             level=logging.ERROR,
@@ -1880,7 +1875,6 @@ def send_email_via_brevo(to_email: str, subject: str, body: str) -> bool:
             subject=subject,
             status_code=exc.code,
             error_type=exc.__class__.__name__,
-            error_body=error_body[:500],
         )
         return False
     except Exception as exc:
@@ -1945,7 +1939,11 @@ def send_email_via_smtp(to_email: str, subject: str, body: str) -> bool:
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
     if is_testing() or not email_provider_is_configured():
-        print(f"EMAIL NOT SENT: {subject} -> {to_email}\n{body}")
+        log_event(
+            "email.skipped",
+            provider=EMAIL_PROVIDER,
+            reason="testing" if is_testing() else "not_configured",
+        )
         return False
 
     if EMAIL_PROVIDER == "resend":
@@ -9850,9 +9848,15 @@ def chat(
     )
 
 
+def require_email_recovery_provider() -> None:
+    if not is_testing() and not email_provider_is_configured():
+        raise HTTPException(status_code=503, detail="Email recovery is temporarily unavailable")
+
+
 @app.post("/forgot-password", response_model=MessageResponse)
 @limiter.limit("3/minute")
 def forgot_password(request: Request, req: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    require_email_recovery_provider()
     user = db.query(User).filter(User.email == req.email).first()
 
     generic_response = MessageResponse(
@@ -9942,6 +9946,7 @@ def verify_email_click(
 def resend_verification(
     request: Request, req: ResendVerificationRequest, db: Session = Depends(get_db)
 ):
+    require_email_recovery_provider()
     generic_response = MessageResponse(
         message="If the email exists and is not yet verified, a verification email has been generated."
     )
