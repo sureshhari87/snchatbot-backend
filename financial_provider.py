@@ -87,6 +87,10 @@ def collection(provider, path, *, paginated=True):
             invalid_collection(path, "items")
         if response_count < len(items):
             invalid_collection(path, "count_range")
+        # A single-page read cannot establish capture uniqueness when the
+        # provider advertises payment records it did not return.
+        if not paginated and response_count != len(items):
+            invalid_collection(path, "incomplete_collection")
         if len(items) > 100:
             invalid_collection(path, "page_size")
         if any(not isinstance(item, dict) for item in items):

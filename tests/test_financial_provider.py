@@ -15,10 +15,13 @@ class TotalCountProvider:
         }
 
 
-def test_collection_accepts_provider_total_count_for_single_page():
-    assert collection(TotalCountProvider(), "orders/order_Test/payments", paginated=False) == [
-        {"id": "pay_Test"}
-    ]
+def test_collection_rejects_incomplete_provider_total_for_single_page():
+    with pytest.raises(HTTPException) as caught:
+        collection(TotalCountProvider(), "orders/order_Test/payments", paginated=False)
+    assert caught.value.status_code == 503
+    assert caught.value.detail == (
+        "Financial provider collection unavailable [order_payments:incomplete_collection]"
+    )
 
 
 class MalformedDisputesProvider:

@@ -3,7 +3,7 @@
 import pytest
 from fastapi import HTTPException
 
-from financial_provider import collection
+from financial_provider import capture_id, collection
 
 
 class Provider:
@@ -78,3 +78,41 @@ def test_staging_null_compat_does_not_apply_in_production(monkeypatch):
     with pytest.raises(HTTPException) as error:
         collection(provider, "disputes")
     assert error.value.detail == "Financial provider collection unavailable [disputes:count_type]"
+
+
+class OrderPaymentsProvider:
+    def __init__(self, count):
+        self.count = count
+        self.calls = []
+
+    def call_razorpay(self, method, path):
+        self.calls.append((method, path))
+        assert (method, path) == ("GET", "orders/order_synthetic/payments")
+        return 200, {
+            "entity": "collection",
+            "count": self.count,
+            "items": [
+                {
+                    "entity": "payment",
+                    "id": "pay_synthetic",
+                    "order_id": "order_synthetic",
+                    "status": "captured",
+                }
+            ],
+        }
+
+
+def test_partial_order_payments_cannot_establish_a_unique_capture():
+    provider = OrderPaymentsProvider(count=2)
+    with pytest.raises(HTTPException) as error:
+        capture_id(provider, "order_synthetic")
+    assert error.value.status_code == 503
+    assert error.value.detail == (
+        "Financial provider collection unavailable [order_payments:incomplete_collection]"
+    )
+    assert provider.calls == [("GET", "orders/order_synthetic/payments")]
+
+
+def test_complete_order_payments_can_establish_a_unique_capture():
+    provider = OrderPaymentsProvider(count=1)
+    assert capture_id(provider, "order_synthetic") == "pay_synthetic"
