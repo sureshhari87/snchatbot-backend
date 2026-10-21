@@ -37,7 +37,9 @@ def install(app, get_db, require_permission):
     def public_rates(db: Session = Depends(get_db)):
         saved = read_rates(db)
         return {
-            key: saved[key] for key in ("gold18k", "gold22k", "gold24k", "silver") if key in saved
+            key: saved[key]
+            for key in ("gold18k", "gold22k", "gold24k", "silver", "platinum950")
+            if key in saved
         }
 
     @app.get("/admin/catalogue/products")
@@ -91,6 +93,10 @@ def install(app, get_db, require_permission):
                 key: float(number(data.get(key), key))
                 for key in ("gold18k", "gold22k", "gold24k", "silver")
             }
+            saved = read_rates(db, lock=True)
+            platinum = data.get("platinum950", saved.get("platinum950"))
+            if platinum is not None:
+                normalized["platinum950"] = float(number(platinum, "platinum950"))
             if any(value <= 0 for value in normalized.values()):
                 raise ValueError("All metal rates must be positive")
             entry = db.query(AppConfigEntry).filter_by(key=RATES_KEY).with_for_update().first()

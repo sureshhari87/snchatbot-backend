@@ -27,19 +27,29 @@ def first(data, *keys, default=None):
     )
 
 
+def is_gift(data):
+    return str(data.get("category", "")).strip().lower() in {"gift", "gifts", "gift items"}
+
+
 def dynamic(data):
+    if is_gift(data):
+        return False
     flag = first(data, "useDynamicPricing", "use_dynamic_pricing")
     metal = str(first(data, "metalType", "metal_type", "metal", "category", default="")).lower()
     weight = first(
         data, "metalWeight", "metal_weight", "netWeight", "net_weight", "weight", default=0
     )
     enabled = flag is None or flag is True or str(flag).lower() in {"true", "1"}
-    return enabled and bool(re.search(r"\b(gold|silver)\b", metal)) and number(weight, "weight") > 0
+    return (
+        enabled
+        and bool(re.search(r"\b(gold|silver|platinum)\b", metal))
+        and number(weight, "weight") > 0
+    )
 
 
 def price(data, rates):
     if not dynamic(data):
-        if first(data, "useDynamicPricing", "use_dynamic_pricing") is True:
+        if not is_gift(data) and first(data, "useDynamicPricing", "use_dynamic_pricing") is True:
             raise ValueError("Dynamic product requires a supported metal and positive weight")
         result = number(
             first(data, "price", "sellingPrice", "selling_price", "salePrice", default=0), "price"
@@ -51,8 +61,13 @@ def price(data, rates):
             .upper()
             .replace("KT", "K")
         )
+        platinum = bool(re.search(r"\bplatinum\b", metal))
+        if platinum and purity not in {"PT950", "PT 950", "950"}:
+            raise ValueError("Platinum market pricing requires Pt950 purity")
         key = (
-            "silver"
+            "platinum950"
+            if platinum
+            else "silver"
             if re.search(r"\bsilver\b", metal)
             else {"18K": "gold18k", "24K": "gold24k"}.get(purity, "gold22k")
         )
@@ -85,6 +100,14 @@ def price(data, rates):
 
 
 def product_values(data, rates):
+    data = dict(data)
+    if is_gift(data):
+        data["useDynamicPricing"] = False
+    huid = str(data.get("huid") or "").strip().upper()
+    if huid and not re.fullmatch(r"[A-Z0-9]{6}", huid):
+        raise ValueError("HUID must contain exactly 6 letters/numbers")
+    if huid:
+        data["huid"] = huid
     name = str(data.get("name") or "").strip()
     if not name:
         raise ValueError("Product name is required")
