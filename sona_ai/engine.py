@@ -55,7 +55,7 @@ def _has_customer_price(product: Product) -> bool:
 
 
 def parse_query(request: SearchRequest) -> dict[str, Any]:
-    query = request.query.lower()
+    query = re.sub(r"(?<=\d)o(?=k\b)", "0", request.query.lower())
     under = PRICE_UNDER.search(query)
     over = PRICE_OVER.search(query)
     category = request.category or _category_from_query(query)

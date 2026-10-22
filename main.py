@@ -35,7 +35,7 @@ from pwdlib import PasswordHash
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import String as SqlString
-from sqlalchemy import cast, inspect, or_, text
+from sqlalchemy import and_, cast, func, inspect, or_, text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
@@ -2426,6 +2426,32 @@ def metadata_text_match(column, value: str):
     return cast(column, SqlString).ilike(f"%{value.strip()}%")
 
 
+def catalogue_category_match(category: str):
+    """Match jewellery type without confusing its material category."""
+    key = category.strip().lower()
+    aliases = {
+        "necklace": ("necklace", "necklaces", "chain", "chains"),
+        "earring": ("earring", "earrings", "stud", "studs", "jhumka", "jhumkas"),
+    }.get(key, (key, key + "s"))
+    conditions = [
+        column.ilike(alias)
+        for alias in aliases
+        for column in (Product.category, Product.product_type)
+    ]
+    if key in {"ring", "necklace", "earring", "bangle", "bracelet", "pendant", "anklet", "coin"}:
+        name = " " + func.lower(func.replace(func.replace(Product.name, "-", " "), "_", " ")) + " "
+        conditions.append(
+            and_(
+                or_(Product.product_type.is_(None), Product.product_type == ""),
+                func.lower(Product.category).in_(
+                    ["gold", "gold jewellery", "silver", "silver jewellery", "diamond", "platinum"]
+                ),
+                or_(*[name.like(f"% {alias} %") for alias in aliases]),
+            )
+        )
+    return or_(*conditions)
+
+
 def product_search_query(
     db: Session,
     q: str | None = None,
@@ -2472,7 +2498,7 @@ def product_search_query(
                 )
             )
     if category:
-        query = query.filter(Product.category.ilike(category))
+        query = query.filter(catalogue_category_match(category))
     if metal:
         query = query.filter(Product.metal.ilike(metal))
     if product_type:
@@ -3059,6 +3085,7 @@ def extract_price_range(message: str) -> tuple[float, float] | None:
 
 
 def extract_budget_limit(message: str) -> float | None:
+    message = re.sub(r"(?<=\d)[oO](?=k\b)", "0", message)
     patterns = [
         rf"(?:under|below|less than|up to|upto|max|maximum|within|budget(?: of)?)\s*{PRICE_AMOUNT_PATTERN}",
         rf"{PRICE_AMOUNT_PATTERN}\s*(?:or less|max|budget)",
@@ -6478,7 +6505,7 @@ def filter_products(
 
     categories = category_options_for_filters(filters)
     if categories:
-        query = query.filter(or_(*[Product.category.ilike(category) for category in categories]))
+        query = query.filter(or_(*[catalogue_category_match(category) for category in categories]))
 
     if filters.get("metal"):
         query = query.filter(Product.metal.ilike(filters["metal"]))
