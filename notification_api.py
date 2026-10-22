@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+import notification_retention as retention
 from models import CustomerNotification, User, utc_now
 
 
@@ -46,14 +47,10 @@ def install(app, get_db, get_current_user, require_permission, log_admin_action)
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        rows = (
-            db.query(CustomerNotification)
-            .filter_by(user_id=user.id)
-            .order_by(CustomerNotification.id.desc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
+        query = db.query(CustomerNotification).filter_by(user_id=user.id)
+        if retention.enabled():
+            query = query.filter(retention.visible_condition())
+        rows = query.order_by(CustomerNotification.id.desc()).offset(offset).limit(limit).all()
         return [document(row) for row in rows]
 
     @app.post("/notifications/seen")
@@ -61,13 +58,24 @@ def install(app, get_db, get_current_user, require_permission, log_admin_action)
         payload: SeenInput, user: User = Depends(get_current_user), db: Session = Depends(get_db)
     ):
         # Only mark rows actually fetched by the caller; never consume future messages.
-        db.query(CustomerNotification).filter(
+        query = db.query(CustomerNotification).filter(
             CustomerNotification.user_id == user.id,
             CustomerNotification.id.in_(payload.ids),
             CustomerNotification.read_at.is_(None),
-        ).update({"read_at": utc_now()}, synchronize_session=False)
+        )
+        now = utc_now()
+        if retention.enabled():
+            query = query.filter(retention.visible_condition(now))
+        query.update({"read_at": now}, synchronize_session=False)
         db.commit()
         return {"ok": True}
+
+    @app.get("/admin/notifications/retention-preview")
+    def retention_preview(
+        admin: User = Depends(require_permission("support:manage")),
+        db: Session = Depends(get_db),
+    ):
+        return retention.preview(db)
 
     @app.post("/admin/notifications", status_code=201)
     def create(
