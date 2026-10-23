@@ -8,6 +8,7 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from catalogue_visibility import is_public_product
 from delivery_rules import calendar as delivery_calendar
 from delivery_rules import route_header
 from models import AppConfigEntry, CommerceCartItem, Product, utc_now
@@ -39,13 +40,13 @@ class DeliveryRequest(BaseModel):
 
 def product_or_error(db, product_id):
     product = db.get(Product, product_id)
-    if product is None:
+    if not is_public_product(product):
         raise HTTPException(404, "Product not found")
     return product
 
 
 def check_stock(product, quantity):
-    if not product.in_stock or product.stock_quantity < quantity:
+    if not is_public_product(product) or not product.in_stock or product.stock_quantity < quantity:
         raise HTTPException(409, "Requested quantity is no longer in stock")
 
 
@@ -63,6 +64,8 @@ def check_selection(product, size="", variant=""):
 
 def cart_out(db, item):
     product = db.get(Product, item.product_id)
+    if not is_public_product(product):
+        product = None
     return {
         "id": item.id,
         "product_id": item.product_id,

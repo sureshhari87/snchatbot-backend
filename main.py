@@ -66,7 +66,9 @@ import referral_api
 import savings_api
 from admin_directory import install as install_admin_directory
 from catalogue_admin import install as install_catalogue_admin
+from catalogue_bulk_api import install as install_catalogue_bulk
 from catalogue_extras import install as install_catalogue_extras
+from catalogue_visibility import is_public_product, public_product_condition
 from commerce import install as install_commerce_routes
 from config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
@@ -2282,9 +2284,9 @@ def log_admin_action(
     )
 
 
-def get_product_or_404(db: Session, product_id: int) -> Product:
+def get_product_or_404(db: Session, product_id: int, *, include_inactive: bool = False) -> Product:
     product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    if not product or (not include_inactive and not is_public_product(product)):
         raise HTTPException(status_code=404, detail="Product not found")
     return product
 
@@ -2469,7 +2471,7 @@ def product_search_query(
     gift_intent: str | None = None,
     in_stock_only: bool = False,
 ):
-    query = db.query(Product).filter(Product.price > 0)
+    query = db.query(Product).filter(Product.price > 0, public_product_condition())
 
     if q:
         q_value = q.strip()
@@ -6501,7 +6503,7 @@ def filter_products(
     filters: dict[str, Any],
     limit: int = 5,
 ) -> tuple[List[Product], int]:
-    query = db.query(Product).filter(Product.price > 0)
+    query = db.query(Product).filter(Product.price > 0, public_product_condition())
 
     categories = category_options_for_filters(filters)
     if categories:
@@ -7649,11 +7651,14 @@ def list_my_back_in_stock_alerts(
     product_ids = {row.product_id for row in rows}
     products = {
         product.id: product
-        for product in db.query(Product).filter(Product.id.in_(product_ids)).all()
+        for product in db.query(Product)
+        .filter(Product.id.in_(product_ids), public_product_condition())
+        .all()
     }
     return [
         back_in_stock_response(row, products[row.product_id])
         for row in rows
+        if row.product_id in products
         if row.product_id in products
     ]
 
@@ -7689,13 +7694,15 @@ def similar_products(
     db: Session = Depends(get_db),
 ):
     product = get_product_or_404(db, product_id)
+    if not is_public_product(product):
+        raise HTTPException(404, "Product not found")
     filters = []
     if product.category:
         filters.append(Product.category.ilike(product.category))
     if product.metal:
         filters.append(Product.metal.ilike(product.metal))
 
-    query = db.query(Product).filter(Product.id != product.id)
+    query = db.query(Product).filter(Product.id != product.id, public_product_condition())
     if filters:
         query = query.filter(or_(*filters))
 
@@ -7708,7 +7715,10 @@ def similar_products(
 
 @app.get("/products/{product_id}", response_model=ProductOut)
 def get_product(product_id: int, db: Session = Depends(get_db)):
-    return get_product_or_404(db, product_id)
+    product = get_product_or_404(db, product_id)
+    if not is_public_product(product):
+        raise HTTPException(404, "Product not found")
+    return product
 
 
 @app.get("/featured-products", response_model=list[ProductOut])
@@ -7725,7 +7735,11 @@ def featured_products(
     )
     products: list[Product] = []
     for item in featured_items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        product = (
+            db.query(Product)
+            .filter(Product.id == item.product_id, public_product_condition())
+            .first()
+        )
         if product:
             products.append(product)
 
@@ -7733,7 +7747,9 @@ def featured_products(
         seen_ids = {product.id for product in products}
         fallback_products = (
             db.query(Product)
-            .filter(Product.is_featured == True, Product.id.notin_(seen_ids))
+            .filter(
+                Product.is_featured == True, Product.id.notin_(seen_ids), public_product_condition()
+            )
             .order_by(Product.id.asc())
             .limit(clamp_limit(limit) - len(products))
             .all()
@@ -7877,7 +7893,7 @@ def admin_get_product(
     admin_user: User = Depends(require_permission("products:manage")),
     db: Session = Depends(get_db),
 ):
-    return get_product_or_404(db, product_id)
+    return get_product_or_404(db, product_id, include_inactive=True)
 
 
 @app.patch("/admin/products/{product_id}", response_model=ProductOut)
@@ -7888,7 +7904,7 @@ def admin_update_product(
     admin_user: User = Depends(require_permission("products:manage")),
     db: Session = Depends(get_db),
 ):
-    product = get_product_or_404(db, product_id)
+    product = get_product_or_404(db, product_id, include_inactive=True)
     apply_model_updates(product, product_in.model_dump(exclude_unset=True))
     db.commit()
     db.refresh(product)
@@ -7904,7 +7920,7 @@ def admin_update_inventory(
     admin_user: User = Depends(require_permission("products:manage")),
     db: Session = Depends(get_db),
 ):
-    product = get_product_or_404(db, product_id)
+    product = get_product_or_404(db, product_id, include_inactive=True)
     updates = inventory.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No inventory updates provided")
@@ -7956,7 +7972,7 @@ def admin_delete_product(
     admin_user: User = Depends(require_permission("products:manage")),
     db: Session = Depends(get_db),
 ):
-    product = get_product_or_404(db, product_id)
+    product = get_product_or_404(db, product_id, include_inactive=True)
     db.delete(product)
     db.commit()
     log_admin_action(request, admin_user, "delete", "product", product_id)
@@ -8050,7 +8066,7 @@ def admin_create_featured_item(
     admin_user: User = Depends(require_permission("catalog:manage")),
     db: Session = Depends(get_db),
 ):
-    get_product_or_404(db, item_in.product_id)
+    get_product_or_404(db, item_in.product_id, include_inactive=True)
     item = FeaturedItem(**item_in.model_dump())
     db.add(item)
     db.commit()
@@ -8070,7 +8086,7 @@ def admin_update_featured_item(
     item = get_featured_item_or_404(db, item_id)
     updates = item_in.model_dump(exclude_unset=True)
     if "product_id" in updates:
-        get_product_or_404(db, updates["product_id"])
+        get_product_or_404(db, updates["product_id"], include_inactive=True)
     apply_model_updates(item, updates)
     db.commit()
     db.refresh(item)
@@ -8707,7 +8723,11 @@ def list_saved_items(db: Session, model, user_id: int) -> list[SavedProductOut]:
     items = db.query(model).filter(model.user_id == user_id).order_by(model.created_at.desc()).all()
     responses = []
     for item in items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        product = (
+            db.query(Product)
+            .filter(Product.id == item.product_id, public_product_condition())
+            .first()
+        )
         if product:
             responses.append(saved_product_response(item, product))
     return responses
@@ -10071,6 +10091,7 @@ def hash_opaque_token(token: str) -> str:
 
 install_commerce_routes(app, get_db, get_current_user)
 install_catalogue_admin(app, get_db, require_permission)
+install_catalogue_bulk(app, get_db, require_permission)
 install_admin_directory(app, get_db, require_permission, serialize_order_snapshot)
 inbox_broadcast_api.install(app, get_db, require_permission, log_admin_action)
 install_review_api(app, get_db, get_current_user, require_permission)

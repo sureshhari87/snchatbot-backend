@@ -9,6 +9,7 @@ from sqlalchemy import case, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from catalogue_visibility import is_public_product, public_product_condition
 from models import (
     CatalogueCampaign,
     CatalogueCampaignRecipient,
@@ -133,7 +134,7 @@ def install(app, get_db, get_current_user, require_permission):
         rows = (
             db.query(RecentlyViewedProduct, Product)
             .join(Product, Product.id == RecentlyViewedProduct.product_id)
-            .filter(RecentlyViewedProduct.user_id == user.id)
+            .filter(RecentlyViewedProduct.user_id == user.id, public_product_condition())
             .order_by(
                 RecentlyViewedProduct.viewed_at.desc(), RecentlyViewedProduct.product_id.desc()
             )
@@ -154,7 +155,7 @@ def install(app, get_db, get_current_user, require_permission):
     ):
         # Serialize per-customer posts; a revisit updates one row, never a snapshot.
         db.query(User).filter_by(id=user.id).with_for_update().one()
-        if db.get(Product, payload.product_id) is None:
+        if not is_public_product(db.get(Product, payload.product_id)):
             raise HTTPException(404, "Product not found")
         row = db.get(RecentlyViewedProduct, (user.id, payload.product_id))
         if row is None:
