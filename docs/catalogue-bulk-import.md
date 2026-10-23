@@ -40,7 +40,7 @@ animated images and invalid image/extension combinations are rejected.
 
 Limits: 50 products; CSV 512 KB; ZIP 20 MB compressed / 24 MB expanded;
 200 photos, each at most 8 MB and 12 megapixels; 100 megapixels across the ZIP.
-Split larger catalogues into smaller batches. Originals are preserved; the
+Split larger catalogues into smaller batches. The enabled import preview/confirmation routes accept up to 30 MB of JSON, including base64 photos; all other endpoints retain their configured global request limit. Import authentication is required before the route consumes the bundle. Both declared and streamed request sizes are bounded. Originals are preserved; the
 preview uses small re-encoded thumbnails to limit client memory use.
 
 ## Admin workflow

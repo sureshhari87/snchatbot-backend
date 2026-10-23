@@ -19,6 +19,23 @@ from catalogue_data import product_values, read_rates
 from models import AppConfigEntry, CatalogueContentAudit, Product, User
 
 AUDIENCE = "catalogue-bulk-import-v1"
+MAX_IMPORT_REQUEST_BYTES = 30 * 1024 * 1024
+
+
+def request_body_limit(request, default):
+    # Only the authenticated import routes consume large bundles. The route's
+    # products:manage dependency runs before its bounded body reader.
+    if (
+        request.method == "POST"
+        and request.url.path
+        in {
+            "/admin/catalogue/imports/preview",
+            "/admin/catalogue/imports/confirm",
+        }
+        and config.get_bool("CATALOGUE_BULK_IMPORT_ENABLED", False)
+    ):
+        return MAX_IMPORT_REQUEST_BYTES
+    return default
 
 
 class Bundle(BaseModel):
@@ -40,7 +57,7 @@ async def bounded_body(request, model):
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
-        if len(body) > 30 * 1024 * 1024:
+        if len(body) > MAX_IMPORT_REQUEST_BYTES:
             raise HTTPException(413, "Import request exceeds 30 MB")
     try:
         return model.model_validate_json(body)

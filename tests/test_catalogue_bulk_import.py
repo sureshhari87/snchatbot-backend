@@ -469,3 +469,50 @@ def test_inventory_flag_alone_cannot_publish_an_imported_draft(
         == 404
     )
     assert client.get(f"/products/{product_id}").status_code == 404
+
+
+def test_real_photo_bundle_can_exceed_default_http_limit(client, admin_headers, monkeypatch):
+    import random
+
+    import main
+
+    monkeypatch.setattr(main, "MAX_REQUEST_BODY_BYTES", 1024 * 1024)
+    output = io.BytesIO()
+    Image.frombytes("RGB", (640, 640), random.Random(42).randbytes(640 * 640 * 3)).save(
+        output, format="PNG"
+    )
+    value = bundle(row(), photos=zip_image("TEST-GIFT_1.png", output.getvalue()))
+    value["csv_text"] = csv_text({**row(), "image1": "TEST-GIFT_1.png"})
+    assert len(json.dumps(value).encode()) > main.MAX_REQUEST_BODY_BYTES
+    result = client.post("/admin/catalogue/imports/preview", headers=admin_headers, json=value)
+    assert result.status_code == 200
+    assert result.json()["photo_count"] == 1
+    assert client.post("/admin/catalogue/imports/preview", json=value).status_code == 401
+    assert client.post("/auth/login", json=value).status_code == 413
+    monkeypatch.setenv("CATALOGUE_BULK_IMPORT_ENABLED", "0")
+    assert (
+        client.post(
+            "/admin/catalogue/imports/preview", headers=admin_headers, json=value
+        ).status_code
+        == 413
+    )
+
+
+def test_import_http_stream_and_declared_size_are_bounded(client, admin_headers, monkeypatch):
+    import main
+    from catalogue_bulk_api import MAX_IMPORT_REQUEST_BYTES
+
+    monkeypatch.setattr(main, "MAX_REQUEST_BODY_BYTES", 1024)
+    response = client.post(
+        "/admin/catalogue/imports/preview",
+        headers={**admin_headers, "Content-Length": str(MAX_IMPORT_REQUEST_BYTES + 1)},
+        content=b"{}",
+    )
+    assert response.status_code == 413
+    # A chunked request without Content-Length must hit the same receive cap.
+    response = client.post(
+        "/admin/catalogue/imports/preview",
+        headers={**admin_headers, "Content-Type": "application/json"},
+        content=iter([b" " * (1024 * 1024)] * 31),
+    )
+    assert response.status_code == 413

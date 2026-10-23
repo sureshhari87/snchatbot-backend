@@ -67,6 +67,7 @@ import savings_api
 from admin_directory import install as install_admin_directory
 from catalogue_admin import install as install_catalogue_admin
 from catalogue_bulk_api import install as install_catalogue_bulk
+from catalogue_bulk_api import request_body_limit
 from catalogue_extras import install as install_catalogue_extras
 from catalogue_visibility import is_public_product, public_product_condition
 from commerce import install as install_commerce_routes
@@ -779,14 +780,15 @@ async def request_id_middleware(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or str(uuid4())
     request.state.request_id = request_id
     started_at = time.perf_counter()
+    max_request_body_bytes = request_body_limit(request, MAX_REQUEST_BODY_BYTES)
     content_length = request.headers.get("content-length")
-    if content_length and content_length.isdigit() and int(content_length) > MAX_REQUEST_BODY_BYTES:
+    if content_length and content_length.isdigit() and int(content_length) > max_request_body_bytes:
         log_event(
             "security.request_too_large",
             request,
             status_code=413,
             content_length=int(content_length),
-            max_request_body_bytes=MAX_REQUEST_BODY_BYTES,
+            max_request_body_bytes=max_request_body_bytes,
         )
         return error_response(request, 413, "Request body too large")
 
@@ -798,7 +800,7 @@ async def request_id_middleware(request: Request, call_next):
         message = await original_receive()
         if message["type"] == "http.request":
             received_bytes += len(message.get("body", b""))
-            if received_bytes > MAX_REQUEST_BODY_BYTES:
+            if received_bytes > max_request_body_bytes:
                 raise RequestBodyTooLarge()
         return message
 
@@ -811,7 +813,7 @@ async def request_id_middleware(request: Request, call_next):
             "security.request_too_large",
             request,
             status_code=413,
-            max_request_body_bytes=MAX_REQUEST_BODY_BYTES,
+            max_request_body_bytes=max_request_body_bytes,
         )
         return error_response(request, 413, "Request body too large")
     except Exception as exc:
