@@ -89,6 +89,35 @@ class RenderStagingTests(unittest.TestCase):
             with self.subTest(origin=origin), self.assertRaises(ValueError):
                 render_environment(self.source(STAGING_ADMIN_ORIGIN=origin))
 
+    def test_review_preview_preserves_local_admin_without_duplicates(self):
+        preview = "https://sona-jewellery-app--admin-review-7bggywyq.web.app"
+        env = render_environment(
+            self.source(
+                STAGING_ADMIN_ORIGIN="http://localhost:7357",
+                CORS_ORIGINS=preview + "," + preview,
+            )
+        )
+        self.assertEqual(
+            env["CORS_ORIGINS"],
+            "https://snchatbot-staging.onrender.com,http://localhost:7357," + preview,
+        )
+
+    def test_review_preview_rejects_unapproved_origins(self):
+        preview = "https://sona-jewellery-app--admin-review-7bggywyq.web.app"
+        for candidate in (
+            preview + "/",
+            preview + "/admin",
+            preview + ".evil.example",
+            preview.replace("https:", "http:"),
+            preview.replace("sona-jewellery-app", "other-project"),
+            preview.replace("admin-review", "other-channel"),
+            "https://*.web.app",
+            "null",
+        ):
+            with self.subTest(candidate=candidate):
+                env = render_environment(self.source(CORS_ORIGINS=candidate))
+                self.assertEqual(env["CORS_ORIGINS"], "https://snchatbot-staging.onrender.com")
+
     def test_accepts_test_keys_and_webhook(self):
         env = render_environment(
             self.source(
