@@ -109,12 +109,12 @@ def render_environment(source):
     origins = ["https://" + hostname]
     if admin_origin:
         origins.append(admin_origin)
-    # Only this project's explicitly configured admin-review preview channel.
+    # Only this project's explicitly configured admin/public review channels.
     for candidate in env.get("CORS_ORIGINS", "").split(","):
         candidate = candidate.strip()
         if (
             re.fullmatch(
-                r"https://sona-jewellery-app--admin-review-[a-z0-9]{1,20}\.web\.app",
+                r"https://sona-jewellery-app--(?:admin-review|public-pages-review)-[a-z0-9]{1,20}\.web\.app",
                 candidate,
             )
             and candidate not in origins

@@ -102,6 +102,15 @@ class RenderStagingTests(unittest.TestCase):
             "https://snchatbot-staging.onrender.com,http://localhost:7357," + preview,
         )
 
+    def test_public_pages_preview_preserves_both_explicit_review_origins(self):
+        admin = "https://sona-jewellery-app--admin-review-7bggywyq.web.app"
+        public = "https://sona-jewellery-app--public-pages-review-abc123.web.app"
+        env = render_environment(self.source(CORS_ORIGINS=admin + "," + public))
+        self.assertEqual(
+            env["CORS_ORIGINS"],
+            "https://snchatbot-staging.onrender.com," + admin + "," + public,
+        )
+
     def test_review_preview_rejects_unapproved_origins(self):
         preview = "https://sona-jewellery-app--admin-review-7bggywyq.web.app"
         for candidate in (
