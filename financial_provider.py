@@ -66,12 +66,17 @@ def collection(provider, path, *, paginated=True):
         response_count = data.get("count")
         if data.get("entity") != "collection":
             invalid_collection(path, "entity")
-        # Razorpay TEST may return both collection fields as null when there
-        # are no disputes. This compatibility shape is never accepted for a
-        # live key or for payment/refund collections.
+        if "error" in data:
+            invalid_collection(path, "provider_error")
+        if "has_more" in data and type(data["has_more"]) is not bool:
+            invalid_collection(path, "page_flag_type")
+        # Support confirmed the TEST empty shape omits items/count and returns
+        # has_more=false. Accept only that exact shape, or the previously
+        # supported exact legacy null shape, behind the staging TEST guard.
+        compact_empty = set(data) == {"entity", "has_more"} and data.get("has_more") is False
+        legacy_null = data == {"entity": "collection", "count": None, "items": None}
         if (
-            items is None
-            and response_count is None
+            (compact_empty or legacy_null)
             and collection_kind(path) == "disputes"
             and allow_null_test_disputes(provider)
         ):
@@ -93,6 +98,8 @@ def collection(provider, path, *, paginated=True):
             invalid_collection(path, "incomplete_collection")
         if len(items) > 100:
             invalid_collection(path, "page_size")
+        if data.get("has_more") is True and (not paginated or len(items) < 100):
+            invalid_collection(path, "incomplete_collection")
         if any(not isinstance(item, dict) for item in items):
             invalid_collection(path, "item_type")
         for item in items:
@@ -109,6 +116,12 @@ def collection(provider, path, *, paginated=True):
             advertised_total = response_count
         if paginated and advertised_total is not None and len(result) > advertised_total:
             invalid_collection(path, "count_range")
+        if (
+            data.get("has_more") is True
+            and advertised_total is not None
+            and len(result) == advertised_total
+        ):
+            invalid_collection(path, "incomplete_collection")
         if len(items) < 100:
             if paginated and advertised_total is not None and len(result) != advertised_total:
                 invalid_collection(path, "incomplete_collection")
@@ -184,8 +197,11 @@ def captured(provider, *, order, order_id, payment_id, amount_paise):
         adverse.append(("refund", item["id"], "Provider refund requires audited review"))
     if adverse:
         return payment, adverse
-    # Disputes API has no documented payment-id filter; paginate and bind locally.
-    disputes = collection(provider, "disputes")
+    # The merchant support reply confirms payment_id filtering for this TEST
+    # compatibility path. Production/global evidence retains its existing path.
+    filtered_disputes = allow_null_test_disputes(provider)
+    disputes_path = "disputes?payment_id=" + payment_id if filtered_disputes else "disputes"
+    disputes = collection(provider, disputes_path)
     for item in disputes:
         if (
             item.get("entity") != "dispute"
@@ -193,6 +209,8 @@ def captured(provider, *, order, order_id, payment_id, amount_paise):
             or not identifier(item.get("payment_id"), "pay")
         ):
             raise HTTPException(503, "Financial dispute evidence unavailable")
+        if filtered_disputes and item["payment_id"] != payment_id:
+            raise HTTPException(503, "Financial payment-specific dispute evidence differs")
         if item["payment_id"] == payment_id:
             if (
                 item.get("currency") != "INR"

@@ -819,3 +819,51 @@ def test_funding_identity_and_audit_are_immutable(client, auth_headers, provider
     db.rollback()
     assert db.get(GiftVoucher, row["id"]).balance_paise == 50000
     assert db.query(GiftVoucherEntry).count() == 1
+
+
+def test_support_confirmed_test_disputes_reconcile_once_without_new_order(
+    client, auth_headers, admin_headers, provider, db, monkeypatch
+):
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.setenv("RAZORPAY_TEST_NULL_DISPUTES_COMPAT", "1")
+    row, proof = online(client, auth_headers, provider)
+    original = main.call_razorpay
+    more = True
+    dispute_paths = []
+
+    def empty_disputes(method, path, *args, **kwargs):
+        if method == "GET" and path.split("?")[0] == "disputes":
+            assert "payment_id=" + proof["razorpay_payment_id"] in path.partition("?")[2].split("&")
+            dispute_paths.append(path)
+            return 200, {"entity": "collection", "has_more": more}
+        return original(method, path, *args, **kwargs)
+
+    monkeypatch.setattr(main, "call_razorpay", empty_disputes)
+    path = f"/admin/vouchers/{row['id']}/reconcile-checkout"
+    body = dict(provider_order_id=proof["razorpay_order_id"])
+    assert client.post(path, headers=auth_headers, json=body).status_code == 403
+    for _ in range(2):
+        assert client.post(path, headers=admin_headers, json=body).status_code == 503
+        assert db.get(GiftVoucher, row["id"]).balance_paise == 0
+        assert db.query(GiftVoucherEntry).count() == 0
+        assert db.query(VoucherFundingEvent).filter_by(action="funding_posted").count() == 0
+    more = False
+    for _ in range(2):
+        response = client.post(path, headers=admin_headers, json=body)
+        assert response.status_code == 200
+        assert response.json()["state"] == "active"
+        assert response.json()["balance_paise"] == 50000
+    for event_name in ("payment.captured", "order.paid"):
+        assert (
+            webhook(
+                client, proof["razorpay_order_id"], proof["razorpay_payment_id"], event_name
+            ).status_code
+            == 200
+        )
+    assert dispute_paths
+    assert len(provider.orders) == 1
+    assert db.query(GiftVoucherEntry).count() == 1
+    assert db.query(VoucherFundingEvent).filter_by(action="funding_posted").count() == 1
+    assert db.query(RewardEntry).count() == 0
+    result = client.get(f"/admin/vouchers/{row['id']}/reconciliation", headers=admin_headers).json()
+    assert result["consistent"] is True and result["hold_count"] == 0
