@@ -5634,6 +5634,33 @@ def submit_order_action_backend(
     action: str,
     payload: dict[str, Any],
 ) -> tuple[str, dict[str, Any], str | None, int | None]:
+    import order_cancellations
+
+    if order_cancellations.enabled() and action in {"cancel", "return", "refund"}:
+        local = local_order_for_user(db, user.id, order_reference)
+        if local is None:
+            raise HTTPException(404, "Order not found")
+        local = order_cancellations.order_for(db, local.id, user.id)
+        case = order_cancellations.request(
+            db,
+            local,
+            user.id,
+            str(payload.get("reason") or payload.get("message") or "Customer requested review")[
+                :1000
+            ],
+        )
+        db.flush()
+        return (
+            "local",
+            {
+                "order_reference": local.order_reference,
+                "status": local.status,
+                "cancellation": order_cancellations.saved(db, case),
+            },
+            None,
+            200,
+        )
+
     integration_state, data, error, status_code = submit_oms_order_action(
         order_reference,
         action,
@@ -8621,6 +8648,32 @@ def admin_update_order(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    import order_cancellations
+
+    if order_cancellations.enabled():
+        updates_check = payload.model_dump(exclude_unset=True)
+        case = order_cancellations.current(db, order)
+        next_status = str(updates_check.get("status") or order.status).lower()
+        if case and case.state in {"refunded", "cancelled"} and next_status != order.status:
+            raise HTTPException(409, "Closed cancellation cannot resume fulfilment")
+        if "payment_status" in updates_check or next_status in {
+            "cancelled",
+            "refunded",
+            "refund_pending",
+        }:
+            raise HTTPException(409, "Use the audited cancellation/refund workflow")
+        if (
+            case
+            and case.state != "return_review"
+            and case.state not in {"refunded", "cancelled"}
+            and (
+                next_status != order.status
+                or any(field in updates_check for field in ("tracking_number", "tracking_url"))
+            )
+        ):
+            raise HTTPException(
+                409, "Resolve the active cancellation review before fulfilment changes"
+            )
     previous_status = order.status
     updates = payload.model_dump(exclude_unset=True)
     if "delivery_address" in updates:
@@ -10129,3 +10182,35 @@ install_catalogue_extras(app, get_db, get_current_user, require_permission)
 import billing_documents_api  # noqa: E402
 
 billing_documents_api.install(app, get_db, get_current_user, require_permission, log_admin_action)
+
+
+def create_cancellation_refund(payment_id, amount_paise, receipt):
+    """Only the durable cancellation worker may call this adapter."""
+    if not razorpay_checkout_is_configured():
+        raise HTTPException(503, "Refund provider is not configured")
+    import financial_provider
+
+    if not financial_provider.identifier(payment_id, "pay"):
+        raise HTTPException(409, "Original payment reference requires review")
+    headers = razorpay_api_headers()
+    headers["X-Refund-Idempotency"] = receipt
+    try:
+        status, result = json_http_request(
+            "POST",
+            "https://api.razorpay.com/v1/payments/" + payment_id + "/refund",
+            {"amount": amount_paise, "receipt": receipt, "speed": "normal"},
+            headers,
+            timeout=15,
+        )
+        if status not in {200, 201}:
+            raise HTTPException(503, "Refund outcome requires reconciliation")
+        return result
+    finally:
+        headers.clear()
+
+
+import order_cancellation_api  # noqa: E402
+
+order_cancellation_api.install(
+    app, get_db, get_current_user, require_permission, sys.modules[__name__]
+)
