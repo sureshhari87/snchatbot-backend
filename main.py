@@ -53,6 +53,7 @@ except Exception:  # pragma: no cover - optional production integration
     firebase_credentials = None
     firebase_firestore = None
 
+import billing_api
 import custom_design_api
 import custom_design_balance_api
 import custom_design_payment_api
@@ -10116,9 +10117,15 @@ financial_reporting.install(app, get_db, require_permission)
 delivery_draft_api.install(app, get_db, require_permission)
 
 
+billing_api.install(app, get_db, get_current_user, require_permission, log_admin_action)
 financial_api.install(app, get_db, get_current_user, require_permission, sys.modules[__name__])
 referral_api.install(app, get_db, get_current_user, require_permission)
 
 
 # Catalogue extras use backend ownership and server-selected campaign audiences.
 install_catalogue_extras(app, get_db, get_current_user, require_permission)
+
+
+import billing_documents_api  # noqa: E402
+
+billing_documents_api.install(app, get_db, get_current_user, require_permission, log_admin_action)

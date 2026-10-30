@@ -2,6 +2,8 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
 
+import billing_document_models  # noqa: F401
+import billing_models  # noqa: F401
 import custom_design_balance_models  # noqa: F401
 import custom_design_models  # noqa: F401
 import custom_design_payments  # noqa: F401

@@ -1,5 +1,6 @@
 """Fail-closed Render staging launcher. Never migrate or print credentials."""
 
+import json
 import os
 import re
 import sys
@@ -12,6 +13,7 @@ BIND_HOST = "0.0.0.0"  # nosec B104
 sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
+    BILLING_DOCUMENTS_REVISION,
     REVIEW_PHOTOS_REVISION,
     payment_test_environment,
     preflight,
@@ -77,6 +79,8 @@ def render_environment(source):
         except (ValueError, UnicodeError) as error:
             raise ValueError("A dedicated voucher encryption key is required") from error
     for flag in (
+        "BILLING_DOCUMENTS_ENABLED",
+        "BILLING_SALES_ENABLED",
         "REFERRALS_ENABLED",
         "REVIEW_PHOTOS_ENABLED",
         "INBOX_BROADCAST_ENABLED",
@@ -87,6 +91,19 @@ def render_environment(source):
         if env.get(flag, "0").strip() not in {"0", "1"}:
             raise ValueError("New feature flags must be 0 or 1")
         env[flag] = env.get(flag, "0").strip()
+    if env["BILLING_SALES_ENABLED"] == "1" and env["BILLING_DOCUMENTS_ENABLED"] != "1":
+        raise ValueError("Sales billing requires billing documents")
+    if env["BILLING_DOCUMENTS_ENABLED"] == "1":
+        from billing_profile import BillingIssuer
+
+        try:
+            BillingIssuer(**json.loads(env.get("BILLING_ISSUER_JSON", "")))
+        except (ValueError, TypeError):
+            raise ValueError("Reviewed billing issuer configuration is required") from None
+        if any(
+            env.get(flag, "0") != "0" for flag in ("PUSH_OUTBOX_ENABLED", "PUSH_DELIVERY_ENABLED")
+        ):
+            raise ValueError("Keep push disabled during billing staging")
     if env["REFERRALS_ENABLED"] == "1" and financial not in {"1", "true", "yes", "on"}:
         raise ValueError("Referrals require the SQL rewards/vouchers feature")
     if env["CUSTOM_DESIGN_BALANCE_ENABLED"] == "1" and env.get(
@@ -145,8 +162,8 @@ def render_environment(source):
     return env
 
 
-def verify_database(url):
-    revision = REVIEW_PHOTOS_REVISION
+def verify_database(url, *, billing_documents_enabled=False):
+    revision = BILLING_DOCUMENTS_REVISION if billing_documents_enabled else REVIEW_PHOTOS_REVISION
     if preflight(url, expected_revision=revision, allow_descendants=True) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg
@@ -165,7 +182,10 @@ def main():
             raise ValueError("Do not deploy a repository .env file")
         env = render_environment(os.environ)
         phase = "read-only staging schema/catalogue check"
-        verify_database(env["DATABASE_URL"])
+        if env["BILLING_DOCUMENTS_ENABLED"] == "1":
+            verify_database(env["DATABASE_URL"], billing_documents_enabled=True)
+        else:
+            verify_database(env["DATABASE_URL"])
         os.environ.clear()
         os.environ.update(env)
         os.chdir(REPO)
