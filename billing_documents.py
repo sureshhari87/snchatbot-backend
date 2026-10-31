@@ -209,6 +209,32 @@ def sales_preview(db, source, identity, payload):
     for field in totals:
         totals[field] += sum(charge[field] for charge in charges)
     require(totals["total_paise"] == facts["gross_paise"])
+    import purchase_identity
+
+    if (
+        purchase_identity.enabled() or purchase_identity.strict_runtime()
+    ) and purchase_identity.amount_requires_identity(facts["gross_paise"]):
+        if source == "merchandise":
+            from rewards_vouchers_reservation_models import FinancialReservation
+
+            reservation = db.query(FinancialReservation).filter_by(order_id=parent.id).first()
+            identity_kind = "merchandise"
+            identity_key = (
+                "reservation:" + str(reservation.id) if reservation else "order:" + str(parent.id)
+            )
+        else:
+            identity_kind = "custom_quote"
+            identity_key = str(facts["detail"]["quote_id"])
+        purchase_identity.require_bound(
+            db,
+            parent.user_id,
+            facts["gross_paise"],
+            resource_kind=identity_kind,
+            resource_key=identity_key,
+            legal_name=payload.buyer.name,
+            buyer_kind=payload.buyer.kind,
+            gstin=payload.buyer.gstin,
+        )
     if (
         facts["tender"]["rewards_paise"]
         and os.getenv("BILLING_REWARD_TAX_TREATMENT", "unconfirmed") != "tender"

@@ -11,6 +11,7 @@ import delivery_draft_models  # noqa: F401
 import inbox_broadcast_models  # noqa: F401
 import models  # noqa: F401
 import order_cancellation_models  # noqa: F401
+import purchase_identity_models  # noqa: F401
 import push_devices  # noqa: F401
 import push_outbox  # noqa: F401
 import referral_models  # noqa: F401

@@ -325,6 +325,17 @@ def decide(db, design_id, user, payload):
     quote = latest_quote(db, row.id)
     if quote is None or quote.id != payload.quote_id:
         raise HTTPException(409, "Quote changed; review the current version")
+    if payload.action == "approved":
+        import purchase_identity
+
+        buyer_identity = purchase_identity.require_verified(db, user.id, quote.total_paise)
+        purchase_identity.bind(
+            db,
+            buyer_identity,
+            resource_kind="custom_quote",
+            resource_key=str(quote.id),
+            amount_paise=quote.total_paise,
+        )
     db.add(
         CustomDesignDecision(
             design_id=row.id,

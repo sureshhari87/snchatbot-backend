@@ -14,6 +14,8 @@ sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
     BILLING_DOCUMENTS_REVISION,
+    ORDER_CANCELLATIONS_REVISION,
+    PURCHASE_IDENTITY_REVISION,
     REVIEW_PHOTOS_REVISION,
     payment_test_environment,
     preflight,
@@ -79,6 +81,9 @@ def render_environment(source):
         except (ValueError, UnicodeError) as error:
             raise ValueError("A dedicated voucher encryption key is required") from error
     for flag in (
+        "PURCHASE_IDENTITY_ENABLED",
+        "ORDER_CANCELLATIONS_ENABLED",
+        "ORDER_REFUND_EXECUTION_ENABLED",
         "BILLING_DOCUMENTS_ENABLED",
         "BILLING_SALES_ENABLED",
         "REFERRALS_ENABLED",
@@ -91,6 +96,27 @@ def render_environment(source):
         if env.get(flag, "0").strip() not in {"0", "1"}:
             raise ValueError("New feature flags must be 0 or 1")
         env[flag] = env.get(flag, "0").strip()
+    if env["ORDER_REFUND_EXECUTION_ENABLED"] == "1" and env["ORDER_CANCELLATIONS_ENABLED"] != "1":
+        raise ValueError("Refund execution requires cancellation review")
+    if env["PURCHASE_IDENTITY_ENABLED"] == "1":
+        from cryptography.fernet import Fernet
+
+        try:
+            Fernet(env.get("PURCHASE_IDENTITY_ENCRYPTION_KEY", "").encode("ascii"))
+        except (ValueError, UnicodeError):
+            raise ValueError("Dedicated secure buyer identity storage is required") from None
+    if any(
+        env[flag] == "1"
+        for flag in (
+            "PURCHASE_IDENTITY_ENABLED",
+            "ORDER_CANCELLATIONS_ENABLED",
+            "ORDER_REFUND_EXECUTION_ENABLED",
+        )
+    ):
+        if any(
+            env.get(flag, "0") != "0" for flag in ("PUSH_OUTBOX_ENABLED", "PUSH_DELIVERY_ENABLED")
+        ):
+            raise ValueError("Keep push disabled during buyer identity/cancellation staging")
     if env["BILLING_SALES_ENABLED"] == "1" and env["BILLING_DOCUMENTS_ENABLED"] != "1":
         raise ValueError("Sales billing requires billing documents")
     if env["BILLING_DOCUMENTS_ENABLED"] == "1":
@@ -162,8 +188,22 @@ def render_environment(source):
     return env
 
 
-def verify_database(url, *, billing_documents_enabled=False):
-    revision = BILLING_DOCUMENTS_REVISION if billing_documents_enabled else REVIEW_PHOTOS_REVISION
+def verify_database(
+    url,
+    *,
+    billing_documents_enabled=False,
+    order_cancellations_enabled=False,
+    purchase_identity_enabled=False,
+):
+    revision = (
+        PURCHASE_IDENTITY_REVISION
+        if purchase_identity_enabled
+        else ORDER_CANCELLATIONS_REVISION
+        if order_cancellations_enabled
+        else BILLING_DOCUMENTS_REVISION
+        if billing_documents_enabled
+        else REVIEW_PHOTOS_REVISION
+    )
     if preflight(url, expected_revision=revision, allow_descendants=True) != "ready":
         raise ValueError("Migrate/import the dedicated staging database locally first")
     import psycopg
@@ -182,7 +222,14 @@ def main():
             raise ValueError("Do not deploy a repository .env file")
         env = render_environment(os.environ)
         phase = "read-only staging schema/catalogue check"
-        if env["BILLING_DOCUMENTS_ENABLED"] == "1":
+        if env["PURCHASE_IDENTITY_ENABLED"] == "1" or env["ORDER_CANCELLATIONS_ENABLED"] == "1":
+            verify_database(
+                env["DATABASE_URL"],
+                billing_documents_enabled=env["BILLING_DOCUMENTS_ENABLED"] == "1",
+                order_cancellations_enabled=env["ORDER_CANCELLATIONS_ENABLED"] == "1",
+                purchase_identity_enabled=env["PURCHASE_IDENTITY_ENABLED"] == "1",
+            )
+        elif env["BILLING_DOCUMENTS_ENABLED"] == "1":
             verify_database(env["DATABASE_URL"], billing_documents_enabled=True)
         else:
             verify_database(env["DATABASE_URL"])

@@ -8674,6 +8674,19 @@ def admin_update_order(
             raise HTTPException(
                 409, "Resolve the active cancellation review before fulfilment changes"
             )
+    import purchase_identity
+
+    identity_updates = payload.model_dump(exclude_unset=True)
+    identity_status = str(identity_updates.get("status") or order.status).lower()
+    if identity_status in {
+        "confirmed",
+        "processing",
+        "packed",
+        "shipped",
+        "delivered",
+        "completed",
+    } or any(identity_updates.get(field) for field in ("tracking_number", "tracking_url")):
+        purchase_identity.require_order_fulfilment(db, order)
     previous_status = order.status
     updates = payload.model_dump(exclude_unset=True)
     if "delivery_address" in updates:
@@ -9105,6 +9118,13 @@ def create_razorpay_checkout_order(
 
     hydrate_payment_firebase_identity(db, current_user, payload)
     calculation = authoritative_checkout_calculation(db, payload, current_user)
+    import purchase_identity
+
+    buyer_identity = purchase_identity.require_verified(
+        db, current_user.id, calculation["amount"], legal_name=payload.customer_name or ""
+    )
+    if buyer_identity is not None:
+        calculation["metadata"]["purchase_identity_id"] = buyer_identity.id
     request_payload = razorpay_order_request_payload(payload, current_user, calculation)
     try:
         status_code, razorpay_response = call_razorpay("POST", "orders", request_payload)
@@ -9216,6 +9236,13 @@ def create_razorpay_checkout_order(
         },
     )
     order = upsert_local_order_snapshot(db, current_user, order_payload)
+    purchase_identity.bind(
+        db,
+        buyer_identity,
+        resource_kind="merchandise",
+        resource_key="order:" + str(order.id),
+        amount_paise=calculation["amount"],
+    )
     try:
         create_firestore_payment_attempt(
             current_user,
@@ -10214,3 +10241,8 @@ import order_cancellation_api  # noqa: E402
 order_cancellation_api.install(
     app, get_db, get_current_user, require_permission, sys.modules[__name__]
 )
+
+
+import purchase_identity_api  # noqa: E402
+
+purchase_identity_api.install(app, get_db, get_current_user)
