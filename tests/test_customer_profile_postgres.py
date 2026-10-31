@@ -68,3 +68,62 @@ def test_concurrent_same_email_request_reserves_one_send(profiles):
     with ThreadPoolExecutor(max_workers=2) as pool:
         result = list(pool.map(reserve, [1, 2]))
     assert result[0][0] == result[1][0] and sum(code for _, code in result) == 1
+
+
+def test_concurrent_different_accounts_cannot_exceed_recipient_quota(profiles):
+    from datetime import timedelta
+    from uuid import uuid4
+
+    from models import utc_now
+
+    with Session(profiles) as db:
+        for uid in range(10, 19):
+            db.add(
+                User(
+                    id=uid,
+                    username=f"quota-synthetic-{uid}",
+                    email=f"quota-{uid}@example.test",
+                    hashed_password="unused",
+                )
+            )
+        db.flush()
+        for uid in range(10, 19):
+            db.add(
+                service.ContactChallenge(
+                    id=uuid4().hex,
+                    user_id=uid,
+                    email="synthetic@example.com",
+                    request_key=uuid4().hex,
+                    code_hash="0" * 64,
+                    state="sent",
+                    attempts=0,
+                    created_at=utc_now() - timedelta(minutes=2),
+                    expires_at=utc_now() + timedelta(minutes=8),
+                )
+            )
+        db.commit()
+    barrier = Barrier(2)
+
+    def reserve(uid):
+        with Session(profiles) as db:
+            user = db.get(User, uid)
+            barrier.wait(timeout=20)
+            try:
+                service.request_email(
+                    db, user, dict(email="synthetic@example.com", request_key=uuid4().hex)
+                )
+                db.commit()
+                return "reserved"
+            except HTTPException as error:
+                db.rollback()
+                assert error.status_code == 429
+                return "limited"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        result = list(pool.map(reserve, [2, 3]))
+    assert sorted(result) == ["limited", "reserved"]
+    with Session(profiles) as db:
+        assert (
+            db.query(service.ContactChallenge).filter_by(email="synthetic@example.com").count()
+            == 10
+        )

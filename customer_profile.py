@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from email_validator import EmailNotValidError, validate_email
 from fastapi import HTTPException
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, UniqueConstraint, text
 
 from database import Base
 from models import User, utc_now
@@ -183,6 +183,14 @@ def request_email(db, user, value):
     if previous:
         require(previous.email == email, "Request reference belongs to another email")
         return previous, None
+    if db.get_bind().dialect.name == "postgresql":
+        # Serialize recipient quotas across different accounts, without a plaintext email lock key.
+        target_lock = int.from_bytes(
+            hashlib.sha256(("sona-contact-quota:" + email).encode()).digest()[:8],
+            "big",
+            signed=True,
+        )
+        db.execute(text("SELECT pg_advisory_xact_lock(:target)"), {"target": target_lock})
     now = utc_now()
     recent = db.query(ContactChallenge).filter(
         ContactChallenge.created_at > now - timedelta(hours=1)
