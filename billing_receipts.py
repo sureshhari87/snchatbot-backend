@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 import config
 from billing_models import BillingReceipt, BillingReceiptAudit
 from billing_profile import MAX_PAISE, BillingIssuer
+from customer_profile import receipt_customer
 from models import User, utc_now
 from savings_models import (
     SavingsAudit,
@@ -147,7 +148,7 @@ def savings_snapshot(db, payment, owner, document_id, now):
         title="Savings payment acknowledgement",
         issued_at=iso(now),
         issuer=issuer(),
-        customer=dict(account_name=owner.username, email=owner.email),
+        customer=receipt_customer(db, owner),
         payment=dict(
             id=payment.id,
             status_at_issue="posted",

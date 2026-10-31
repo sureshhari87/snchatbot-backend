@@ -14,6 +14,7 @@ from billing_document_models import BillingDocument, BillingDocumentAudit, Billi
 from billing_profile import IST, clean_text, financial_year, invoice_number
 from billing_receipts import canonical, digest, iso, issuer, require
 from billing_sales import calculate, calculate_charges, einvoice_gate
+from customer_profile import receipt_customer
 from models import OrderSnapshotItem, User, utc_now
 
 PERMISSIONS = {
@@ -104,7 +105,7 @@ def header(db, parent, source, title, identity):
         is_test_document=config.APP_ENV != "production",
         issued_at=iso(utc_now()),
         issuer=issuer(),
-        customer=dict(account_name=customer.username, email=customer.email),
+        customer=receipt_customer(db, customer),
     )
 
 

@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
     BILLING_DOCUMENTS_REVISION,
+    CUSTOMER_PROFILE_REVISION,
     ORDER_CANCELLATIONS_REVISION,
     PURCHASE_IDENTITY_REVISION,
     REVIEW_PHOTOS_REVISION,
@@ -82,6 +83,7 @@ def render_environment(source):
             raise ValueError("A dedicated voucher encryption key is required") from error
     for flag in (
         "PURCHASE_IDENTITY_ENABLED",
+        "CUSTOMER_PROFILE_ENABLED",
         "ORDER_CANCELLATIONS_ENABLED",
         "ORDER_REFUND_EXECUTION_ENABLED",
         "BILLING_DOCUMENTS_ENABLED",
@@ -194,9 +196,12 @@ def verify_database(
     billing_documents_enabled=False,
     order_cancellations_enabled=False,
     purchase_identity_enabled=False,
+    customer_profile_enabled=False,
 ):
     revision = (
-        PURCHASE_IDENTITY_REVISION
+        CUSTOMER_PROFILE_REVISION
+        if customer_profile_enabled
+        else PURCHASE_IDENTITY_REVISION
         if purchase_identity_enabled
         else ORDER_CANCELLATIONS_REVISION
         if order_cancellations_enabled
@@ -222,12 +227,17 @@ def main():
             raise ValueError("Do not deploy a repository .env file")
         env = render_environment(os.environ)
         phase = "read-only staging schema/catalogue check"
-        if env["PURCHASE_IDENTITY_ENABLED"] == "1" or env["ORDER_CANCELLATIONS_ENABLED"] == "1":
+        if (
+            env["CUSTOMER_PROFILE_ENABLED"] == "1"
+            or env["PURCHASE_IDENTITY_ENABLED"] == "1"
+            or env["ORDER_CANCELLATIONS_ENABLED"] == "1"
+        ):
             verify_database(
                 env["DATABASE_URL"],
                 billing_documents_enabled=env["BILLING_DOCUMENTS_ENABLED"] == "1",
                 order_cancellations_enabled=env["ORDER_CANCELLATIONS_ENABLED"] == "1",
                 purchase_identity_enabled=env["PURCHASE_IDENTITY_ENABLED"] == "1",
+                customer_profile_enabled=env["CUSTOMER_PROFILE_ENABLED"] == "1",
             )
         elif env["BILLING_DOCUMENTS_ENABLED"] == "1":
             verify_database(env["DATABASE_URL"], billing_documents_enabled=True)

@@ -7,6 +7,7 @@ import billing_models  # noqa: F401
 import custom_design_balance_models  # noqa: F401
 import custom_design_models  # noqa: F401
 import custom_design_payments  # noqa: F401
+import customer_profile  # noqa: F401
 import delivery_draft_models  # noqa: F401
 import inbox_broadcast_models  # noqa: F401
 import models  # noqa: F401

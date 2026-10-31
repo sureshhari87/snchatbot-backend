@@ -10246,3 +10246,8 @@ order_cancellation_api.install(
 import purchase_identity_api  # noqa: E402
 
 purchase_identity_api.install(app, get_db, get_current_user)
+
+
+import customer_profile_api  # noqa: E402
+
+customer_profile_api.install(app, get_db, get_current_user, send_email)
