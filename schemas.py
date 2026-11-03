@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 def normalize_string_list(value: Any) -> list[str]:
@@ -450,6 +450,17 @@ class AiGeneratedConceptCreate(BaseModel):
     gemstones: List[str] = Field(default_factory=list)
     budget: Optional[float] = Field(default=None, ge=0)
     related_product_ids: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_preview_image(self):
+        if self.image_base64 is not None:
+            from sona_ai.images import compact_concept_image
+
+            self.image_base64 = compact_concept_image(self.image_base64)
+            self.image_mime_type = "image/jpeg"
+        else:
+            self.image_mime_type = None
+        return self
 
 
 class AiGeneratedConceptOut(BaseModel):

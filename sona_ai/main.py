@@ -4,8 +4,10 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from .concept_validation import validated_concept
 from .config import get_settings
 from .engine import OpenAIClient, personalize, recommend, search_catalog
+from .images import compact_concept_image
 from .models import (
     ChatRequest,
     ChatResponse,
@@ -60,17 +62,10 @@ async def ai_search(
     _user: AuthenticatedUser = Depends(ai_rate_limit),
 ) -> SearchResult:
     products, filters = search_catalog(request)
+    # Search is deterministic and catalogue-backed. A model paraphrase must not
+    # delay already-computed results, change the customer's constraints or add cost.
     interpreted = request.query
     source = "rules"
-    try:
-        parsed = await ai.json_response(
-            "Interpret a jewellery shopping query. Return JSON with interpreted_query only. Never invent inventory or prices.",
-            {"query": request.query, "filters": filters},
-        )
-        if parsed and parsed.get("interpreted_query"):
-            interpreted, source = str(parsed["interpreted_query"]), "ai"
-    except (httpx.HTTPError, ValueError, KeyError):
-        pass
     return SearchResult(
         products=products,
         applied_filters=filters,
@@ -116,7 +111,10 @@ async def personalized(
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(
+    request: ChatRequest,
+    _user: AuthenticatedUser = Depends(ai_rate_limit),
+) -> ChatResponse:
     search = SearchRequest(query=request.message, products=request.products, limit=6)
     products, filters = search_catalog(search)
     reply = (
@@ -186,6 +184,7 @@ async def concepts(
         )
     except (httpx.HTTPError, ValueError, KeyError):
         pass
+    generated = validated_concept(generated)
     source = "ai" if generated else "template"
     generated = generated or {
         "name": "Sona Signature Concept",
@@ -198,12 +197,14 @@ async def concepts(
     image = None
     if request.generate_image:
         try:
-            image = await ai.image(
+            raw_image = await ai.image(
                 f"Studio product concept render of original {request.category or 'jewellery'}, {request.description}. "
                 f"Metal: {request.metal or 'unspecified'}. Gemstones: {', '.join(request.gemstones) or 'unspecified'}. "
                 "Neutral background, no logo, no text, realistic artisan jewellery visualization."
             )
-        except httpx.HTTPError:
+            if raw_image:
+                image = compact_concept_image(raw_image)
+        except (httpx.HTTPError, ValueError):
             pass
     return ConceptResponse(
         concept_id=str(uuid.uuid4()),
@@ -212,7 +213,7 @@ async def concepts(
         materials=[str(x) for x in generated.get("materials", [])],
         craft_notes=[str(x) for x in generated.get("craft_notes", [])],
         image_base64=image,
-        image_mime_type="image/png" if image else None,
+        image_mime_type="image/jpeg" if image else None,
         answer_source=source,
         disclaimer="This is a design concept, not a manufacturing specification or final price quote.",
     )
