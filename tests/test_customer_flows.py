@@ -105,6 +105,7 @@ def test_back_in_stock_alert_flow(client, auth_headers, admin_headers, db):
 
     product.in_stock = False
     product.stock_quantity = 0
+    db.commit()
     second_subscribe = client.post(
         f"/products/{product.id}/back-in-stock",
         headers=auth_headers,

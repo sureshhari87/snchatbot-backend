@@ -157,11 +157,26 @@ def checkout(db, design_id, user_id, provider):
         raise HTTPException(409, "Advance already posted; reload the request")
     attempt = db.get(CustomDesignCheckout, q.id)
     if attempt:
+        import purchase_identity
+
+        purchase_identity.require_existing_payment(
+            db, user_id, q.total_paise, resource_kind="custom_quote", resource_key=str(q.id)
+        )
         if attempt.state == "ready" and attempt.provider_order_id:
             return attempt, q
         raise HTTPException(
             409, "Checkout outcome requires store reconciliation; no new order created"
         )
+    import purchase_identity
+
+    buyer_identity = purchase_identity.require_verified(db, user_id, q.total_paise)
+    purchase_identity.bind(
+        db,
+        buyer_identity,
+        resource_kind="custom_quote",
+        resource_key=str(q.id),
+        amount_paise=q.total_paise,
+    )
     attempt = CustomDesignCheckout(
         quote_id=q.id,
         design_id=row.id,

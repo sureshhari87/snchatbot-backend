@@ -53,6 +53,16 @@ def install(app, get_db, get_current_user, require_permission, log_admin_action)
         rows = query.order_by(CustomerNotification.id.desc()).offset(offset).limit(limit).all()
         return [document(row) for row in rows]
 
+    @app.get("/notifications/unread-count")
+    def unread_count(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        query = db.query(CustomerNotification).filter(
+            CustomerNotification.user_id == user.id,
+            CustomerNotification.read_at.is_(None),
+        )
+        if retention.enabled():
+            query = query.filter(retention.visible_condition())
+        return {"unread_count": query.count()}
+
     @app.post("/notifications/seen")
     def seen(
         payload: SeenInput, user: User = Depends(get_current_user), db: Session = Depends(get_db)

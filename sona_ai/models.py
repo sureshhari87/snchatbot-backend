@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
 
 
 class Product(StrictModel):
@@ -24,7 +24,7 @@ class Product(StrictModel):
 
 class SearchRequest(StrictModel):
     query: str = Field(min_length=2, max_length=500)
-    products: list[Product] = Field(default_factory=list)
+    products: list[Product] = Field(default_factory=list, max_length=500)
     limit: int = Field(default=12, ge=1, le=50)
     min_price: float | None = Field(default=None, ge=0)
     max_price: float | None = Field(default=None, ge=0)
@@ -78,7 +78,7 @@ class RecommendationResponse(StrictModel):
 class ChatRequest(StrictModel):
     message: str = Field(min_length=1, max_length=2000)
     session_id: str | None = None
-    products: list[Product] = Field(default_factory=list)
+    products: list[Product] = Field(default_factory=list, max_length=500)
     user_context: dict[str, Any] = Field(default_factory=dict)
 
 

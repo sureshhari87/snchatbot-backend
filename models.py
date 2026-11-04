@@ -167,7 +167,16 @@ class Product(Base):
             "dispatchNotBefore",
             "subCategory",
         }
-        return {key: value for key, value in (self.source_data or {}).items() if key in fields}
+        source = self.source_data or {}
+        result = {key: value for key, value in source.items() if key in fields}
+        if "videoUrls" in source or "videoUrl" in source:
+            from product_media import video_urls
+
+            try:
+                result["videoUrls"] = video_urls(source.get("videoUrls", source.get("videoUrl")))
+            except ValueError:
+                result["videoUrls"] = []
+        return result
 
 
 class CommerceCartItem(Base):

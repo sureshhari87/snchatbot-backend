@@ -9,17 +9,18 @@ from .config import Settings
 from .models import Product, SearchRequest
 
 PRICE_UNDER = re.compile(
-    r"(?:under|below|up to|within)\D{0,12}([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?",
+    r"(?:under|below|up\s*to|within|budget(?:\s+of)?)\D{0,12}([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?",
     re.I,
 )
 PRICE_OVER = re.compile(
-    r"(?:over|above|from)\D{0,12}([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?",
+    r"(?:over|above|at least|from)\D{0,12}([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?",
     re.I,
 )
 KNOWN_METALS = ("rose gold", "white gold", "gold", "silver", "platinum", "diamond")
 CATEGORY_ALIASES = {
     "ring": ("ring", "rings"),
-    "necklace": ("necklace", "necklaces", "chain", "chains", "choker", "mangalsutra"),
+    "necklace": ("necklace", "necklaces", "choker", "mangalsutra"),
+    "chain": ("chain", "chains"),
     "earring": ("earring", "earrings", "stud", "studs", "hoop", "hoops", "jhumka", "jhumkas"),
     "bracelet": ("bracelet", "bracelets"),
     "bangle": ("bangle", "bangles", "kada"),
@@ -56,6 +57,17 @@ def _has_customer_price(product: Product) -> bool:
 
 def parse_query(request: SearchRequest) -> dict[str, Any]:
     query = re.sub(r"(?<=\d)o(?=k\b)", "0", request.query.lower())
+    # A range is one constraint; do not silently drop its lower or upper bound.
+    price_range = re.search(
+        r"\bbetween\s+(?:rs\.?\s*|inr\s*|\u20b9\s*)?([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?\s*(?:and|to|-)\s*(?:rs\.?\s*|inr\s*|\u20b9\s*)?([\d,.]+)\s*(crore|cr|lakh|lac|k|thousand)?\b",
+        query,
+        re.I,
+    )
+    range_min = range_max = None
+    if price_range:
+        low, low_unit, high, high_unit = price_range.groups()
+        range_min = _money(low, low_unit or high_unit)
+        range_max = _money(high, high_unit or low_unit)
     under = PRICE_UNDER.search(query)
     over = PRICE_OVER.search(query)
     category = request.category or _category_from_query(query)
@@ -65,10 +77,16 @@ def parse_query(request: SearchRequest) -> dict[str, Any]:
         "metal": metal,
         "min_price": request.min_price
         if request.min_price is not None
-        else (_money(over.group(1), over.group(2)) if over else None),
+        else (
+            range_min if price_range else (_money(over.group(1), over.group(2)) if over else None)
+        ),
         "max_price": request.max_price
         if request.max_price is not None
-        else (_money(under.group(1), under.group(2)) if under else None),
+        else (
+            range_max
+            if price_range
+            else (_money(under.group(1), under.group(2)) if under else None)
+        ),
         "in_stock_only": request.in_stock_only,
     }
 
@@ -200,6 +218,37 @@ def personalize(
     return [x[1] for x in chosen], {str(x[1].id): x[2] for x in chosen}
 
 
+def response_json_object(data: Any) -> dict[str, Any] | None:
+    """Never promote truncated, refused or malformed provider output to a result."""
+    if not isinstance(data, dict) or data.get("status") != "completed":
+        return None
+    output = data.get("output")
+    if not isinstance(output, list):
+        return None
+    chunks = []
+    for item in output:
+        if not isinstance(item, dict):
+            return None
+        if item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            return None
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") == "refusal":
+                return None
+            if part.get("type") == "output_text":
+                text = part.get("text")
+                if not isinstance(text, str):
+                    return None
+                chunks.append(text)
+    try:
+        parsed = json.loads("".join(chunks))
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 class OpenAIClient:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -236,11 +285,7 @@ class OpenAIClient:
             )
             response.raise_for_status()
             data = response.json()
-        for item in data.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") == "output_text":
-                    return json.loads(content["text"])
-        return None
+        return response_json_object(data)
 
     async def image(self, prompt: str) -> str | None:
         if not self.enabled:

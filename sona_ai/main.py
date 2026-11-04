@@ -4,6 +4,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from .concept_validation import validated_concept
 from .config import get_settings
 from .engine import OpenAIClient, personalize, recommend, search_catalog
 from .models import (
@@ -60,17 +61,10 @@ async def ai_search(
     _user: AuthenticatedUser = Depends(ai_rate_limit),
 ) -> SearchResult:
     products, filters = search_catalog(request)
+    # Search is deterministic and catalogue-backed. A model paraphrase must not
+    # delay already-computed results, change the customer's constraints or add cost.
     interpreted = request.query
     source = "rules"
-    try:
-        parsed = await ai.json_response(
-            "Interpret a jewellery shopping query. Return JSON with interpreted_query only. Never invent inventory or prices.",
-            {"query": request.query, "filters": filters},
-        )
-        if parsed and parsed.get("interpreted_query"):
-            interpreted, source = str(parsed["interpreted_query"]), "ai"
-    except (httpx.HTTPError, ValueError, KeyError):
-        pass
     return SearchResult(
         products=products,
         applied_filters=filters,
@@ -116,7 +110,10 @@ async def personalized(
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(
+    request: ChatRequest,
+    _user: AuthenticatedUser = Depends(ai_rate_limit),
+) -> ChatResponse:
     search = SearchRequest(query=request.message, products=request.products, limit=6)
     products, filters = search_catalog(search)
     reply = (
@@ -186,6 +183,7 @@ async def concepts(
         )
     except (httpx.HTTPError, ValueError, KeyError):
         pass
+    generated = validated_concept(generated)
     source = "ai" if generated else "template"
     generated = generated or {
         "name": "Sona Signature Concept",

@@ -303,6 +303,16 @@ def checkout(db, payload, user, provider):
                 db.commit()
                 raise HTTPException(409, "Financial payment requires audited review")
         else:
+            import purchase_identity
+
+            purchase_identity.require_existing_payment(
+                db,
+                user.id,
+                json.loads(old.quote_json)["merchandise_paise"],
+                resource_kind="merchandise",
+                resource_key="reservation:" + str(old.id),
+                legal_name=json.loads(attempt.context_json)["customer_name"] or "",
+            )
             require(
                 order["status"] == "created"
                 and type(order.get("attempts")) is int
@@ -311,6 +321,11 @@ def checkout(db, payload, user, provider):
             )
         return response(old, provider)
     base = base_quote(db, payload, user, provider)
+    import purchase_identity
+
+    buyer_identity = purchase_identity.require_verified(
+        db, user.id, base["amount"], legal_name=payload.customer_name or ""
+    )
     row = reserve(
         db,
         user_id=user.id,
@@ -322,6 +337,13 @@ def checkout(db, payload, user, provider):
     require(
         payload.amount is None or payload.amount == row.payable_paise,
         "Checkout amount changed; refresh the quote",
+    )
+    purchase_identity.bind(
+        db,
+        buyer_identity,
+        resource_kind="merchandise",
+        resource_key="reservation:" + str(row.id),
+        amount_paise=base["amount"],
     )
     attempt = FinancialCheckoutAttempt(
         reservation_id=row.id,

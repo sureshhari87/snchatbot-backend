@@ -13,6 +13,7 @@ import zipfile
 from PIL import Image, ImageOps
 
 from catalogue_data import number, product_values
+from jewellery_tax_policy import apply_jewellery_gst
 from product_readiness import readiness
 
 MAX_ZIP = 20 * 1024 * 1024
@@ -274,6 +275,7 @@ def plan(csv_text, photos_base64, rates):
                 ):
                     if row.get(key):
                         data[key] = float(number(row[key], key))
+                data = apply_jewellery_gst(data)
                 if category != "Gifts" and data.get("metalWeight", 0) <= 0:
                     raise ValueError("Positive metalWeight is required for jewellery")
                 if category != "Gifts" and data["useDynamicPricing"]:

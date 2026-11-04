@@ -254,6 +254,11 @@ def request_balance(db, design_id, user_id, payload):
     if payload.quote_id != quote.id:
         raise HTTPException(409, "Quote changed; reload the accepted terms")
     if old:
+        import purchase_identity
+
+        purchase_identity.require_existing_payment(
+            db, user_id, quote.total_paise, resource_kind="custom_quote", resource_key=str(quote.id)
+        )
         if old.mode != payload.mode:
             raise HTTPException(409, "The frozen balance request uses a different payment mode")
         return old
@@ -264,6 +269,16 @@ def request_balance(db, design_id, user_id, payload):
             409, "Online balance collection is unavailable; use the verified manual flow"
         )
     sha = fingerprint([quote.id, payload.mode, due])
+    import purchase_identity
+
+    buyer_identity = purchase_identity.require_verified(db, user_id, quote.total_paise)
+    purchase_identity.bind(
+        db,
+        buyer_identity,
+        resource_kind="custom_quote",
+        resource_key=str(quote.id),
+        amount_paise=quote.total_paise,
+    )
     request = BalanceRequest(
         design_id=row.id,
         quote_id=quote.id,

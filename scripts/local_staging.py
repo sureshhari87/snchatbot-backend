@@ -28,6 +28,13 @@ DELIVERY_DRAFT_REVISION = "0033_delivery_drafts"
 REFERRAL_REVISION = "0034_referrals"
 REVIEW_PURCHASE_REVISION = "0035_review_purchase"
 REVIEW_PHOTOS_REVISION = "0036_review_photos"
+BILLING_RECEIPTS_REVISION = "0037_billing_receipts"
+BILLING_DOCUMENTS_REVISION = "0038_billing_documents"
+ORDER_CANCELLATIONS_REVISION = "0039_order_cancellations"
+PURCHASE_IDENTITY_REVISION = "0040_purchase_identity"
+CUSTOMER_PROFILE_REVISION = "0041_customer_profiles"
+BILLING_RECEIPT_TABLES = {"billing_receipts", "billing_receipt_audit"}
+BILLING_DOCUMENT_TABLES = {"billing_documents", "billing_document_audit", "billing_series"}
 REFERRAL_TABLES = {
     "referral_codes",
     "referral_applications",
@@ -141,6 +148,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
         REFERRAL_REVISION,
         REVIEW_PURCHASE_REVISION,
         REVIEW_PHOTOS_REVISION,
+        BILLING_RECEIPTS_REVISION,
+        BILLING_DOCUMENTS_REVISION,
+        ORDER_CANCELLATIONS_REVISION,
+        PURCHASE_IDENTITY_REVISION,
+        CUSTOMER_PROFILE_REVISION,
     ):
         raise ValueError("Unsupported staging schema requirement")
     import psycopg
@@ -171,6 +183,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             REFERRAL_REVISION,
             REVIEW_PURCHASE_REVISION,
             REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
         ]
         if versions != [(expected_revision,)]:
             if (
@@ -196,6 +213,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             REFERRAL_REVISION,
             REVIEW_PURCHASE_REVISION,
             REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
         ) and not SAVINGS_TABLES.issubset(tables):
             raise ValueError("Required savings schema tables are missing")
         if expected_revision in (
@@ -208,6 +230,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             REFERRAL_REVISION,
             REVIEW_PURCHASE_REVISION,
             REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
         ) and not CUSTOM_DESIGNS_TABLES.issubset(tables):
             raise ValueError("Required custom-design schema tables are missing")
         if expected_revision in (
@@ -219,6 +246,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             REFERRAL_REVISION,
             REVIEW_PURCHASE_REVISION,
             REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
         ) and not FINANCIAL_TABLES.issubset(tables):
             raise ValueError("Required rewards/voucher schema tables are missing")
         if expected_revision in (
@@ -229,6 +261,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             REFERRAL_REVISION,
             REVIEW_PURCHASE_REVISION,
             REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
         ) and not CATALOGUE_TABLES.issubset(tables):
             raise ValueError("Required catalogue schema tables are missing")
         if (
@@ -240,6 +277,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
                 REFERRAL_REVISION,
                 REVIEW_PURCHASE_REVISION,
                 REVIEW_PHOTOS_REVISION,
+                BILLING_RECEIPTS_REVISION,
+                BILLING_DOCUMENTS_REVISION,
+                ORDER_CANCELLATIONS_REVISION,
+                PURCHASE_IDENTITY_REVISION,
+                CUSTOMER_PROFILE_REVISION,
             )
             and "inbox_broadcasts" not in tables
         ):
@@ -250,6 +292,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             REFERRAL_REVISION,
             REVIEW_PURCHASE_REVISION,
             REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
         ) and not {
             "custom_design_balance_requests",
             "custom_design_balance_checkouts",
@@ -261,6 +308,11 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             REFERRAL_REVISION,
             REVIEW_PURCHASE_REVISION,
             REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
         ) and not {
             "delivery_drafts",
             "delivery_draft_audits",
@@ -270,17 +322,76 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             REFERRAL_REVISION,
             REVIEW_PURCHASE_REVISION,
             REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
         ) and not REFERRAL_TABLES.issubset(tables):
             raise ValueError("Required referral schema tables are missing")
-        if expected_revision in (REVIEW_PURCHASE_REVISION, REVIEW_PHOTOS_REVISION):
+        if expected_revision in (
+            REVIEW_PURCHASE_REVISION,
+            REVIEW_PHOTOS_REVISION,
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
+        ):
             columns = conn.execute(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema = 'public' AND table_name = 'product_reviews'"
             ).fetchall()
             if ("verified_order_id",) not in columns:
                 raise ValueError("Required review purchase attribution column is missing")
-        if expected_revision == REVIEW_PHOTOS_REVISION and "review_photos" not in tables:
+        if (
+            expected_revision
+            in (
+                REVIEW_PHOTOS_REVISION,
+                BILLING_RECEIPTS_REVISION,
+                BILLING_DOCUMENTS_REVISION,
+                ORDER_CANCELLATIONS_REVISION,
+                PURCHASE_IDENTITY_REVISION,
+                CUSTOMER_PROFILE_REVISION,
+            )
+            and "review_photos" not in tables
+        ):
             raise ValueError("Required private review photo schema is missing")
+        if expected_revision in (
+            BILLING_RECEIPTS_REVISION,
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
+        ) and not BILLING_RECEIPT_TABLES.issubset(tables):
+            raise ValueError("Required immutable savings receipt schema is missing")
+        if expected_revision in (
+            BILLING_DOCUMENTS_REVISION,
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
+        ) and not BILLING_DOCUMENT_TABLES.issubset(tables):
+            raise ValueError("Required immutable billing document schema is missing")
+        if expected_revision in (
+            ORDER_CANCELLATIONS_REVISION,
+            PURCHASE_IDENTITY_REVISION,
+            CUSTOMER_PROFILE_REVISION,
+        ) and not {
+            "order_cancellations",
+            "order_cancellation_events",
+        }.issubset(tables):
+            raise ValueError("Required cancellation audit schema is missing")
+        if expected_revision in (PURCHASE_IDENTITY_REVISION, CUSTOMER_PROFILE_REVISION) and not {
+            "purchase_identities",
+            "purchase_identity_reviews",
+            "purchase_identity_uses",
+        }.issubset(tables):
+            raise ValueError("Required encrypted buyer identity schema is missing")
+        if expected_revision == CUSTOMER_PROFILE_REVISION and not {
+            "customer_profiles",
+            "customer_contact_challenges",
+        }.issubset(tables):
+            raise ValueError("Required customer contact verification schema is missing")
         return "ready"
 
 
