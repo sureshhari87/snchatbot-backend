@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .concept_validation import validated_concept
 from .config import get_settings
 from .engine import OpenAIClient, personalize, recommend, search_catalog
+from .images import compact_concept_image
 from .models import (
     ChatRequest,
     ChatResponse,
@@ -196,12 +197,14 @@ async def concepts(
     image = None
     if request.generate_image:
         try:
-            image = await ai.image(
+            raw_image = await ai.image(
                 f"Studio product concept render of original {request.category or 'jewellery'}, {request.description}. "
                 f"Metal: {request.metal or 'unspecified'}. Gemstones: {', '.join(request.gemstones) or 'unspecified'}. "
                 "Neutral background, no logo, no text, realistic artisan jewellery visualization."
             )
-        except httpx.HTTPError:
+            if raw_image:
+                image = compact_concept_image(raw_image)
+        except (httpx.HTTPError, ValueError):
             pass
     return ConceptResponse(
         concept_id=str(uuid.uuid4()),
@@ -210,7 +213,7 @@ async def concepts(
         materials=[str(x) for x in generated.get("materials", [])],
         craft_notes=[str(x) for x in generated.get("craft_notes", [])],
         image_base64=image,
-        image_mime_type="image/png" if image else None,
+        image_mime_type="image/jpeg" if image else None,
         answer_source=source,
         disclaimer="This is a design concept, not a manufacturing specification or final price quote.",
     )

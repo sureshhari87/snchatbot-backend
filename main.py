@@ -2435,7 +2435,8 @@ def catalogue_category_match(category: str):
     """Match jewellery type without confusing its material category."""
     key = category.strip().lower()
     aliases = {
-        "necklace": ("necklace", "necklaces", "chain", "chains"),
+        "necklace": ("necklace", "necklaces"),
+        "chain": ("chain", "chains"),
         "earring": ("earring", "earrings", "stud", "studs", "jhumka", "jhumkas"),
     }.get(key, (key, key + "s"))
     conditions = [
@@ -2443,7 +2444,17 @@ def catalogue_category_match(category: str):
         for alias in aliases
         for column in (Product.category, Product.product_type)
     ]
-    if key in {"ring", "necklace", "earring", "bangle", "bracelet", "pendant", "anklet", "coin"}:
+    if key in {
+        "ring",
+        "necklace",
+        "chain",
+        "earring",
+        "bangle",
+        "bracelet",
+        "pendant",
+        "anklet",
+        "coin",
+    }:
         name = " " + func.lower(func.replace(func.replace(Product.name, "-", " "), "_", " ")) + " "
         conditions.append(
             and_(
@@ -2675,9 +2686,11 @@ BUYING_SUGGESTIONS = [
 
 CATEGORY_KEYWORDS = {
     "Ring": ["ring", "rings", "engagement", "wedding band", "proposal"],
-    "Necklace": ["necklace", "necklaces", "chain", "choker", "mangalsutra"],
+    "Necklace": ["necklace", "necklaces", "choker", "mangalsutra"],
+    "Chain": ["chain", "chains"],
     "Earring": ["earring", "earrings", "stud", "studs", "hoop", "hoops", "jhumka", "jhumkas"],
-    "Bracelet": ["bracelet", "bracelets", "bangle", "bangles", "kada"],
+    "Bracelet": ["bracelet", "bracelets"],
+    "Bangle": ["bangle", "bangles", "kada"],
     "Pendant": ["pendant", "pendants"],
     "Anklet": ["anklet", "anklets", "payal"],
 }
@@ -2768,6 +2781,7 @@ FILTER_KEYS = {
     "min_price",
     "max_price",
     "metal",
+    "purity",
     "category",
     "gift_intent",
     "occasion",
@@ -3097,10 +3111,11 @@ def empty_filter_state() -> dict[str, Any]:
         "min_price": None,
         "max_price": None,
         "metal": None,
+        "purity": None,
         "category": None,
         "gift_intent": False,
         "occasion": None,
-        "in_stock_only": False,
+        "in_stock_only": True,
         "style": None,
         "recipient": None,
         "feature": None,
@@ -6304,6 +6319,7 @@ def compact_filters(filters: dict[str, Any]) -> dict[str, Any]:
         "min_price",
         "max_price",
         "metal",
+        "purity",
         "category",
         "gift_intent",
         "occasion",
@@ -6362,7 +6378,7 @@ def is_referential_filter_followup(
     if message_has_any(message, REFERENTIAL_FOLLOWUP_KEYWORDS):
         return True
     if message.startswith(("only ", "just ")):
-        refinement_keys = {"metal", "in_stock_only"}
+        refinement_keys = {"metal", "purity", "in_stock_only"}
         return bool(updates) and set(updates).issubset(refinement_keys)
     return False
 
@@ -6416,6 +6432,10 @@ def parse_filter_updates(message: str) -> tuple[dict[str, Any], set[str], bool, 
         updates["metal"] = metal
     elif message_has_any(msg, ["any metal", "all metals", "another metal", "different metal"]):
         clear_keys.add("metal")
+
+    purity = re.search(r"\b(18|22|24)\s*(?:kt?|karat|carat)\b", msg)
+    if purity:
+        updates["purity"] = purity.group(1) + "K"
 
     price_range = extract_price_range(msg)
     if price_range:
@@ -6534,6 +6554,9 @@ def filter_products(
     if filters.get("metal"):
         query = query.filter(Product.metal.ilike(filters["metal"]))
 
+    if filters.get("purity"):
+        query = query.filter(Product.purity.ilike(filters["purity"] + "%"))
+
     if filters.get("occasion"):
         query = query.filter(metadata_text_match(Product.occasion, filters["occasion"]))
 
@@ -6582,6 +6605,8 @@ def filter_products(
 
 
 def build_buying_advice_reply(message: str, count: int) -> str | None:
+    if message_has_any(message, ["clean", "cleaning", "care", "store safely", "safely store"]):
+        return "For plain gold without stones, use mild soap and lukewarm water, then dry with a soft cloth. Avoid bleach and harsh chemicals; store pieces separately. Ask the jeweller before cleaning pieces with stones, pearls, coatings or delicate settings."
     if message_has_any(message, ["size", "measurement", "measure"]):
         return "For ring sizing, measure an existing ring or your finger in millimeters, then choose the closest size. I can also show ring options while you confirm the size."
     if message_has_any(message, ["sensitive skin", "allergy", "hypoallergenic"]):
@@ -6620,7 +6645,9 @@ def build_reply(message: str, count: int, filters: dict[str, Any]) -> str:
         if category:
             return f"I could not find matching {category.lower()} options right now, but I can suggest nearby styles, gifts, and budget-friendly alternatives."
         return "I could not find matching jewellery right now, but I can help with rings, earrings, necklaces, gifts, and budget-based suggestions."
-    if filters.get("in_stock_only"):
+    if filters.get("in_stock_only") and message_has_any(
+        msg, ["in stock", "available", "ready to ship"]
+    ):
         return f"I found {count} in-stock jewellery options for you."
     if has_gift_intent:
         return f"I found {count} jewellery gift options you may like."
@@ -6630,7 +6657,7 @@ def build_reply(message: str, count: int, filters: dict[str, Any]) -> str:
         return f"I found {count} jewellery options within your budget."
     if minimum_price is not None:
         return f"I found {count} premium jewellery options for you."
-    if category in {"Ring", "Necklace", "Earring"}:
+    if category:
         return f"I found {count} {category.lower()} options for you."
     if metal:
         return f"I found {count} {metal.lower()} jewellery options for you."

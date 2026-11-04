@@ -245,7 +245,13 @@ def test_concept_openai_text_and_image_contract(auth_client, monkeypatch):
         "craft_notes": ["Create CAD for approval."],
     }
     monkeypatch.setattr(ai_main.ai, "json_response", AsyncMock(return_value=generated))
-    monkeypatch.setattr(ai_main.ai, "image", AsyncMock(return_value="dGVzdC1pbWFnZQ=="))
+    monkeypatch.setattr(
+        ai_main.ai,
+        "image",
+        AsyncMock(
+            return_value="iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAIklEQVR4nGP8f52BJMBEmnKGUQ1EASbilCHAqAZiAMmhBADRDgH2tqcEPwAAAABJRU5ErkJggg=="
+        ),
+    )
     response = auth_client.post(
         "/sona/ai/concepts",
         json={
@@ -256,8 +262,8 @@ def test_concept_openai_text_and_image_contract(auth_client, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["name"] == "Lotus Light"
-    assert body["image_base64"] == "dGVzdC1pbWFnZQ=="
-    assert body["image_mime_type"] == "image/png"
+    assert body["image_base64"] and body["image_base64"] != "dGVzdC1pbWFnZQ=="
+    assert body["image_mime_type"] == "image/jpeg"
     assert body["answer_source"] == "ai"
     ai_main.ai.image.assert_awaited_once()
 
