@@ -1,0 +1,11 @@
+# Staging AI quality evaluation — 5 November 2026
+
+The branded APK passed local startup analysis, three startup tests, signing/package/native alignment checks and owner phone checks. Backend f79075a7aa6fb43f6150dd7b6dbe6ce8d21f398c was deployed only to staging after a consistent backup, verified isolated restore and unchanged-record checks. No migration or production deployment ran.
+
+Live AI quality did not pass. Seven chat requests fell back to rules/handoff; Studio returned a template without an image. A separately journaled controlled Responses probe returned HTTP 429 with error type insufficient_quota and code credit_balance_exhausted. Model metadata reads returned HTTP 200, which does not establish generation access. Generation retries are stopped until prepaid API credits are restored. Nine text-request slots and one image-request slot are reserved/used across the evaluation journal; three text slots and one image slot remain for the bounded phone checks. These are attempted-request counts, not successful generations.
+
+Confirmed catalogue defects: an out-of-stock 22K ring appeared for an 18K refinement; a bangle search returned a bracelet. Local fixes default chat to available stock, preserve explicit out-of-stock viewing, distinguish chains from necklaces and bangles from bracelets, persist purity refinements and retain their budget/type context. Care fallback now gives cautious guidance for plain gold and asks the jeweller to confirm treatment of stones/coatings. No catalogue data was altered.
+
+The evaluation harness also reused the default conversation for cases intended to be fresh. Its future requests now use unique conversation IDs. The completed batch is preserved and is not reinterpreted as a pass or rerun automatically. Existing staging diagnostic chats, audits and any synthetic handoff leads are preserved.
+
+Validation: 45 chat/regression/account-owner tests and 21 catalogue/Studio tests passed using isolated SQLite and mocked/disabled providers. Ruff lint and formatting passed. This review commit has not been deployed. Fresh CI, a reviewed staging rollout and remaining bounded live/phone tests are required. Production, push sending, active routes, financial controls and voucher 2 remain unchanged.
