@@ -3280,6 +3280,9 @@ def upsert_local_order_snapshot(
         db.add(order)
         db.flush()
 
+    from billing_supply import dispatch_gate
+
+    dispatch_gate(db, order, payload.status)
     order.status = payload.status
     order.total = payload.total
     order.currency = payload.currency or "INR"
@@ -8722,6 +8725,9 @@ def admin_update_order(
         purchase_identity.require_order_fulfilment(db, order)
     previous_status = order.status
     updates = payload.model_dump(exclude_unset=True)
+    from billing_supply import dispatch_gate
+
+    dispatch_gate(db, order, updates.get("status"))
     if "delivery_address" in updates:
         order.delivery_address = dump_json_object(updates.pop("delivery_address") or {})
     for field, value in updates.items():
@@ -10245,6 +10251,18 @@ install_catalogue_extras(app, get_db, get_current_user, require_permission)
 import billing_documents_api  # noqa: E402
 
 billing_documents_api.install(app, get_db, get_current_user, require_permission, log_admin_action)
+
+import billing_b2c_api  # noqa: E402
+
+billing_b2c_api.install(
+    app,
+    get_db,
+    get_current_user,
+    require_permission,
+    log_admin_action,
+    sys.modules[__name__],
+    limiter,
+)
 
 
 def create_cancellation_refund(payment_id, amount_paise, receipt):

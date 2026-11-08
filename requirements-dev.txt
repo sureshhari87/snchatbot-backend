@@ -1,4 +1,5 @@
 -r requirements.txt
+pypdf>=7,<8
 
 bandit[toml]
 pip-audit

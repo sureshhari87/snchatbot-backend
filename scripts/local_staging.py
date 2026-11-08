@@ -33,6 +33,8 @@ BILLING_DOCUMENTS_REVISION = "0038_billing_documents"
 ORDER_CANCELLATIONS_REVISION = "0039_order_cancellations"
 PURCHASE_IDENTITY_REVISION = "0040_purchase_identity"
 CUSTOMER_PROFILE_REVISION = "0041_customer_profiles"
+B2C_GST_REVISION = "0042_b2c_gst"
+B2C_GST_TABLES = {"billing_tax_approvals", "billing_invoice_adjustments", "billing_supply_events"}
 BILLING_RECEIPT_TABLES = {"billing_receipts", "billing_receipt_audit"}
 BILLING_DOCUMENT_TABLES = {"billing_documents", "billing_document_audit", "billing_series"}
 REFERRAL_TABLES = {
@@ -137,6 +139,7 @@ def clean_environment(url):
 
 def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
     if expected_revision not in (
+        B2C_GST_REVISION,
         REVISION,
         SAVINGS_REVISION,
         CUSTOM_DESIGNS_REVISION,
@@ -188,6 +191,7 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
             ORDER_CANCELLATIONS_REVISION,
             PURCHASE_IDENTITY_REVISION,
             CUSTOMER_PROFILE_REVISION,
+            B2C_GST_REVISION,
         ]
         if versions != [(expected_revision,)]:
             if (
@@ -200,6 +204,10 @@ def preflight(url, *, expected_revision=REVISION, allow_descendants=False):
                     "Unexpected schema revision; no automatic stamp or migration allowed"
                 )
             expected_revision = versions[0][0]
+        if expected_revision == B2C_GST_REVISION:
+            if not B2C_GST_TABLES.issubset(tables):
+                raise ValueError("Required B2C approval/adjustment/supply schema is missing")
+            expected_revision = CUSTOMER_PROFILE_REVISION
         if not {"push_devices", "push_events", "push_attempts"}.issubset(tables):
             raise ValueError("Required push schema tables are missing")
         if expected_revision in (

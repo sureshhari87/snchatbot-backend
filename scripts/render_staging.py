@@ -13,6 +13,7 @@ BIND_HOST = "0.0.0.0"  # nosec B104
 sys.path.insert(0, str(REPO))
 
 from scripts.local_staging import (  # noqa: E402
+    B2C_GST_REVISION,
     BILLING_DOCUMENTS_REVISION,
     CUSTOMER_PROFILE_REVISION,
     ORDER_CANCELLATIONS_REVISION,
@@ -82,6 +83,9 @@ def render_environment(source):
         except (ValueError, UnicodeError) as error:
             raise ValueError("A dedicated voucher encryption key is required") from error
     for flag in (
+        "BILLING_B2C_CONTROLS_ENABLED",
+        "BILLING_IRN_REQUIRED",
+        "BILLING_VERIFICATION_ENABLED",
         "PURCHASE_IDENTITY_ENABLED",
         "CUSTOMER_PROFILE_ENABLED",
         "ORDER_CANCELLATIONS_ENABLED",
@@ -197,9 +201,12 @@ def verify_database(
     order_cancellations_enabled=False,
     purchase_identity_enabled=False,
     customer_profile_enabled=False,
+    b2c_enabled=False,
 ):
     revision = (
-        CUSTOMER_PROFILE_REVISION
+        B2C_GST_REVISION
+        if b2c_enabled
+        else CUSTOMER_PROFILE_REVISION
         if customer_profile_enabled
         else PURCHASE_IDENTITY_REVISION
         if purchase_identity_enabled
@@ -238,9 +245,14 @@ def main():
                 order_cancellations_enabled=env["ORDER_CANCELLATIONS_ENABLED"] == "1",
                 purchase_identity_enabled=env["PURCHASE_IDENTITY_ENABLED"] == "1",
                 customer_profile_enabled=env["CUSTOMER_PROFILE_ENABLED"] == "1",
+                b2c_enabled=env.get("BILLING_B2C_CONTROLS_ENABLED", "0") == "1",
             )
         elif env["BILLING_DOCUMENTS_ENABLED"] == "1":
-            verify_database(env["DATABASE_URL"], billing_documents_enabled=True)
+            verify_database(
+                env["DATABASE_URL"],
+                billing_documents_enabled=True,
+                b2c_enabled=env.get("BILLING_B2C_CONTROLS_ENABLED", "0") == "1",
+            )
         else:
             verify_database(env["DATABASE_URL"])
         os.environ.clear()

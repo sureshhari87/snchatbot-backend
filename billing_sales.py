@@ -2,6 +2,7 @@
 
 import os
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from typing import Annotated, Literal
 
 from fastapi import HTTPException
@@ -40,6 +41,7 @@ class Buyer(Facts):
     state_code: Annotated[str, Field(pattern=r"^(0[1-9]|[12][0-9]|3[0-8])$")]
     postal_code: Annotated[str, Field(pattern=r"^[1-9][0-9]{5}$")]
     gstin: str | None = None
+    delivery_address: Annotated[str, Field(min_length=1, max_length=1000)] | None = None
 
     @model_validator(mode="after")
     def tax_identity(self):
@@ -134,6 +136,9 @@ class SaleLine(Facts):
 
 
 class AdditionalCharge(Facts):
+    tax_policy_key: (
+        Annotated[str, Field(pattern=r"^service:[a-z0-9_-]+$", max_length=120)] | None
+    ) = None
     description: Text
     hsn: Annotated[str, Field(pattern=r"^(?:[0-9]{4}|[0-9]{6}|[0-9]{8})$")]
     taxable_paise: Money
@@ -159,7 +164,20 @@ class SalesInput(Facts):
 
 
 def round_ratio(numerator, denominator):
-    return (numerator * 2 + denominator) // (2 * denominator)
+    if (
+        type(numerator) is not int
+        or type(denominator) is not int
+        or numerator < 0
+        or denominator <= 0
+    ):
+        raise ValueError("Financial ratios require nonnegative exact integers")
+    with localcontext() as context:
+        context.prec = 80
+        return int(
+            (Decimal(numerator) / Decimal(denominator)).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
 
 
 def calculate(lines, issuer_state, supply_state):
@@ -212,6 +230,8 @@ def calculate(lines, issuer_state, supply_state):
 
 
 def einvoice_gate(buyer):
+    if os.getenv("BILLING_IRN_REQUIRED", "0") == "1":
+        raise HTTPException(409, "IRN integration is required but not implemented")
     if buyer.kind == "retail":
         return dict(status="not_applicable_domestic_b2c", irn=None, signed_qr=None)
     mode = os.getenv("BILLING_EINVOICE_APPLICABILITY", "unconfirmed")
