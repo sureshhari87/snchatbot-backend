@@ -83,7 +83,7 @@ def local_postgres(tmp_path_factory):
             "-w",
             "start",
             "-o",
-            f"-h 127.0.0.1 -p {port} -F",
+            f"-h 127.0.0.1 -p {port} -F -c unix_socket_directories=",
         )
         engine = create_engine(f"postgresql+psycopg://postgres@127.0.0.1:{port}/postgres")
         Base.metadata.create_all(engine)

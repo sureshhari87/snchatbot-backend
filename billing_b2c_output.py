@@ -8,8 +8,8 @@ import os
 import re
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, localcontext
+from html import escape
 from urllib.parse import urlsplit
-from xml.sax.saxutils import escape
 
 from fastapi import HTTPException
 
@@ -151,7 +151,7 @@ def pdf(document, qr_url=None):
         escaped = re.sub(
             r"[\u0b80-\u0bff]+",
             lambda match: '<font name="SonaTamil">' + match.group() + "</font>",
-            escape(str(value)),
+            escape(str(value), quote=False),
         )
         return Paragraph(escaped, styles[style])
 
