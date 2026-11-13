@@ -25,8 +25,14 @@ from schemas import OrderSyncRequest
 def local_postgres(tmp_path_factory):
     if os.environ.get("RUN_LOCAL_POSTGRES_TESTS") != "1":
         pytest.skip("Opt-in local PostgreSQL test")
-    binaries = Path(__file__).resolve().parents[2] / "postgres-tools" / "pgsql" / "bin"
-    if not (binaries / "initdb.exe").is_file():
+    binaries = Path(
+        os.environ.get(
+            "LOCAL_POSTGRES_BIN",
+            str(Path(__file__).resolve().parents[2] / "postgres-tools" / "pgsql" / "bin"),
+        )
+    )
+    executable_suffix = ".exe" if os.name == "nt" else ""
+    if not (binaries / ("initdb" + executable_suffix)).is_file():
         pytest.fail("Local PostgreSQL tools missing")
     tmp_path = tmp_path_factory.mktemp("payment-postgres")
     with socket.socket() as listener:
@@ -43,7 +49,7 @@ def local_postgres(tmp_path_factory):
         # waiting after pg_ctl exits. File-backed logs avoid that launcher hang.
         with (tmp_path / f"{tool}.log").open("ab") as log:
             subprocess.run(
-                [str(binaries / (tool + ".exe")), *map(str, args)],
+                [str(binaries / (tool + executable_suffix)), *map(str, args)],
                 check=True,
                 stdout=log,
                 stderr=log,
@@ -77,7 +83,7 @@ def local_postgres(tmp_path_factory):
             "-w",
             "start",
             "-o",
-            f"-h 127.0.0.1 -p {port} -F",
+            f"-h 127.0.0.1 -p {port} -F -c unix_socket_directories=",
         )
         engine = create_engine(f"postgresql+psycopg://postgres@127.0.0.1:{port}/postgres")
         Base.metadata.create_all(engine)

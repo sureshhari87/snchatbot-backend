@@ -39,7 +39,10 @@ def fingerprint(engine, tables, sequences):
 
 def test_real_upgrade_restore_receipts_and_preserved_history(local_postgres, tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]
-    tools = root.parent / "postgres-tools" / "pgsql" / "bin"
+    tools = Path(
+        os.environ.get("LOCAL_POSTGRES_BIN", str(root.parent / "postgres-tools" / "pgsql" / "bin"))
+    )
+    executable_suffix = ".exe" if os.name == "nt" else ""
     base = local_postgres.kw["bind"].url
     assert base.host == "127.0.0.1" and base.database == "postgres" and base.password is None
     names = ["billing_chain_" + uuid4().hex for _ in range(2)]
@@ -147,7 +150,7 @@ def test_real_upgrade_restore_receipts_and_preserved_history(local_postgres, tmp
         flags = ["-h", "127.0.0.1", "-p", str(base.port), "-U", "postgres"]
         run(
             [
-                str(tools / "pg_dump.exe"),
+                str(tools / ("pg_dump" + executable_suffix)),
                 *flags,
                 "-Fc",
                 "--file",
@@ -159,10 +162,14 @@ def test_real_upgrade_restore_receipts_and_preserved_history(local_postgres, tmp
             names[0],
         )
         assert archive.is_file() and archive.stat().st_size > 0
-        run([str(tools / "pg_restore.exe"), "--list", str(archive)], "archive_read", names[0])
+        run(
+            [str(tools / ("pg_restore" + executable_suffix)), "--list", str(archive)],
+            "archive_read",
+            names[0],
+        )
         run(
             [
-                str(tools / "pg_restore.exe"),
+                str(tools / ("pg_restore" + executable_suffix)),
                 *flags,
                 "--exit-on-error",
                 "--no-owner",

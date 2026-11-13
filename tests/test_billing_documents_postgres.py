@@ -51,8 +51,11 @@ def module(number):
 
 
 def test_document_migration_preserves_data_and_rejects_mutation(local_postgres, monkeypatch):
+    from billing_b2c_models import InvoiceAdjustment
+
     engine = local_postgres.kw["bind"]
     with engine.begin() as connection:
+        InvoiceAdjustment.__table__.drop(connection)
         for table in [
             BillingDocumentAudit.__table__,
             BillingDocument.__table__,
@@ -72,6 +75,7 @@ def test_document_migration_preserves_data_and_rejects_mutation(local_postgres, 
         migration.downgrade()
         migration.upgrade()
         assert connection.execute(text("SELECT count(*) FROM users")).scalar_one() == before
+        InvoiceAdjustment.__table__.create(connection)
     with local_postgres() as db:
         owner = User(
             username="billing-races",
@@ -211,5 +215,20 @@ def test_different_sources_get_unique_consecutive_invoice_numbers(local_postgres
 
     numbers = race(work)
     assert len(set(numbers)) == 2 and {int(n.rsplit("-", 1)[1]) for n in numbers} == {1, 2}
+
+    def retry_same_source(index):
+        oid, iid, uid = ids[0]
+        with local_postgres() as db:
+            result = billing_documents.issue_sales(
+                db,
+                "merchandise",
+                oid,
+                billing_sales.SalesInput(**sale_payload(iid)),
+                db.get(User, uid),
+            )
+            db.commit()
+            return result["document"]["document_id"]
+
+    assert len(set(race(retry_same_source))) == 1
     with local_postgres() as db:
         assert db.query(BillingSeries).one().next_sequence == 3

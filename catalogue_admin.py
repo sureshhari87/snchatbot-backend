@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from catalogue_data import RATES_KEY, dynamic, number, price, product_values, read_rates
 from models import AppConfigEntry, Product
+from stock_alerts import available, notify_subscribers
 
 
 def document(product):
@@ -71,9 +72,12 @@ def install(app, get_db, require_permission):
         if product is None:
             raise HTTPException(404, "Product not found")
         try:
+            was_available = available(product)
             merged = {**document(product)["data"], **data}
             for key, value in product_values(merged, rates).items():
                 setattr(product, key, value)
+            if not was_available and available(product):
+                notify_subscribers(db, product)
             db.commit()
             db.refresh(product)
             return document(product)

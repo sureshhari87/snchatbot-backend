@@ -168,7 +168,7 @@ def test_chat_fresh_category_search_clears_stale_session_filters(auth_client):
     body = response.json()
 
     assert response.status_code == 200
-    assert body["applied_filters"] == {"category": "Ring"}
+    assert body["applied_filters"] == {"category": "Ring", "in_stock_only": True}
     assert body["result_count"] == 2
     assert {product["category"] for product in body["products"]} == {"Ring"}
 
@@ -193,7 +193,11 @@ def test_chat_under_budget_search_does_not_keep_previous_min_price(auth_client):
     body = response.json()
 
     assert response.status_code == 200
-    assert body["applied_filters"] == {"max_price": 20000, "category": "Ring"}
+    assert body["applied_filters"] == {
+        "max_price": 20000,
+        "category": "Ring",
+        "in_stock_only": True,
+    }
     assert body["result_count"] == 2
     assert all(product["price"] <= 20000 for product in body["products"])
 
@@ -218,7 +222,11 @@ def test_chat_fresh_metal_category_search_clears_gift_and_feature_context(auth_c
     body = response.json()
 
     assert response.status_code == 200
-    assert body["applied_filters"] == {"metal": "Silver", "category": "Necklace"}
+    assert body["applied_filters"] == {
+        "metal": "Silver",
+        "category": "Chain",
+        "in_stock_only": True,
+    }
     assert "gift_intent" not in body["applied_filters"]
     assert "feature" not in body["applied_filters"]
 

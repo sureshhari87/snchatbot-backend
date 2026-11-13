@@ -1,4 +1,7 @@
 fastapi
+reportlab>=4.4,<5
+qrcode[pil]>=8.2,<9
+uharfbuzz>=0.50,<1
 uvicorn[standard]
 pydantic
 sqlalchemy

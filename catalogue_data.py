@@ -6,6 +6,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from jewellery_tax_policy import apply_jewellery_gst
 from models import AppConfigEntry, Product
+from product_media import video_urls
 
 RATES_KEY = "commerce.metal_rates"
 
@@ -103,6 +104,8 @@ def price(data, rates):
 
 def product_values(data, rates):
     data = apply_jewellery_gst(data)
+    if "videoUrls" in data or "videoUrl" in data:
+        data["videoUrls"] = video_urls(data.get("videoUrls", data.get("videoUrl")))
     if is_gift(data):
         data["useDynamicPricing"] = False
     huid = str(data.get("huid") or "").strip().upper()

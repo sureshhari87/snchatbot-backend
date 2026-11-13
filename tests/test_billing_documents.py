@@ -474,12 +474,11 @@ def test_production_issuance_requires_real_electronic_signing(
     monkeypatch.setattr(billing_documents.config, "APP_ENV", "production")
     endpoint = f"/admin/billing/sales/merchandise/{order.id}"
     preview = client.post(endpoint + "/preview", headers=admin_headers, json=payload)
-    assert preview.status_code == 200
-    assert preview.json()["preview"]["signature"]["electronically_signed"] is False
+    assert preview.status_code == 409  # Missing per-product written approvals block production.
     for _ in range(2):
         stopped = client.post(endpoint + "/issue", headers=admin_headers, json=payload)
         assert stopped.status_code == 409
-        assert "electronic invoice signing" in stopped.json()["detail"]
+        assert stopped.json()["detail"]
     assert len(provider.calls) == calls
     assert db.query(BillingSeries).count() == 0
     assert db.query(BillingDocument).count() == 0

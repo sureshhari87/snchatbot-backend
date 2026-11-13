@@ -2435,7 +2435,8 @@ def catalogue_category_match(category: str):
     """Match jewellery type without confusing its material category."""
     key = category.strip().lower()
     aliases = {
-        "necklace": ("necklace", "necklaces", "chain", "chains"),
+        "necklace": ("necklace", "necklaces"),
+        "chain": ("chain", "chains"),
         "earring": ("earring", "earrings", "stud", "studs", "jhumka", "jhumkas"),
     }.get(key, (key, key + "s"))
     conditions = [
@@ -2443,7 +2444,17 @@ def catalogue_category_match(category: str):
         for alias in aliases
         for column in (Product.category, Product.product_type)
     ]
-    if key in {"ring", "necklace", "earring", "bangle", "bracelet", "pendant", "anklet", "coin"}:
+    if key in {
+        "ring",
+        "necklace",
+        "chain",
+        "earring",
+        "bangle",
+        "bracelet",
+        "pendant",
+        "anklet",
+        "coin",
+    }:
         name = " " + func.lower(func.replace(func.replace(Product.name, "-", " "), "_", " ")) + " "
         conditions.append(
             and_(
@@ -2564,6 +2575,7 @@ def product_metadata_list(value: Any) -> list[str]:
 
 def product_out(product: Product) -> ProductOut:
     return ProductOut(
+        attributes=product.attributes,
         id=product.id,
         name=product.name,
         description=product.description,
@@ -2634,42 +2646,9 @@ def active_stock_subscription(
 
 
 def notify_back_in_stock_subscribers(db: Session, product: Product) -> int:
-    subscriptions = (
-        db.query(BackInStockSubscription)
-        .filter(
-            BackInStockSubscription.product_id == product.id,
-            BackInStockSubscription.status == "active",
-        )
-        .order_by(BackInStockSubscription.created_at.asc())
-        .all()
-    )
-    notified_count = 0
-    for subscription in subscriptions:
-        if subscription.email:
-            send_email(
-                subscription.email,
-                f"{product.name} is back in stock",
-                (
-                    f"Good news. {product.name} is available again.\n\n"
-                    "Open the Sona Jewellery app to view the product or ask Sona AI "
-                    "for similar available options."
-                ),
-            )
-        subscription.status = "notified"
-        subscription.notified_at = utc_now()
-        subscription.updated_at = utc_now()
-        notified_count += 1
+    from stock_alerts import notify_subscribers
 
-    if notified_count:
-        record_integration_event(
-            db,
-            service="stock_alerts",
-            action="back_in_stock_notify",
-            status_value="notified",
-            reference=str(product.id),
-            response_payload={"notified_count": notified_count},
-        )
-    return notified_count
+    return notify_subscribers(db, product)
 
 
 BUYING_SUGGESTIONS = [
@@ -2707,9 +2686,11 @@ BUYING_SUGGESTIONS = [
 
 CATEGORY_KEYWORDS = {
     "Ring": ["ring", "rings", "engagement", "wedding band", "proposal"],
-    "Necklace": ["necklace", "necklaces", "chain", "choker", "mangalsutra"],
+    "Necklace": ["necklace", "necklaces", "choker", "mangalsutra"],
+    "Chain": ["chain", "chains"],
     "Earring": ["earring", "earrings", "stud", "studs", "hoop", "hoops", "jhumka", "jhumkas"],
-    "Bracelet": ["bracelet", "bracelets", "bangle", "bangles", "kada"],
+    "Bracelet": ["bracelet", "bracelets"],
+    "Bangle": ["bangle", "bangles", "kada"],
     "Pendant": ["pendant", "pendants"],
     "Anklet": ["anklet", "anklets", "payal"],
 }
@@ -2800,6 +2781,7 @@ FILTER_KEYS = {
     "min_price",
     "max_price",
     "metal",
+    "purity",
     "category",
     "gift_intent",
     "occasion",
@@ -3129,10 +3111,11 @@ def empty_filter_state() -> dict[str, Any]:
         "min_price": None,
         "max_price": None,
         "metal": None,
+        "purity": None,
         "category": None,
         "gift_intent": False,
         "occasion": None,
-        "in_stock_only": False,
+        "in_stock_only": True,
         "style": None,
         "recipient": None,
         "feature": None,
@@ -3297,6 +3280,9 @@ def upsert_local_order_snapshot(
         db.add(order)
         db.flush()
 
+    from billing_supply import dispatch_gate
+
+    dispatch_gate(db, order, payload.status)
     order.status = payload.status
     order.total = payload.total
     order.currency = payload.currency or "INR"
@@ -6336,6 +6322,7 @@ def compact_filters(filters: dict[str, Any]) -> dict[str, Any]:
         "min_price",
         "max_price",
         "metal",
+        "purity",
         "category",
         "gift_intent",
         "occasion",
@@ -6394,7 +6381,7 @@ def is_referential_filter_followup(
     if message_has_any(message, REFERENTIAL_FOLLOWUP_KEYWORDS):
         return True
     if message.startswith(("only ", "just ")):
-        refinement_keys = {"metal", "in_stock_only"}
+        refinement_keys = {"metal", "purity", "in_stock_only"}
         return bool(updates) and set(updates).issubset(refinement_keys)
     return False
 
@@ -6448,6 +6435,10 @@ def parse_filter_updates(message: str) -> tuple[dict[str, Any], set[str], bool, 
         updates["metal"] = metal
     elif message_has_any(msg, ["any metal", "all metals", "another metal", "different metal"]):
         clear_keys.add("metal")
+
+    purity = re.search(r"\b(18|22|24)\s*(?:kt?|karat|carat)\b", msg)
+    if purity:
+        updates["purity"] = purity.group(1) + "K"
 
     price_range = extract_price_range(msg)
     if price_range:
@@ -6566,6 +6557,9 @@ def filter_products(
     if filters.get("metal"):
         query = query.filter(Product.metal.ilike(filters["metal"]))
 
+    if filters.get("purity"):
+        query = query.filter(Product.purity.ilike(filters["purity"] + "%"))
+
     if filters.get("occasion"):
         query = query.filter(metadata_text_match(Product.occasion, filters["occasion"]))
 
@@ -6614,6 +6608,8 @@ def filter_products(
 
 
 def build_buying_advice_reply(message: str, count: int) -> str | None:
+    if message_has_any(message, ["clean", "cleaning", "care", "store safely", "safely store"]):
+        return "For plain gold without stones, use mild soap and lukewarm water, then dry with a soft cloth. Avoid bleach and harsh chemicals; store pieces separately. Ask the jeweller before cleaning pieces with stones, pearls, coatings or delicate settings."
     if message_has_any(message, ["size", "measurement", "measure"]):
         return "For ring sizing, measure an existing ring or your finger in millimeters, then choose the closest size. I can also show ring options while you confirm the size."
     if message_has_any(message, ["sensitive skin", "allergy", "hypoallergenic"]):
@@ -6652,7 +6648,9 @@ def build_reply(message: str, count: int, filters: dict[str, Any]) -> str:
         if category:
             return f"I could not find matching {category.lower()} options right now, but I can suggest nearby styles, gifts, and budget-friendly alternatives."
         return "I could not find matching jewellery right now, but I can help with rings, earrings, necklaces, gifts, and budget-based suggestions."
-    if filters.get("in_stock_only"):
+    if filters.get("in_stock_only") and message_has_any(
+        msg, ["in stock", "available", "ready to ship"]
+    ):
         return f"I found {count} in-stock jewellery options for you."
     if has_gift_intent:
         return f"I found {count} jewellery gift options you may like."
@@ -6662,7 +6660,7 @@ def build_reply(message: str, count: int, filters: dict[str, Any]) -> str:
         return f"I found {count} jewellery options within your budget."
     if minimum_price is not None:
         return f"I found {count} premium jewellery options for you."
-    if category in {"Ring", "Necklace", "Earring"}:
+    if category:
         return f"I found {count} {category.lower()} options for you."
     if metal:
         return f"I found {count} {metal.lower()} jewellery options for you."
@@ -7654,6 +7652,7 @@ def subscribe_back_in_stock(
     db: Session = Depends(get_db),
 ):
     product = get_product_or_404(db, product_id)
+    product = db.query(Product).filter_by(id=product.id).with_for_update().populate_existing().one()
     if product.in_stock and product.stock_quantity > 0:
         raise HTTPException(status_code=400, detail="Product is already in stock")
 
@@ -7729,6 +7728,8 @@ def cancel_back_in_stock_alert(
             BackInStockSubscription.id == subscription_id,
             BackInStockSubscription.user_id == current_user.id,
         )
+        .with_for_update()
+        .populate_existing()
         .first()
     )
     if not subscription:
@@ -7959,7 +7960,16 @@ def admin_update_product(
     db: Session = Depends(get_db),
 ):
     product = get_product_or_404(db, product_id, include_inactive=True)
-    apply_model_updates(product, product_in.model_dump(exclude_unset=True))
+    product = db.query(Product).filter_by(id=product.id).with_for_update().populate_existing().one()
+    from stock_alerts import available
+
+    was_available = available(product)
+    updates = product_in.model_dump(exclude_unset=True)
+    apply_model_updates(product, updates)
+    if "stock_quantity" in updates and "in_stock" not in updates:
+        product.in_stock = product.stock_quantity > 0
+    if not was_available and available(product):
+        notify_back_in_stock_subscribers(db, product)
     db.commit()
     db.refresh(product)
     log_admin_action(request, admin_user, "update", "product", product.id)
@@ -7975,6 +7985,7 @@ def admin_update_inventory(
     db: Session = Depends(get_db),
 ):
     product = get_product_or_404(db, product_id, include_inactive=True)
+    product = db.query(Product).filter_by(id=product.id).with_for_update().populate_existing().one()
     updates = inventory.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No inventory updates provided")
@@ -8009,6 +8020,7 @@ def admin_notify_back_in_stock(
     db: Session = Depends(get_db),
 ):
     product = get_product_or_404(db, product_id)
+    product = db.query(Product).filter_by(id=product.id).with_for_update().populate_existing().one()
     notified_count = notify_back_in_stock_subscribers(db, product)
     db.commit()
     log_admin_action(request, admin_user, "notify_back_in_stock", "product", product.id)
@@ -8713,6 +8725,9 @@ def admin_update_order(
         purchase_identity.require_order_fulfilment(db, order)
     previous_status = order.status
     updates = payload.model_dump(exclude_unset=True)
+    from billing_supply import dispatch_gate
+
+    dispatch_gate(db, order, updates.get("status"))
     if "delivery_address" in updates:
         order.delivery_address = dump_json_object(updates.pop("delivery_address") or {})
     for field, value in updates.items():
@@ -10236,6 +10251,18 @@ install_catalogue_extras(app, get_db, get_current_user, require_permission)
 import billing_documents_api  # noqa: E402
 
 billing_documents_api.install(app, get_db, get_current_user, require_permission, log_admin_action)
+
+import billing_b2c_api  # noqa: E402
+
+billing_b2c_api.install(
+    app,
+    get_db,
+    get_current_user,
+    require_permission,
+    log_admin_action,
+    sys.modules[__name__],
+    limiter,
+)
 
 
 def create_cancellation_refund(payment_id, amount_paise, receipt):
