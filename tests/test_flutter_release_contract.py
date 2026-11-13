@@ -3,27 +3,12 @@
 import pytest
 
 from main import app
+from scripts.smoke_test import FLUTTER_RELEASE_ROUTES
 
 
 @pytest.mark.parametrize(
     ("path", "methods"),
-    [
-        ("/admin/capabilities", {"get"}),
-        ("/users/me/customer-profile", {"get", "patch"}),
-        ("/users/me/customer-profile/email/request", {"post"}),
-        ("/users/me/customer-profile/email/verify", {"post"}),
-        ("/notifications/unread-count", {"get"}),
-        ("/billing/payments/{source}/{source_id}/receipt", {"post"}),
-        ("/billing/savings/payments/{payment_id}/receipt", {"post"}),
-        ("/billing/sales/{source}/{source_id}", {"get"}),
-        ("/billing/documents/{document_id}/pdf-data", {"get"}),
-        ("/purchase-identity", {"get", "post"}),
-        ("/admin/purchase-identities/{identity_id}", {"get"}),
-        ("/admin/purchase-identities/{identity_id}/review", {"post"}),
-        ("/orders/{order_id}/cancellation-review", {"get", "post"}),
-        ("/orders/{order_id}/cancellation-review/decision", {"post"}),
-        ("/admin/orders/{order_id}/cancellation-review", {"get"}),
-    ],
+    FLUTTER_RELEASE_ROUTES.items(),
 )
 def test_flutter_release_routes_remain_authenticated(path, methods):
     paths = app.openapi()["paths"]

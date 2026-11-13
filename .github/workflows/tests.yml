@@ -200,6 +200,7 @@ jobs:
           SMOKE_BASE_URL: http://127.0.0.1:7860
           SMOKE_EXPECT_LATEST_CHAT_CONTRACT: "1"
           SMOKE_EXPECT_COMMERCE_CONTRACT: "1"
+          SMOKE_EXPECT_FLUTTER_RELEASE_CONTRACT: "1"
           SMOKE_RETRIES: "24"
         run: python scripts/smoke_test.py
 

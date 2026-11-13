@@ -85,3 +85,44 @@ test key; that short test key caused PyJWT warnings. An existing raw-body
 HTTP-client deprecation also remains. No production secret strength or live
 provider behavior is established by this run. Hosted CI and matched-device
 acceptance remain separate checks.
+
+## Hosted checks and repeatable staging verification
+
+GitHub [CI for 3549bfa](https://github.com/sureshhari87/snchatbot-backend/actions/runs/43428869267)
+passed both Python coverage jobs, lint/format/secret hygiene, security and
+dependency auditing, Docker build, buyer-identity PostgreSQL acceptance,
+billing PostgreSQL migration/concurrency and isolated-container staging.
+Production deployment was skipped.
+
+A fresh read-only check of `https://snchatbot-staging.onrender.com` passed
+health, readiness, the chat/commerce contract, all 15 Flutter release routes
+and anonymous 401 boundaries for cart, admin capabilities and unread counts.
+This verifies the responding API; it does not identify the hosted source SHA
+or establish a new deployment, phone session, payment, email, PDF issuance
+or AI-generation acceptance.
+
+The smoke checker now shares its route requirements with the local contract
+tests. It also rejects anonymous OpenAPI alternatives and undeclared auth
+schemes. Non-JSON upstream errors report the route/status without echoing
+the provider response body. Thirty-three focused smoke/contract tests passed.
+
+Repeat from Windows CMD with the active venv:
+
+```cmd
+set "SMOKE_BASE_URL=https://snchatbot-staging.onrender.com"
+set "SMOKE_EXPECT_LATEST_CHAT_CONTRACT=1"
+set "SMOKE_EXPECT_COMMERCE_CONTRACT=1"
+set "SMOKE_EXPECT_FLUTTER_RELEASE_CONTRACT=1"
+python scripts\smoke_test.py
+```
+
+On macOS/Linux, supply the same four variables as environment variables
+before `python scripts/smoke_test.py`. These checks send GET requests only.
+The isolated-container CI job enables the expanded contract automatically.
+
+The next device check uses the existing matched staging app/admin pair:
+sign in, close/reopen the app, verify the same customer account, view an
+existing receipt and its saved customer details, and load/reload admin
+Billing with issuance still blocked. These repeat existing-data acceptance
+without creating a charge, refund or invoice. Live AI evaluation still
+requires funded provider access and the agreed bounded acceptance run.

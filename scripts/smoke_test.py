@@ -19,6 +19,47 @@ EXPECT_LATEST_CHAT_CONTRACT = os.getenv(
     os.getenv("LIVE_API_EXPECT_LATEST_CHAT_CONTRACT", ""),
 ).lower() in {"1", "true", "yes", "on"}
 EXPECT_COMMERCE_CONTRACT = os.getenv("SMOKE_EXPECT_COMMERCE_CONTRACT", "0") == "1"
+EXPECT_FLUTTER_RELEASE_CONTRACT = os.getenv("SMOKE_EXPECT_FLUTTER_RELEASE_CONTRACT", "0") == "1"
+
+FLUTTER_RELEASE_ROUTES = {
+    "/admin/capabilities": {"get"},
+    "/users/me/customer-profile": {"get", "patch"},
+    "/users/me/customer-profile/email/request": {"post"},
+    "/users/me/customer-profile/email/verify": {"post"},
+    "/notifications/unread-count": {"get"},
+    "/billing/payments/{source}/{source_id}/receipt": {"post"},
+    "/billing/savings/payments/{payment_id}/receipt": {"post"},
+    "/billing/sales/{source}/{source_id}": {"get"},
+    "/billing/documents/{document_id}/pdf-data": {"get"},
+    "/purchase-identity": {"get", "post"},
+    "/admin/purchase-identities/{identity_id}": {"get"},
+    "/admin/purchase-identities/{identity_id}/review": {"post"},
+    "/orders/{order_id}/cancellation-review": {"get", "post"},
+    "/orders/{order_id}/cancellation-review/decision": {"post"},
+    "/admin/orders/{order_id}/cancellation-review": {"get"},
+}
+
+
+def check_flutter_release_contract(schema: dict) -> None:
+    paths = schema.get("paths", {})
+    schemes = schema.get("components", {}).get("securitySchemes", {})
+    for path, methods in FLUTTER_RELEASE_ROUTES.items():
+        require(path in paths, f"Flutter release contract is missing {path}")
+        for method in methods:
+            label = f"{method.upper()} {path}"
+            operation = paths[path].get(method)
+            require(isinstance(operation, dict), f"Flutter release contract is missing {label}")
+            security = operation.get("security", schema.get("security", []))
+            require(
+                isinstance(security, list)
+                and bool(security)
+                and all(isinstance(option, dict) and bool(option) for option in security),
+                f"{label} permits anonymous access in OpenAPI",
+            )
+            require(
+                all(name in schemes for option in security for name in option),
+                f"{label} references an undeclared authentication scheme",
+            )
 
 
 def check_commerce_contract(schema: dict) -> None:
@@ -40,10 +81,16 @@ def request_json(path: str) -> tuple[int, dict]:
     request = urllib.request.Request(f"{BASE_URL}{path}", method="GET")
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:  # nosec B310
-            return response.status, json.loads(response.read().decode("utf-8"))
+            status, body = response.status, response.read()
     except HTTPError as exc:
-        body = exc.read().decode("utf-8")
-        return exc.code, json.loads(body)
+        status, body = exc.code, exc.read()
+        exc.close()
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise SmokeTestError(f"{path} returned HTTP {status} with non-JSON content") from None
+    require(isinstance(data, dict), f"{path} returned HTTP {status} without a JSON object")
+    return status, data
 
 
 def require(condition: bool, message: str) -> None:
@@ -70,6 +117,10 @@ def wait_for_health() -> None:
 def validate_base_url() -> None:
     parsed = urlparse(BASE_URL)
     require(parsed.scheme in {"http", "https"} and parsed.netloc, "SMOKE_BASE_URL must be http(s)")
+    require(
+        not parsed.username and not parsed.password and not parsed.query and not parsed.fragment,
+        "SMOKE_BASE_URL must not include credentials, query parameters or fragments",
+    )
 
 
 def check_readiness() -> None:
@@ -99,6 +150,11 @@ def check_openapi_contract() -> None:
         check_commerce_contract(schema)
         status, _ = request_json("/cart")
         require(status == 401, "Unauthenticated cart access must return 401")
+    if EXPECT_FLUTTER_RELEASE_CONTRACT:
+        check_flutter_release_contract(schema)
+        for path in ("/admin/capabilities", "/notifications/unread-count"):
+            status, _ = request_json(path)
+            require(status == 401, f"Unauthenticated {path} access must return 401")
 
 
 def main() -> int:
