@@ -43,6 +43,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import delivery_admin_api
 import delivery_draft_api
+from browser_origin_guard import BrowserOriginGuard
 
 try:
     import firebase_admin
@@ -716,6 +717,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if APP_ENV in {"production", "staging"}:
+    app.add_middleware(
+        BrowserOriginGuard,
+        allow_origins=CORS_ORIGINS,
+        allow_insecure_loopback=APP_ENV == "staging",
+    )
 
 
 class RequestBodyTooLarge(Exception):
