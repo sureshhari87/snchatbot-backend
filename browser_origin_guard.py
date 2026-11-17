@@ -5,7 +5,8 @@ This does not authenticate callers. Requests without Origin retain normal auth.
 import ipaddress
 from urllib.parse import urlsplit
 
-_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+BROWSER_CORS_METHODS = ("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT")
+_METHODS = frozenset(BROWSER_CORS_METHODS)
 
 
 class BrowserOriginGuard:

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import httpx
 from starlette.applications import Starlette
@@ -6,7 +7,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
-from browser_origin_guard import BrowserOriginGuard
+from browser_origin_guard import BROWSER_CORS_METHODS, BrowserOriginGuard
 
 ADMIN = "https://sona-jewellery-admin.web.app"
 PUBLIC = "https://sona-jewellery-app.web.app"
@@ -69,7 +70,7 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
             allow_origins=[ADMIN, PUBLIC],
             allow_credentials=True,
             allow_headers=["*"],
-            allow_methods=["*"],
+            allow_methods=BROWSER_CORS_METHODS,
         )
         app = BrowserOriginGuard(cors, [ADMIN, PUBLIC] if origins is None else origins)
         return ReflectingProxy(app, intercept) if proxy else app
@@ -79,6 +80,40 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.ASGITransport(app=app), base_url="https://api.invalid"
         ) as c:
             return await c.request(method, path, headers=headers, content=body)
+
+    async def test_advertised_methods_match_guard_after_framework_expands_wildcard(self):
+        future_methods = (*BROWSER_CORS_METHODS, "QUERY")
+        with patch("starlette.middleware.cors.ALL_METHODS", future_methods):
+            app = self.make_app()
+            for method in BROWSER_CORS_METHODS:
+                response = await self.request(
+                    app,
+                    method="OPTIONS",
+                    headers={
+                        "Origin": ADMIN,
+                        "Access-Control-Request-Method": method,
+                        "Access-Control-Request-Headers": "authorization,content-type",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                advertised = {
+                    value.strip()
+                    for value in response.headers["access-control-allow-methods"].split(",")
+                }
+                self.assertEqual(advertised, set(BROWSER_CORS_METHODS))
+                self.assertEqual(response.headers["access-control-allow-origin"], ADMIN)
+            self.assertEqual(self.calls, [])
+
+    async def test_framework_query_preflight_is_rejected_before_handlers(self):
+        with patch("starlette.middleware.cors.ALL_METHODS", (*BROWSER_CORS_METHODS, "QUERY")):
+            response = await self.request(
+                self.make_app(),
+                method="OPTIONS",
+                headers={"Origin": ADMIN, "Access-Control-Request-Method": "QUERY"},
+            )
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn("access-control-allow-origin", response.headers)
+        self.assertEqual(self.calls, [])
 
     async def test_approved_origin_does_not_bypass_authentication(self):
         r = await self.request(self.make_app(), headers={"Origin": ADMIN})
