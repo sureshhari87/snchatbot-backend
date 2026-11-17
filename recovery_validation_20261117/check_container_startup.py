@@ -24,9 +24,10 @@ assert not Path("/tmp/normal-startup.sqlite").exists()
 assert not list(Path("/app").glob(".env*"))
 sys.path.insert(0, "/app")
 
-import models  # noqa: F401
+import main  # noqa: F401
 from database import Base, engine
 
+# Importing the normal app registers push_devices as well as the core models.
 # Fixture schema only, confined to the container's new temporary SQLite file.
 Base.metadata.create_all(bind=engine)
 table_count = len(Base.metadata.tables)
