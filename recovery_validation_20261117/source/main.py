@@ -1,0 +1,9981 @@
+import base64
+import hashlib
+import hmac
+import html
+import json
+import logging
+import os
+import re
+import secrets
+import smtplib
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import Counter, defaultdict
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import formataddr
+from pathlib import Path
+from threading import Lock
+from typing import Any, List
+from uuid import uuid4
+
+import jwt
+from cryptography.x509 import load_pem_x509_certificate
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jwt import PyJWTError as JWTError
+from pwdlib import PasswordHash
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from sqlalchemy import String as SqlString
+from sqlalchemy import cast, inspect, or_, text
+from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
+from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials as firebase_credentials
+    from firebase_admin import firestore as firebase_firestore
+except Exception:  # pragma: no cover - optional production integration
+    firebase_admin = None
+    firebase_credentials = None
+    firebase_firestore = None
+
+import push_devices
+from catalogue_admin import install as install_catalogue_admin
+from commerce import install as install_commerce_routes
+from config import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    ADMIN_BOOTSTRAP_EMAIL,
+    ADMIN_BOOTSTRAP_ENABLED,
+    ADMIN_BOOTSTRAP_PASSWORD,
+    ADMIN_BOOTSTRAP_USERNAME,
+    ALERT_ERROR_THRESHOLD,
+    ALGORITHM,
+    APP_DEBUG,
+    APP_ENV,
+    BREVO_API_KEY,
+    BREVO_API_URL,
+    CORS_ALLOW_CREDENTIALS,
+    CORS_ORIGINS,
+    DATABASE_URL,
+    EMAIL_FROM,
+    EMAIL_FROM_NAME,
+    EMAIL_HOST,
+    EMAIL_PASSWORD,
+    EMAIL_PORT,
+    EMAIL_PROVIDER,
+    EMAIL_TIMEOUT_SECONDS,
+    EMAIL_USE_SSL,
+    EMAIL_USE_TLS,
+    EMAIL_USERNAME,
+    EMAIL_VERIFICATION_EXPIRE_MINUTES,
+    FIREBASE_AUTH_ENABLED,
+    FIREBASE_CERTS_URL,
+    FIREBASE_PROJECT_ID,
+    FIREBASE_REQUIRE_EMAIL_VERIFIED,
+    FIREBASE_SERVICE_ACCOUNT_JSON,
+    FIREBASE_SERVICE_ACCOUNT_PATH,
+    FIRESTORE_COMMERCE_ENABLED,
+    FIRESTORE_COUPONS_COLLECTION,
+    FIRESTORE_GIFT_VOUCHERS_COLLECTION,
+    FIRESTORE_GOLD_RATES_COLLECTION,
+    FIRESTORE_GOLD_RATES_DOCUMENT,
+    FIRESTORE_ORDERS_COLLECTION,
+    FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION,
+    FIRESTORE_PRODUCTS_COLLECTION,
+    FIRESTORE_USERS_COLLECTION,
+    FRONTEND_RESET_URL,
+    FRONTEND_VERIFY_URL,
+    HTTPS_REDIRECT,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_ENABLED,
+    LLM_MAX_TOKENS,
+    LLM_MODEL,
+    LLM_TIMEOUT_SECONDS,
+    LOGIN_FAILURE_LIMIT,
+    LOGIN_LOCKOUT_MINUTES,
+    MAX_REQUEST_BODY_BYTES,
+    MONITORING_WEBHOOK_TIMEOUT_SECONDS,
+    MONITORING_WEBHOOK_URL,
+    OMS_API_KEY,
+    OMS_BASE_URL,
+    OMS_ENABLED,
+    OMS_TIMEOUT_SECONDS,
+    ONHANDSMS_API_KEY,
+    ONHANDSMS_API_URL,
+    ONHANDSMS_MESSAGE_TEMPLATE,
+    ONHANDSMS_METHOD,
+    ONHANDSMS_PASSWORD,
+    ONHANDSMS_PAYLOAD_FORMAT,
+    ONHANDSMS_PAYLOAD_TEMPLATE,
+    ONHANDSMS_ROUTE,
+    ONHANDSMS_SENDER_ID,
+    ONHANDSMS_TEMPLATE_ID,
+    ONHANDSMS_USERNAME,
+    OTP_EXPIRE_MINUTES,
+    OTP_MAX_ATTEMPTS,
+    OTP_RESEND_COOLDOWN_SECONDS,
+    PASSWORD_MIN_LENGTH,
+    PASSWORD_RESET_EXPIRE_MINUTES,
+    PHONE_AUTH_PEPPER,
+    PURCHASE_REWARD_RUPEES_PER_POINT,
+    RAZORPAY_KEY_ID,
+    RAZORPAY_KEY_SECRET,
+    RAZORPAY_WEBHOOK_SECRET,
+    REFERRAL_REWARD_POINTS,
+    REFRESH_TOKEN_EXPIRE_DAYS,
+    RESEND_API_KEY,
+    RESEND_API_URL,
+    RESEND_VERIFICATION_COOLDOWN_SECONDS,
+    REWARD_POINT_VALUE_RUPEES,
+    RUN_MIGRATIONS_ON_STARTUP,
+    SECRET_KEY,
+    SENTRY_DSN,
+    SENTRY_PROFILES_SAMPLE_RATE,
+    SENTRY_RELEASE,
+    SENTRY_SEND_DEFAULT_PII,
+    SENTRY_TRACES_SAMPLE_RATE,
+    SMS_HTTP_USER_AGENT,
+    SMS_OTP_ENABLED,
+    SMS_PROVIDER,
+    SMS_TIMEOUT_SECONDS,
+    TRUSTED_HOSTS,
+    is_testing,
+)
+from database import Base, SessionLocal, engine
+from models import (
+    AiGeneratedConcept,
+    AppConfigEntry,
+    AppointmentBooking,
+    BackInStockSubscription,
+    CallbackRequest,
+    ChatMessage,
+    ChatResponseAnalytics,
+    ChatSession,
+    ComplaintTicket,
+    CustomOrderRequest,
+    EmailVerificationToken,
+    ExternalIntegrationEvent,
+    FeaturedItem,
+    KnowledgeBaseItem,
+    LeadCapture,
+    NotificationSettings,
+    OrderSnapshot,
+    OrderSnapshotItem,
+    OrderSupportRequest,
+    PasswordResetToken,
+    PhoneAuthIdentity,
+    PhoneOtpChallenge,
+    Product,
+    ProductCategory,
+    RefreshToken,
+    ResponseFeedback,
+    SaveForLaterItem,
+    SeasonalCollection,
+    User,
+    UserAddress,
+    WishlistItem,
+    utc_now,
+)
+from notification_api import install as install_notification_api
+from review_api import install as install_review_api
+from safe_http import http_urlopen
+from schemas import (
+    AiGeneratedConceptCreate,
+    AiGeneratedConceptOut,
+    AppConfigCreate,
+    AppConfigOut,
+    AppConfigUpdate,
+    AppointmentCreate,
+    AppointmentOut,
+    BackInStockNotifyOut,
+    BackInStockSubscribeRequest,
+    BackInStockSubscriptionOut,
+    CallbackRequestCreate,
+    CallbackRequestOut,
+    CategoryCreate,
+    CategoryOut,
+    CategoryUpdate,
+    ChatMessageOut,
+    ChatRequest,
+    ChatResponse,
+    ChatSessionDetailOut,
+    ChatSessionOut,
+    ComplaintCreate,
+    ComplaintOut,
+    CustomOrderCreate,
+    CustomOrderOut,
+    EmailTestRequest,
+    ExternalIntegrationEventOut,
+    FeaturedItemCreate,
+    FeaturedItemOut,
+    FeaturedItemUpdate,
+    FeedbackCreate,
+    FirebaseAuthRequest,
+    ForgotPasswordRequest,
+    HandoffInfo,
+    InventoryUpdate,
+    KnowledgeBaseCreate,
+    KnowledgeBaseOut,
+    KnowledgeBaseUpdate,
+    LeadCaptureOut,
+    LeadStatusUpdate,
+    MessageResponse,
+    NotificationSettingsOut,
+    NotificationSettingsUpdate,
+    OrderActionOut,
+    OrderActionRequest,
+    OrderItemSync,
+    OrderLookupOut,
+    OrderSnapshotOut,
+    OrderStatusUpdate,
+    OrderSupportCreate,
+    OrderSupportOut,
+    OrderSyncRequest,
+    OtpRequestCreate,
+    OtpRequestOut,
+    OtpVerifyRequest,
+    ProductCreate,
+    ProductOut,
+    ProductUpdate,
+    RazorpayOrderCreate,
+    RazorpayOrderOut,
+    RazorpayPaymentVerifyOut,
+    RazorpayPaymentVerifyRequest,
+    RefreshTokenRequest,
+    ResendVerificationRequest,
+    ResetPasswordRequest,
+    SavedItemCreate,
+    SavedProductOut,
+    SeasonalCollectionCreate,
+    SeasonalCollectionOut,
+    SeasonalCollectionUpdate,
+    TokenResponse,
+    TranscriptReviewUpdate,
+    UserAddressCreate,
+    UserAddressOut,
+    UserAddressUpdate,
+    UserOut,
+    UserRegister,
+    VerifyEmailRequest,
+)
+from sona_ai.main import app as sona_ai_app
+
+
+def configure_json_logger() -> logging.Logger:
+    logger = logging.getLogger("snchatbot")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+logger = configure_json_logger()
+
+
+SENSITIVE_MONITORING_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "database_url",
+    "dsn",
+    "email_password",
+    "key",
+    "otp",
+    "otp_hash",
+    "password",
+    "phone",
+    "phone_number",
+    "razorpay_key_secret",
+    "razorpay_webhook_secret",
+    "refresh_token",
+    "secret",
+    "set-cookie",
+    "token",
+}
+
+
+def is_sensitive_monitoring_key(key: Any) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return any(sensitive_key in normalized for sensitive_key in SENSITIVE_MONITORING_KEYS)
+
+
+def scrub_monitoring_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "[Filtered]" if is_sensitive_monitoring_key(key) else scrub_monitoring_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [scrub_monitoring_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(scrub_monitoring_value(item) for item in value)
+    return value
+
+
+def scrub_sentry_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+    return scrub_monitoring_value(event)
+
+
+def sentry_is_configured() -> bool:
+    return bool(SENTRY_DSN) and not is_testing()
+
+
+def sentry_integrations() -> list[Any]:
+    try:
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+    except ImportError:
+        return []
+    return [StarletteIntegration(), FastApiIntegration()]
+
+
+def configure_error_monitoring() -> None:
+    if not sentry_is_configured():
+        return
+    try:
+        import sentry_sdk
+    except ImportError:
+        log_event("monitoring.sentry_unavailable", dsn_configured=True)
+        return
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=APP_ENV,
+        release=SENTRY_RELEASE,
+        integrations=sentry_integrations(),
+        traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+        profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+        send_default_pii=SENTRY_SEND_DEFAULT_PII,
+        before_send=scrub_sentry_event,
+    )
+    log_event(
+        "monitoring.sentry_configured",
+        release_configured=bool(SENTRY_RELEASE),
+        traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+        profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+        send_default_pii=SENTRY_SEND_DEFAULT_PII,
+    )
+
+
+METRICS: dict[str, int] = {
+    "total_chats": 0,
+    "failed_logins": 0,
+    "no_result_searches": 0,
+    "unmatched_queries": 0,
+    "low_conversion_searches": 0,
+    "token_refreshes": 0,
+    "feedback_total": 0,
+    "feedback_not_helpful": 0,
+    "errors_total": 0,
+    "admin_actions": 0,
+    "external_alerts_sent": 0,
+    "oms_requests": 0,
+    "oms_failures": 0,
+    "llm_requests": 0,
+    "llm_failures": 0,
+}
+FEEDBACK_COUNTS: dict[str, int] = {
+    "positive": 0,
+    "negative": 0,
+    "neutral": 0,
+    "not_helpful": 0,
+}
+
+
+def reset_observability_metrics() -> None:
+    for key in METRICS:
+        METRICS[key] = 0
+    for key in FEEDBACK_COUNTS:
+        FEEDBACK_COUNTS[key] = 0
+
+
+def increment_metric(name: str, amount: int = 1) -> None:
+    METRICS[name] = METRICS.get(name, 0) + amount
+
+
+def request_id_from_request(request: Request | None) -> str | None:
+    if request is None:
+        return None
+    return getattr(request.state, "request_id", None)
+
+
+def log_event(
+    event: str,
+    request: Request | None = None,
+    level: int = logging.INFO,
+    **fields: Any,
+) -> None:
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        "level": logging.getLevelName(level).lower(),
+        "request_id": request_id_from_request(request),
+    }
+    if request is not None:
+        payload.update(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "client_ip": client_ip(request),
+            }
+        )
+    payload.update({key: value for key, value in fields.items() if value is not None})
+    logger.log(level, json.dumps(payload, default=str, sort_keys=True))
+
+
+def metrics_snapshot() -> dict[str, Any]:
+    return {
+        "counters": dict(METRICS),
+        "feedback_counts": dict(FEEDBACK_COUNTS),
+    }
+
+
+def database_backend_name() -> str:
+    if DATABASE_URL.startswith("sqlite"):
+        return "sqlite"
+    if DATABASE_URL.startswith("postgresql"):
+        return "postgresql"
+    return DATABASE_URL.split(":", 1)[0] or "unknown"
+
+
+def log_startup_configuration() -> None:
+    log_event(
+        "startup.configuration",
+        app_env=APP_ENV,
+        run_migrations_on_startup=RUN_MIGRATIONS_ON_STARTUP,
+        database_backend=database_backend_name(),
+        email_provider=EMAIL_PROVIDER,
+        email_provider_configured=email_provider_is_configured(),
+        admin_bootstrap_enabled=ADMIN_BOOTSTRAP_ENABLED,
+        admin_bootstrap_email_configured=bool(ADMIN_BOOTSTRAP_EMAIL),
+        admin_bootstrap_username_configured=bool(ADMIN_BOOTSTRAP_USERNAME),
+        admin_bootstrap_password_configured=bool(ADMIN_BOOTSTRAP_PASSWORD),
+    )
+
+
+configure_error_monitoring()
+
+
+def json_http_request(
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 10,
+) -> tuple[int, dict[str, Any]]:
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=request_headers,
+        method=method,
+    )
+    with http_urlopen(request, timeout=timeout) as response:
+        raw_body = response.read().decode("utf-8")
+        if not raw_body:
+            return response.status, {}
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError:
+            body = {"raw": raw_body}
+        return response.status, body if isinstance(body, dict) else {"data": body}
+
+
+def sms_http_headers(content_type: str | None = None) -> dict[str, str]:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": SMS_HTTP_USER_AGENT,
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
+def send_monitoring_alert(
+    event: str,
+    severity: str = "error",
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    if not MONITORING_WEBHOOK_URL or is_testing():
+        return False
+
+    alert_payload = {
+        "event": event,
+        "severity": severity,
+        "environment": APP_ENV,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": payload or {},
+    }
+    try:
+        json_http_request(
+            "POST",
+            MONITORING_WEBHOOK_URL,
+            alert_payload,
+            timeout=MONITORING_WEBHOOK_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        log_event(
+            "monitoring.alert_failed",
+            level=logging.ERROR,
+            error_type=exc.__class__.__name__,
+            monitored_event=event,
+        )
+        return False
+
+    increment_metric("external_alerts_sent")
+    log_event("monitoring.alert_sent", monitored_event=event, severity=severity)
+    return True
+
+
+def apply_sentry_scope(scope: Any, request: Request | None, extra: dict[str, Any]) -> None:
+    if hasattr(scope, "set_tag"):
+        scope.set_tag("app_env", APP_ENV)
+        if request is not None:
+            scope.set_tag("http.method", request.method)
+            scope.set_tag("http.path", request.url.path)
+    if hasattr(scope, "set_extra"):
+        scope.set_extra("snchatbot", scrub_monitoring_value(extra))
+        if request is not None:
+            scope.set_extra("request_id", request_id_from_request(request))
+
+
+def sentry_scope_context(sentry_sdk: Any):
+    scope_factory = getattr(sentry_sdk, "new_scope", None) or getattr(
+        sentry_sdk, "push_scope", None
+    )
+    if scope_factory is None:
+        return None
+    return scope_factory()
+
+
+def capture_exception_for_monitoring(
+    exc: Exception,
+    request: Request | None = None,
+    extra: dict[str, Any] | None = None,
+) -> bool:
+    if not sentry_is_configured():
+        return False
+    try:
+        import sentry_sdk
+    except ImportError:
+        return False
+
+    try:
+        scope_context = sentry_scope_context(sentry_sdk)
+        if scope_context is None:
+            sentry_sdk.capture_exception(exc)
+        else:
+            with scope_context as scope:
+                apply_sentry_scope(scope, request, extra or {})
+                sentry_sdk.capture_exception(exc)
+    except Exception as sentry_exc:
+        log_event(
+            "monitoring.sentry_capture_failed",
+            level=logging.ERROR,
+            error_type=sentry_exc.__class__.__name__,
+        )
+        return False
+
+    return True
+
+
+def capture_message_for_monitoring(
+    event: str,
+    severity: str = "info",
+    request: Request | None = None,
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    if not sentry_is_configured():
+        return False
+    try:
+        import sentry_sdk
+    except ImportError:
+        return False
+
+    try:
+        scope_context = sentry_scope_context(sentry_sdk)
+        if scope_context is None:
+            sentry_sdk.capture_message(event, level=severity)
+        else:
+            with scope_context as scope:
+                apply_sentry_scope(scope, request, payload or {})
+                sentry_sdk.capture_message(event, level=severity)
+    except Exception as sentry_exc:
+        log_event(
+            "monitoring.sentry_capture_failed",
+            level=logging.ERROR,
+            error_type=sentry_exc.__class__.__name__,
+            monitored_event=event,
+        )
+        return False
+
+    log_event("monitoring.sentry_message_sent", monitored_event=event, severity=severity)
+    return True
+
+
+def record_integration_event(
+    db: Session,
+    service: str,
+    action: str,
+    status_value: str,
+    user_id: int | None = None,
+    reference: str | None = None,
+    request_payload: dict[str, Any] | None = None,
+    response_payload: dict[str, Any] | None = None,
+    status_code: int | None = None,
+    error: str | None = None,
+) -> ExternalIntegrationEvent:
+    event = ExternalIntegrationEvent(
+        user_id=user_id,
+        service=service,
+        action=action,
+        reference=reference,
+        request_payload=dump_json_object(request_payload or {}) if request_payload else None,
+        response_payload=dump_json_object(response_payload or {}) if response_payload else None,
+        status=status_value,
+        status_code=status_code,
+        error=error,
+    )
+    db.add(event)
+    return event
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not is_testing():
+        init_database()
+    yield
+
+
+app = FastAPI(
+    title="Jewellery Chat API",
+    version="2.1.0",
+    description="Backend API for Flutter jewellery ecommerce chatbot",
+    debug=APP_DEBUG,
+    lifespan=lifespan,
+)
+
+app.mount("/sona", sona_ai_app)
+
+limiter = Limiter(key_func=get_remote_address, enabled=not is_testing())
+LOGIN_FAILURES: dict[str, list[datetime]] = {}
+LOGIN_FAILURES_LOCK = Lock()
+
+
+if TRUSTED_HOSTS and TRUSTED_HOSTS != ["*"]:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
+
+if HTTPS_REDIRECT and not is_testing():
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=CORS_ALLOW_CREDENTIALS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class RequestBodyTooLarge(Exception):
+    pass
+
+
+def security_headers_for_request(request: Request) -> dict[str, str]:
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    }
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    if request.url.scheme == "https" or forwarded_proto == "https":
+        headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return headers
+
+
+def add_security_headers(response: Response, request: Request) -> None:
+    for header_name, header_value in security_headers_for_request(request).items():
+        response.headers.setdefault(header_name, header_value)
+
+
+def error_response(
+    request: Request,
+    status_code: int,
+    detail: str,
+    errors: list[dict[str, Any]] | None = None,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    body: dict[str, Any] = {
+        "detail": detail,
+        "request_id": request_id_from_request(request),
+    }
+    if errors is not None:
+        body["errors"] = errors
+
+    response = JSONResponse(status_code=status_code, content=body)
+    for header_name, header_value in (headers or {}).items():
+        response.headers[header_name] = header_value
+    response.headers["X-Request-ID"] = request_id_from_request(request) or ""
+    add_security_headers(response, request)
+    return response
+
+
+def normalize_validation_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for error in errors:
+        loc = ".".join(str(item) for item in error.get("loc", []))
+        normalized.append(
+            {
+                "field": loc or "request",
+                "message": error.get("msg", "Invalid value"),
+                "type": error.get("type", "validation_error"),
+            }
+        )
+    return normalized
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > MAX_REQUEST_BODY_BYTES:
+        log_event(
+            "security.request_too_large",
+            request,
+            status_code=413,
+            content_length=int(content_length),
+            max_request_body_bytes=MAX_REQUEST_BODY_BYTES,
+        )
+        return error_response(request, 413, "Request body too large")
+
+    received_bytes = 0
+    original_receive = request.receive
+
+    async def limited_receive():
+        nonlocal received_bytes
+        message = await original_receive()
+        if message["type"] == "http.request":
+            received_bytes += len(message.get("body", b""))
+            if received_bytes > MAX_REQUEST_BODY_BYTES:
+                raise RequestBodyTooLarge()
+        return message
+
+    limited_request = Request(request.scope, limited_receive)
+
+    try:
+        response = await call_next(limited_request)
+    except RequestBodyTooLarge:
+        log_event(
+            "security.request_too_large",
+            request,
+            status_code=413,
+            max_request_body_bytes=MAX_REQUEST_BODY_BYTES,
+        )
+        return error_response(request, 413, "Request body too large")
+    except Exception as exc:
+        increment_metric("errors_total")
+        sentry_captured = capture_exception_for_monitoring(
+            exc,
+            request,
+            {
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            },
+        )
+        log_event(
+            "error.unhandled",
+            request,
+            level=logging.ERROR,
+            error_type=exc.__class__.__name__,
+            error_module=exc.__class__.__module__,
+            error_message=str(exc)[:300] if APP_DEBUG or is_testing() else None,
+            duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+            sentry_captured=sentry_captured,
+        )
+        send_monitoring_alert(
+            "error.unhandled",
+            payload={
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "error_type": exc.__class__.__name__,
+            },
+        )
+        return error_response(request, 500, "Internal server error")
+
+    response.headers["X-Request-ID"] = request_id
+    add_security_headers(response, request)
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def observability_http_exception_handler(request: Request, exc: HTTPException):
+    if exc.status_code >= 500:
+        increment_metric("errors_total")
+        sentry_captured = capture_exception_for_monitoring(
+            exc,
+            request,
+            {
+                "status_code": exc.status_code,
+                "detail": exc.detail,
+            },
+        )
+        send_monitoring_alert(
+            "error.http",
+            payload={
+                "request_id": request_id_from_request(request),
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": exc.status_code,
+            },
+        )
+    else:
+        sentry_captured = False
+    log_event(
+        "error.http",
+        request,
+        level=logging.WARNING if exc.status_code < 500 else logging.ERROR,
+        status_code=exc.status_code,
+        detail=exc.detail,
+        sentry_captured=sentry_captured,
+    )
+    return error_response(
+        request,
+        exc.status_code,
+        str(exc.detail),
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def observability_validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+):
+    log_event(
+        "error.validation",
+        request,
+        level=logging.WARNING,
+        status_code=422,
+        error_count=len(exc.errors()),
+    )
+    return error_response(
+        request,
+        422,
+        "Validation error",
+        errors=normalize_validation_errors(exc.errors()),
+    )
+
+
+password_hash = PasswordHash.recommended()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "item"
+
+
+def seed_products(db: Session):
+    for category_name in ["Ring", "Necklace", "Earring", "Bracelet", "Pendant", "Anklet"]:
+        exists = db.query(ProductCategory).filter(ProductCategory.name == category_name).first()
+        if not exists:
+            db.add(
+                ProductCategory(
+                    name=category_name,
+                    slug=slugify(category_name),
+                    is_active=True,
+                )
+            )
+
+    if db.query(Product).count() > 0:
+        db.commit()
+        return
+
+    items = [
+        Product(
+            name="Classic Gold Ring",
+            description="Classic daily-wear gold ring with a simple polished finish.",
+            sku="RING-GOLD-101",
+            category="Ring",
+            metal="Gold",
+            price=18999,
+            image="https://example.com/images/ring_101.jpg",
+            in_stock=True,
+            stock_quantity=8,
+            is_featured=True,
+            product_type="Ring",
+            audience="Women",
+            purity="22K",
+            weight=2.4,
+            tags=["daily wear", "classic", "gift"],
+            occasion=["daily wear", "anniversary", "birthday"],
+            style=["minimal", "classic"],
+        ),
+        Product(
+            name="Rose Gold Diamond Ring",
+            description="Modern rose gold ring with a diamond-inspired setting.",
+            sku="RING-ROSE-102",
+            category="Ring",
+            metal="Rose Gold",
+            price=19999,
+            image="https://example.com/images/ring_102.jpg",
+            in_stock=True,
+            stock_quantity=5,
+            is_featured=True,
+            product_type="Ring",
+            audience="Women",
+            purity="18K",
+            weight=2.1,
+            tags=["diamond", "proposal", "premium"],
+            occasion=["engagement", "anniversary", "party wear"],
+            style=["modern", "premium"],
+        ),
+        Product(
+            name="Minimal Gold Necklace",
+            description="Minimal gold necklace suited for daily and occasion wear.",
+            sku="NECK-GOLD-201",
+            category="Necklace",
+            metal="Gold",
+            price=24999,
+            image="https://example.com/images/necklace_201.jpg",
+            in_stock=True,
+            stock_quantity=4,
+            is_featured=False,
+            product_type="Necklace",
+            audience="Women",
+            purity="22K",
+            weight=5.8,
+            tags=["daily wear", "lightweight", "gift"],
+            occasion=["daily wear", "wedding", "anniversary"],
+            style=["minimal", "traditional", "premium"],
+        ),
+        Product(
+            name="Pearl Drop Earrings",
+            description="Pearl drop earrings with a soft occasion-ready look.",
+            sku="EAR-SILVER-301",
+            category="Earring",
+            metal="Silver",
+            price=7999,
+            image="https://example.com/images/earring_301.jpg",
+            in_stock=True,
+            stock_quantity=10,
+            is_featured=False,
+            product_type="Earring",
+            audience="Women",
+            purity="925",
+            weight=1.6,
+            tags=["pearl", "office wear", "gift"],
+            occasion=["party wear", "birthday", "office wear"],
+            style=["soft", "elegant"],
+        ),
+    ]
+    db.add_all(items)
+    db.commit()
+
+
+def init_database():
+    log_startup_configuration()
+
+    if RUN_MIGRATIONS_ON_STARTUP:
+        run_database_migrations()
+        log_event("startup.database_migrations_complete")
+
+    db = SessionLocal()
+    try:
+        bootstrap_admin_user(db)
+        seed_products(db)
+        log_event("startup.database_initialized")
+        from database import engine as diagnostic_engine
+        log_event(
+            "startup.database_target",
+            database_host=diagnostic_engine.url.host,
+            database_name=diagnostic_engine.url.database,
+        )
+    finally:
+        db.close()
+
+
+def run_database_migrations():
+    from alembic.config import Config
+    from sqlalchemy import inspect
+
+    from alembic import command
+
+    config_path = Path(__file__).with_name("alembic.ini")
+    alembic_config = Config(str(config_path))
+    alembic_config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    model_tables = set(Base.metadata.tables.keys())
+
+    if "alembic_version" not in tables and model_tables.issubset(tables):
+        command.stamp(alembic_config, "head")
+        return
+
+    command.upgrade(alembic_config, "head")
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        return password_hash.verify(plain_password, hashed_password)
+    except Exception:
+        return False
+
+
+def password_strength_error(password: str) -> str | None:
+    if (
+        len(password) < PASSWORD_MIN_LENGTH
+        or not re.search(r"[A-Za-z]", password)
+        or not re.search(r"\d", password)
+    ):
+        return (
+            f"Password must be at least {PASSWORD_MIN_LENGTH} characters "
+            "and include at least one letter and one number"
+        )
+    return None
+
+
+def validate_password_strength(password: str) -> None:
+    error_message = password_strength_error(password)
+    if error_message:
+        raise HTTPException(status_code=422, detail=error_message)
+
+
+def default_admin_username(email: str) -> str:
+    return slugify(email.split("@", 1)[0]).replace("-", "_") or "admin"
+
+
+def bootstrap_admin_user(db: Session) -> None:
+    if not ADMIN_BOOTSTRAP_ENABLED:
+        return
+    if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
+        raise RuntimeError(
+            "ADMIN_BOOTSTRAP_ENABLED=1 requires ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD"
+        )
+
+    password_error = password_strength_error(ADMIN_BOOTSTRAP_PASSWORD)
+    if password_error:
+        raise RuntimeError(f"Admin bootstrap password is invalid: {password_error}")
+
+    email = ADMIN_BOOTSTRAP_EMAIL.lower().strip()
+    username = (ADMIN_BOOTSTRAP_USERNAME or default_admin_username(email)).strip()
+    existing_user = db.query(User).filter(User.email == email).first()
+    username_owner = db.query(User).filter(User.username == username).first()
+
+    if username_owner and (not existing_user or username_owner.id != existing_user.id):
+        raise RuntimeError("ADMIN_BOOTSTRAP_USERNAME is already used by another account")
+
+    if existing_user:
+        changed = False
+        if not verify_password(ADMIN_BOOTSTRAP_PASSWORD, existing_user.hashed_password):
+            existing_user.hashed_password = hash_password(ADMIN_BOOTSTRAP_PASSWORD)
+            changed = True
+        if not existing_user.is_admin:
+            existing_user.is_admin = True
+            changed = True
+        if not existing_user.is_verified:
+            existing_user.is_verified = True
+            changed = True
+        if changed:
+            db.commit()
+            log_event("admin.bootstrap_promoted", user_id=existing_user.id, email=email)
+        else:
+            log_event("admin.bootstrap_already_exists", user_id=existing_user.id, email=email)
+        return
+
+    admin_user = User(
+        username=username,
+        email=email,
+        hashed_password=hash_password(ADMIN_BOOTSTRAP_PASSWORD),
+        is_verified=True,
+        is_admin=True,
+    )
+    db.add(admin_user)
+    db.commit()
+    db.refresh(admin_user)
+    log_event("admin.bootstrap_created", user_id=admin_user.id, email=email)
+
+
+def client_ip(request: Request) -> str | None:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return None
+
+
+def client_user_agent(request: Request) -> str | None:
+    return request.headers.get("user-agent")
+
+
+def login_failure_key(email: str, request: Request) -> str:
+    return f"{email.lower()}:{client_ip(request) or 'unknown'}"
+
+
+def login_is_locked(email: str, request: Request) -> bool:
+    key = login_failure_key(email, request)
+    cutoff = utc_now() - timedelta(minutes=LOGIN_LOCKOUT_MINUTES)
+    with LOGIN_FAILURES_LOCK:
+        failures = [failed_at for failed_at in LOGIN_FAILURES.get(key, []) if failed_at >= cutoff]
+        LOGIN_FAILURES[key] = failures
+        return len(failures) >= LOGIN_FAILURE_LIMIT
+
+
+def record_login_failure(email: str, request: Request) -> None:
+    key = login_failure_key(email, request)
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.setdefault(key, []).append(utc_now())
+
+
+def clear_login_failures(email: str, request: Request) -> None:
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.pop(login_failure_key(email, request), None)
+
+
+def mark_refresh_token_used(token_row: RefreshToken, request: Request) -> None:
+    token_row.last_used_at = utc_now()
+    token_row.last_used_ip = client_ip(request)
+    token_row.last_used_user_agent = client_user_agent(request)
+
+
+def revoke_refresh_token(
+    token_row: RefreshToken, reason: str, request: Request | None = None
+) -> None:
+    if request:
+        mark_refresh_token_used(token_row, request)
+    if not token_row.is_revoked:
+        token_row.is_revoked = True
+        token_row.revoked_at = utc_now()
+        token_row.revoked_reason = reason
+
+
+def revoke_user_refresh_tokens(
+    db: Session,
+    user_id: int,
+    reason: str,
+    request: Request | None = None,
+) -> int:
+    if push_devices.enabled():
+        push_devices.lock_owner(db, user_id)
+    tokens = (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.user_id == user_id,
+            RefreshToken.is_revoked == False,
+        )
+        .all()
+    )
+    for token_row in tokens:
+        revoke_refresh_token(token_row, reason, request)
+    if push_devices.enabled():
+        push_devices.detach_all(db, user_id)
+    return len(tokens)
+
+
+def latest_verification_token(db: Session, user_id: int) -> EmailVerificationToken | None:
+    return (
+        db.query(EmailVerificationToken)
+        .filter(
+            EmailVerificationToken.user_id == user_id,
+        )
+        .order_by(EmailVerificationToken.created_at.desc())
+        .first()
+    )
+
+
+def build_refresh_token_for_user(email: str, family_id: str | None = None) -> tuple[str, str, str]:
+    token_jti = str(uuid4())
+    family = family_id or str(uuid4())
+    token = create_refresh_token({"sub": email}, jti=token_jti, family_id=family)
+    return token, token_jti, family
+
+
+def store_refresh_token(
+    db: Session,
+    user_id: int,
+    token: str,
+    token_jti: str,
+    family_id: str,
+    request: Request,
+    parent_token_id: int | None = None,
+) -> RefreshToken:
+    token_row = RefreshToken(
+        user_id=user_id,
+        token=token,
+        token_jti=token_jti,
+        family_id=family_id,
+        parent_token_id=parent_token_id,
+        is_revoked=False,
+        expires_at=utc_now() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+        created_ip=client_ip(request),
+        created_user_agent=client_user_agent(request),
+    )
+    db.add(token_row)
+    db.flush()
+    return token_row
+
+
+def firebase_auth_is_configured() -> bool:
+    return FIREBASE_AUTH_ENABLED and bool(FIREBASE_PROJECT_ID)
+
+
+_FIREBASE_CERT_CACHE: dict[str, Any] = {"certs": {}, "expires_at": 0.0}
+
+
+def firebase_cache_max_age(cache_control: str) -> int:
+    match = re.search(r"max-age=(\d+)", cache_control or "")
+    if not match:
+        return 3600
+    return max(int(match.group(1)), 60)
+
+
+def fetch_firebase_public_certs(force_refresh: bool = False) -> dict[str, str]:
+    now = time.time()
+    cached_certs = _FIREBASE_CERT_CACHE.get("certs") or {}
+    if (
+        cached_certs
+        and not force_refresh
+        and now < float(_FIREBASE_CERT_CACHE.get("expires_at") or 0)
+    ):
+        return dict(cached_certs)
+
+    request = urllib.request.Request(
+        FIREBASE_CERTS_URL,
+        headers={"Accept": "application/json", "User-Agent": "snchatbot-backend/1.0"},
+    )
+    try:
+        with http_urlopen(request, timeout=10) as response:
+            raw_body = response.read().decode("utf-8")
+            certs = json.loads(raw_body)
+            cache_control = response.headers.get("Cache-Control", "")
+    except Exception as exc:
+        log_event(
+            "auth.firebase_certs_fetch_failed",
+            error_type=exc.__class__.__name__,
+        )
+        raise HTTPException(
+            status_code=503, detail="Firebase auth is temporarily unavailable"
+        ) from exc
+
+    if not isinstance(certs, dict) or not certs:
+        raise HTTPException(status_code=503, detail="Firebase auth certificates are unavailable")
+
+    _FIREBASE_CERT_CACHE["certs"] = certs
+    _FIREBASE_CERT_CACHE["expires_at"] = now + firebase_cache_max_age(cache_control)
+    return dict(certs)
+
+
+def verify_firebase_id_token(id_token: str) -> dict[str, Any]:
+    if not firebase_auth_is_configured():
+        raise HTTPException(status_code=503, detail="Firebase auth is not configured")
+
+    try:
+        header = jwt.get_unverified_header(id_token)
+        key_id = header.get("kid")
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token") from exc
+
+    certs = fetch_firebase_public_certs()
+    cert = certs.get(key_id) if key_id else None
+    if cert is None and key_id:
+        certs = fetch_firebase_public_certs(force_refresh=True)
+        cert = certs.get(key_id)
+    if cert is None:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+
+    try:
+        if "BEGIN CERTIFICATE" in cert:
+            cert = load_pem_x509_certificate(cert.encode("ascii")).public_key()
+        payload = jwt.decode(
+            id_token,
+            cert,
+            algorithms=["RS256"],
+            audience=FIREBASE_PROJECT_ID,
+            issuer=f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}",
+        )
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token") from exc
+
+    if payload.get("aud") != FIREBASE_PROJECT_ID:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+    if payload.get("iss") != f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}":
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+    if not payload.get("sub"):
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+    if not payload.get("email") and not payload.get("phone_number"):
+        raise HTTPException(
+            status_code=400,
+            detail="Firebase token does not include an email or phone number",
+        )
+    if (
+        payload.get("email")
+        and FIREBASE_REQUIRE_EMAIL_VERIFIED
+        and payload.get("email_verified") is not True
+    ):
+        raise HTTPException(status_code=403, detail="Please verify your Firebase email first")
+
+    return payload
+
+
+def firebase_email_for_identity(payload: dict[str, Any]) -> str:
+    email = str(payload.get("email") or "").strip().lower()
+    if email:
+        return email
+
+    firebase_uid = str(payload["sub"])
+    stable_id = hashlib.sha256(firebase_uid.encode("utf-8")).hexdigest()[:24]
+    return f"phone_{stable_id}@phone.sona.invalid"
+
+
+def firebase_username_for_email(db: Session, email: str, firebase_uid: str) -> str:
+    base = re.sub(r"[^a-z0-9_]+", "_", email.split("@", 1)[0].lower()).strip("_")
+    base = (base or "firebase_user")[:40]
+    if not db.query(User).filter(User.username == base).first():
+        return base
+
+    suffix = re.sub(r"[^a-zA-Z0-9]+", "", firebase_uid)[:8] or secrets.token_hex(4)
+    candidate = f"{base}_{suffix}"[:64]
+    if not db.query(User).filter(User.username == candidate).first():
+        return candidate
+
+    for index in range(2, 1000):
+        candidate = f"{base}_{suffix}_{index}"[:64]
+        if not db.query(User).filter(User.username == candidate).first():
+            return candidate
+    return f"firebase_user_{secrets.token_hex(8)}"
+
+
+def issue_token_pair(db: Session, user: User, request: Request) -> TokenResponse:
+    access_token = create_access_token({"sub": user.email})
+    refresh_token, token_jti, family_id = build_refresh_token_for_user(user.email)
+    store_refresh_token(db, user.id, refresh_token, token_jti, family_id, request)
+    db.commit()
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+def normalize_phone_number(phone: str) -> str:
+    raw = re.sub(r"[^\d+]", "", phone.strip())
+    if raw.startswith("00"):
+        raw = f"+{raw[2:]}"
+    if raw.startswith("+"):
+        digits = re.sub(r"\D", "", raw)
+        normalized = f"+{digits}"
+    else:
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) == 10:
+            normalized = f"+91{digits}"
+        elif len(digits) == 12 and digits.startswith("91"):
+            normalized = f"+{digits}"
+        else:
+            normalized = f"+{digits}"
+
+    if not re.fullmatch(r"\+[1-9]\d{7,14}", normalized):
+        raise HTTPException(status_code=422, detail="Enter a valid phone number")
+    return normalized
+
+
+def phone_mask(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) <= 4:
+        return "****"
+    return f"+{digits[:2]}******{digits[-4:]}"
+
+
+def phone_auth_hash(phone: str) -> str:
+    pepper = PHONE_AUTH_PEPPER or SECRET_KEY
+    return hashlib.sha256(f"{pepper}:{phone}".encode("utf-8")).hexdigest()
+
+
+def phone_email_for_number(phone: str) -> str:
+    return f"phone_{phone_auth_hash(phone)[:24]}@phone.sona.invalid"
+
+
+def phone_username_for_number(db: Session, phone: str) -> str:
+    base = f"phone_{phone_auth_hash(phone)[:20]}"
+    if not db.query(User).filter(User.username == base).first():
+        return base
+    for index in range(2, 1000):
+        candidate = f"{base}_{index}"[:64]
+        if not db.query(User).filter(User.username == candidate).first():
+            return candidate
+    return f"phone_{secrets.token_hex(12)}"
+
+
+def generate_otp_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def hash_otp_code(phone_hash: str, otp: str) -> str:
+    return hashlib.sha256(
+        f"{PHONE_AUTH_PEPPER or SECRET_KEY}:{phone_hash}:{otp}".encode()
+    ).hexdigest()
+
+
+def onhandsms_is_configured() -> bool:
+    return bool(
+        ONHANDSMS_API_URL
+        and ONHANDSMS_SENDER_ID
+        and (ONHANDSMS_API_KEY or ONHANDSMS_USERNAME or ONHANDSMS_PASSWORD)
+    )
+
+
+def sms_otp_is_configured() -> bool:
+    return SMS_OTP_ENABLED and SMS_PROVIDER == "onhand" and onhandsms_is_configured()
+
+
+def sms_dependency_status() -> dict[str, Any]:
+    if not SMS_OTP_ENABLED:
+        return {"status": "disabled", "critical": False, "provider": SMS_PROVIDER}
+    if SMS_PROVIDER != "onhand":
+        return {
+            "status": "misconfigured",
+            "critical": False,
+            "provider": SMS_PROVIDER,
+            "error": "Unsupported SMS_PROVIDER",
+        }
+    if onhandsms_is_configured():
+        return {
+            "status": "configured",
+            "critical": False,
+            "provider": "onhand",
+            "api_url": ONHANDSMS_API_URL,
+            "sender_id_configured": bool(ONHANDSMS_SENDER_ID),
+            "template_id_configured": bool(ONHANDSMS_TEMPLATE_ID),
+        }
+    return {
+        "status": "misconfigured",
+        "critical": False,
+        "provider": "onhand",
+        "missing": [
+            name
+            for name, configured in {
+                "ONHANDSMS_API_URL": bool(ONHANDSMS_API_URL),
+                "ONHANDSMS_SENDER_ID": bool(ONHANDSMS_SENDER_ID),
+                "ONHANDSMS_API_KEY or ONHANDSMS_USERNAME/PASSWORD": bool(
+                    ONHANDSMS_API_KEY or ONHANDSMS_USERNAME or ONHANDSMS_PASSWORD
+                ),
+            }.items()
+            if not configured
+        ],
+    }
+
+
+def render_otp_message(otp: str) -> str:
+    return (
+        ONHANDSMS_MESSAGE_TEMPLATE.replace("{otp}", otp)
+        .replace("{minutes}", str(OTP_EXPIRE_MINUTES))
+        .replace("\\n", "\n")
+    )
+
+
+def render_onhandsms_payload(phone: str, message: str, otp: str) -> dict[str, Any]:
+    phone_digits = re.sub(r"\D", "", phone)
+    phone_local = (
+        phone_digits[2:]
+        if phone_digits.startswith("91") and len(phone_digits) == 12
+        else phone_digits
+    )
+    context = {
+        "phone": phone,
+        "phone_digits": phone_digits,
+        "phone_local": phone_local,
+        "message": message,
+        "otp": otp,
+        "api_key": ONHANDSMS_API_KEY or "",
+        "username": ONHANDSMS_USERNAME or "",
+        "password": ONHANDSMS_PASSWORD or "",
+        "sender_id": ONHANDSMS_SENDER_ID or "",
+        "route": ONHANDSMS_ROUTE or "",
+        "template_id": ONHANDSMS_TEMPLATE_ID or "",
+    }
+    if ONHANDSMS_PAYLOAD_TEMPLATE:
+        rendered = ONHANDSMS_PAYLOAD_TEMPLATE
+        for key, value in context.items():
+            escaped_value = json.dumps(value)[1:-1]
+            rendered = rendered.replace(f"{{{key}}}", escaped_value)
+        try:
+            payload = json.loads(rendered)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("ONHANDSMS_PAYLOAD_TEMPLATE must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("ONHANDSMS_PAYLOAD_TEMPLATE must render a JSON object")
+        return payload
+
+    payload = {
+        "username": ONHANDSMS_USERNAME,
+        "password": ONHANDSMS_PASSWORD,
+        "apikey": ONHANDSMS_API_KEY,
+        "senderid": ONHANDSMS_SENDER_ID,
+        "to": phone,
+        "message": message,
+        "route": ONHANDSMS_ROUTE,
+        "templateid": ONHANDSMS_TEMPLATE_ID,
+    }
+    return {key: value for key, value in payload.items() if value}
+
+
+def urlencoded_http_request(
+    method: str,
+    url: str,
+    payload: dict[str, Any],
+    timeout: int,
+) -> tuple[int, dict[str, Any]]:
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=sms_http_headers("application/x-www-form-urlencoded"),
+        method=method,
+    )
+    with http_urlopen(request, timeout=timeout) as response:
+        raw_body = response.read().decode("utf-8")
+        if not raw_body:
+            return response.status, {}
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError:
+            body = {"raw": raw_body}
+        return response.status, body if isinstance(body, dict) else {"data": body}
+
+
+def query_http_request(
+    url: str, payload: dict[str, Any], timeout: int
+) -> tuple[int, dict[str, Any]]:
+    separator = "&" if urllib.parse.urlsplit(url).query else "?"
+    request_url = f"{url}{separator}{urllib.parse.urlencode(payload)}"
+    request = urllib.request.Request(
+        request_url,
+        headers=sms_http_headers(),
+        method="GET",
+    )
+    with http_urlopen(request, timeout=timeout) as response:
+        raw_body = response.read().decode("utf-8")
+        if not raw_body:
+            return response.status, {}
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError:
+            body = {"raw": raw_body}
+        return response.status, body if isinstance(body, dict) else {"data": body}
+
+
+def send_sms_via_onhand(phone: str, message: str, otp: str) -> bool:
+    if not onhandsms_is_configured():
+        return False
+
+    try:
+        payload = render_onhandsms_payload(phone, message, otp)
+        if ONHANDSMS_METHOD == "GET" or ONHANDSMS_PAYLOAD_FORMAT == "query":
+            status_code, response_body = query_http_request(
+                ONHANDSMS_API_URL,
+                payload,
+                SMS_TIMEOUT_SECONDS,
+            )
+        elif ONHANDSMS_PAYLOAD_FORMAT == "form":
+            status_code, response_body = urlencoded_http_request(
+                ONHANDSMS_METHOD,
+                ONHANDSMS_API_URL,
+                payload,
+                SMS_TIMEOUT_SECONDS,
+            )
+        else:
+            status_code, response_body = json_http_request(
+                ONHANDSMS_METHOD,
+                ONHANDSMS_API_URL,
+                payload,
+                headers=sms_http_headers(),
+                timeout=SMS_TIMEOUT_SECONDS,
+            )
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        log_event(
+            "sms.send_failed",
+            level=logging.ERROR,
+            provider="onhand",
+            phone_masked=phone_mask(phone),
+            status_code=exc.code,
+            error_type=exc.__class__.__name__,
+            error_body=error_body[:1200],
+        )
+        return False
+    except Exception as exc:
+        log_event(
+            "sms.send_failed",
+            level=logging.ERROR,
+            provider="onhand",
+            phone_masked=phone_mask(phone),
+            error_type=exc.__class__.__name__,
+            error=str(exc)[:300],
+        )
+        return False
+
+    if 200 <= status_code < 300:
+        log_event(
+            "sms.sent",
+            provider="onhand",
+            phone_masked=phone_mask(phone),
+            status_code=status_code,
+        )
+        return True
+
+    log_event(
+        "sms.send_failed",
+        level=logging.ERROR,
+        provider="onhand",
+        phone_masked=phone_mask(phone),
+        status_code=status_code,
+        response=response_body,
+    )
+    return False
+
+
+def send_otp_sms(phone: str, otp: str) -> bool:
+    if is_testing():
+        log_event("sms.skipped_in_test", provider=SMS_PROVIDER, phone_masked=phone_mask(phone))
+        return True
+    if not sms_otp_is_configured():
+        return False
+    return send_sms_via_onhand(phone, render_otp_message(otp), otp)
+
+
+def latest_phone_otp_challenge(
+    db: Session,
+    phone_hash: str,
+    status_value: str | None = None,
+) -> PhoneOtpChallenge | None:
+    query = db.query(PhoneOtpChallenge).filter(PhoneOtpChallenge.phone_hash == phone_hash)
+    if status_value:
+        query = query.filter(PhoneOtpChallenge.status == status_value)
+    return query.order_by(PhoneOtpChallenge.created_at.desc()).first()
+
+
+def phone_user_for_number(db: Session, phone: str) -> tuple[User, bool]:
+    phone_hash = phone_auth_hash(phone)
+    identity = (
+        db.query(PhoneAuthIdentity).filter(PhoneAuthIdentity.phone_hash == phone_hash).first()
+    )
+    if identity:
+        user = db.query(User).filter(User.id == identity.user_id).first()
+        if user:
+            identity.last_login_at = utc_now()
+            identity.updated_at = utc_now()
+            if not user.is_verified:
+                user.is_verified = True
+            return user, False
+
+    email = phone_email_for_number(phone)
+    user = db.query(User).filter(User.email == email).first()
+    created = False
+    if user is None:
+        user = User(
+            username=phone_username_for_number(db, phone),
+            email=email,
+            hashed_password=hash_password(generate_opaque_token()),
+            is_verified=True,
+            is_admin=False,
+        )
+        db.add(user)
+        db.flush()
+        created = True
+    elif not user.is_verified:
+        user.is_verified = True
+
+    db.add(
+        PhoneAuthIdentity(
+            user_id=user.id,
+            phone_hash=phone_hash,
+            phone_masked=phone_mask(phone),
+            provider=SMS_PROVIDER,
+            verified_at=utc_now(),
+            last_login_at=utc_now(),
+        )
+    )
+    return user, created
+
+
+def resend_is_configured() -> bool:
+    return bool(RESEND_API_KEY and EMAIL_FROM)
+
+
+def brevo_is_configured() -> bool:
+    return bool(BREVO_API_KEY and EMAIL_FROM)
+
+
+def smtp_is_configured() -> bool:
+    return bool(EMAIL_HOST)
+
+
+def email_provider_is_configured() -> bool:
+    if EMAIL_PROVIDER == "brevo":
+        return brevo_is_configured()
+    if EMAIL_PROVIDER == "resend":
+        return resend_is_configured()
+    return smtp_is_configured()
+
+
+def send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
+    if not resend_is_configured():
+        return False
+
+    payload = {
+        "from": formataddr((EMAIL_FROM_NAME, EMAIL_FROM)),
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+    }
+    headers = {"Authorization": f"Bearer {RESEND_API_KEY}"}
+
+    try:
+        status_code, response_body = json_http_request(
+            "POST",
+            RESEND_API_URL,
+            payload,
+            headers=headers,
+            timeout=EMAIL_TIMEOUT_SECONDS,
+        )
+        if 200 <= status_code < 300:
+            log_event(
+                "email.sent",
+                provider="resend",
+                to_email=to_email,
+                subject=subject,
+                provider_message_id=response_body.get("id"),
+            )
+            return True
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="resend",
+            to_email=to_email,
+            subject=subject,
+            status_code=status_code,
+            response=response_body,
+        )
+        return False
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="resend",
+            to_email=to_email,
+            subject=subject,
+            status_code=exc.code,
+            error_type=exc.__class__.__name__,
+            error_body=error_body[:500],
+        )
+        return False
+    except Exception as exc:
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="resend",
+            to_email=to_email,
+            subject=subject,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+
+
+def send_email_via_brevo(to_email: str, subject: str, body: str) -> bool:
+    if not brevo_is_configured():
+        return False
+
+    payload = {
+        "sender": {
+            "name": EMAIL_FROM_NAME,
+            "email": EMAIL_FROM,
+        },
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "textContent": body,
+    }
+    headers = {"api-key": BREVO_API_KEY}
+
+    try:
+        status_code, response_body = json_http_request(
+            "POST",
+            BREVO_API_URL,
+            payload,
+            headers=headers,
+            timeout=EMAIL_TIMEOUT_SECONDS,
+        )
+        if 200 <= status_code < 300:
+            log_event(
+                "email.sent",
+                provider="brevo",
+                to_email=to_email,
+                subject=subject,
+                provider_message_id=response_body.get("messageId"),
+            )
+            return True
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="brevo",
+            to_email=to_email,
+            subject=subject,
+            status_code=status_code,
+            response=response_body,
+        )
+        return False
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="brevo",
+            to_email=to_email,
+            subject=subject,
+            status_code=exc.code,
+            error_type=exc.__class__.__name__,
+            error_body=error_body[:500],
+        )
+        return False
+    except Exception as exc:
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="brevo",
+            to_email=to_email,
+            subject=subject,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+
+
+def send_email_via_smtp(to_email: str, subject: str, body: str) -> bool:
+    if not smtp_is_configured():
+        return False
+
+    message = EmailMessage()
+    message["From"] = formataddr((EMAIL_FROM_NAME, EMAIL_FROM))
+    message["To"] = to_email
+    message["Subject"] = subject
+    message.set_content(body)
+
+    try:
+        if EMAIL_USE_SSL:
+            with smtplib.SMTP_SSL(
+                EMAIL_HOST,
+                EMAIL_PORT,
+                timeout=EMAIL_TIMEOUT_SECONDS,
+            ) as smtp:
+                if EMAIL_USERNAME and EMAIL_PASSWORD:
+                    smtp.login(EMAIL_USERNAME, EMAIL_PASSWORD)
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(
+                EMAIL_HOST,
+                EMAIL_PORT,
+                timeout=EMAIL_TIMEOUT_SECONDS,
+            ) as smtp:
+                if EMAIL_USE_TLS:
+                    smtp.starttls()
+                if EMAIL_USERNAME and EMAIL_PASSWORD:
+                    smtp.login(EMAIL_USERNAME, EMAIL_PASSWORD)
+                smtp.send_message(message)
+        log_event("email.sent", provider="smtp", to_email=to_email, subject=subject)
+        return True
+    except Exception as exc:
+        log_event(
+            "email.send_failed",
+            level=logging.ERROR,
+            provider="smtp",
+            to_email=to_email,
+            subject=subject,
+            host=EMAIL_HOST,
+            port=EMAIL_PORT,
+            error_type=exc.__class__.__name__,
+            error=str(exc)[:500],
+        )
+        return False
+
+
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    if is_testing() or not email_provider_is_configured():
+        print(f"EMAIL NOT SENT: {subject} -> {to_email}\n{body}")
+        return False
+
+    if EMAIL_PROVIDER == "resend":
+        return send_email_via_resend(to_email, subject, body)
+    if EMAIL_PROVIDER == "brevo":
+        return send_email_via_brevo(to_email, subject, body)
+    return send_email_via_smtp(to_email, subject, body)
+
+
+def url_with_token(base_url: str, token: str) -> str:
+    parsed_url = urllib.parse.urlsplit(base_url)
+    query_params = urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+    query_params.append(("token", token))
+    return urllib.parse.urlunsplit(parsed_url._replace(query=urllib.parse.urlencode(query_params)))
+
+
+def send_verification_email(to_email: str, verify_link: str) -> None:
+    body = (
+        "Welcome to Jewellery Chat.\n\n"
+        "Please verify your email address using this link:\n"
+        f"{verify_link}\n\n"
+        f"This link expires in {EMAIL_VERIFICATION_EXPIRE_MINUTES} minutes."
+    )
+    send_email(to_email, "Verify your Jewellery Chat email", body)
+
+
+def send_password_reset_email(to_email: str, reset_link: str) -> None:
+    body = (
+        "We received a request to reset your Jewellery Chat password.\n\n"
+        "Reset your password using this link:\n"
+        f"{reset_link}\n\n"
+        f"This link expires in {PASSWORD_RESET_EXPIRE_MINUTES} minutes."
+    )
+    send_email(to_email, "Reset your Jewellery Chat password", body)
+
+
+def auth_flow_html(title: str, message: str, status_code: int = 200) -> HTMLResponse:
+    escaped_title = html.escape(title)
+    escaped_message = html.escape(message)
+    color = "#0f7a46" if status_code < 400 else "#b42318"
+    content = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escaped_title}</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f7f3ef;
+      color: #211a18;
+    }}
+    main {{
+      max-width: 520px;
+      margin: 12vh auto;
+      padding: 32px;
+      background: #fff;
+      border: 1px solid #e3d8d0;
+      border-radius: 8px;
+      box-shadow: 0 16px 40px rgba(38, 28, 20, 0.08);
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: 28px;
+      color: {color};
+    }}
+    p {{
+      line-height: 1.55;
+      margin: 0;
+    }}
+    label {{
+      display: block;
+      margin: 18px 0 8px;
+      font-weight: 700;
+    }}
+    input {{
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px;
+      border: 1px solid #cdbfb4;
+      border-radius: 6px;
+      font-size: 16px;
+    }}
+    button {{
+      margin-top: 18px;
+      width: 100%;
+      padding: 12px 14px;
+      border: 0;
+      border-radius: 6px;
+      background: #6b3f2a;
+      color: #fff;
+      font-weight: 700;
+      font-size: 16px;
+      cursor: pointer;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{escaped_title}</h1>
+    <p>{escaped_message}</p>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(content=content, status_code=status_code)
+
+
+def reset_password_form_html(token: str) -> HTMLResponse:
+    escaped_token = html.escape(token, quote=True)
+    content = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reset Password</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f7f3ef;
+      color: #211a18;
+    }}
+    main {{
+      max-width: 520px;
+      margin: 10vh auto;
+      padding: 32px;
+      background: #fff;
+      border: 1px solid #e3d8d0;
+      border-radius: 8px;
+      box-shadow: 0 16px 40px rgba(38, 28, 20, 0.08);
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: 28px;
+      color: #6b3f2a;
+    }}
+    p {{
+      line-height: 1.55;
+      margin: 0 0 8px;
+    }}
+    label {{
+      display: block;
+      margin: 18px 0 8px;
+      font-weight: 700;
+    }}
+    input {{
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px;
+      border: 1px solid #cdbfb4;
+      border-radius: 6px;
+      font-size: 16px;
+    }}
+    button {{
+      margin-top: 18px;
+      width: 100%;
+      padding: 12px 14px;
+      border: 0;
+      border-radius: 6px;
+      background: #6b3f2a;
+      color: #fff;
+      font-weight: 700;
+      font-size: 16px;
+      cursor: pointer;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Reset Password</h1>
+    <p>Enter a new password for your Jewellery Chat account.</p>
+    <p>Your password must include at least one letter and one number.</p>
+    <form action="/reset-password/form" method="post">
+      <input type="hidden" name="token" value="{escaped_token}">
+      <label for="new_password">New password</label>
+      <input
+        id="new_password"
+        name="new_password"
+        type="password"
+        autocomplete="new-password"
+        minlength="{PASSWORD_MIN_LENGTH}"
+        required
+      >
+      <button type="submit">Update Password</button>
+    </form>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(content=content)
+
+
+def verify_email_token(
+    db: Session, raw_token: str, request: Request | None = None
+) -> MessageResponse:
+    token_hash = hash_opaque_token(raw_token)
+
+    row = (
+        db.query(EmailVerificationToken)
+        .filter(EmailVerificationToken.token_hash == token_hash)
+        .first()
+    )
+
+    if not row or row.is_used:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+
+    if row.expires_at < utc_now():
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+
+    user = db.query(User).filter(User.id == row.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid verification request")
+
+    user.is_verified = True
+    row.is_used = True
+    db.commit()
+    log_event("auth.email_verified", request, user_id=user.id, email=user.email)
+
+    return MessageResponse(message="Email verified successfully")
+
+
+def reset_password_with_token(
+    db: Session,
+    raw_token: str,
+    new_password: str,
+    request: Request | None = None,
+) -> MessageResponse:
+    validate_password_strength(new_password)
+
+    token_hash = hash_reset_token(raw_token)
+
+    reset_row = (
+        db.query(PasswordResetToken).filter(PasswordResetToken.token_hash == token_hash).first()
+    )
+
+    if not reset_row or reset_row.is_used:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    if reset_row.expires_at < utc_now():
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    user = db.query(User).filter(User.id == reset_row.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid reset request")
+
+    user.hashed_password = hash_password(new_password)
+    reset_row.is_used = True
+
+    revoke_user_refresh_tokens(db, user.id, "password_reset", request)
+
+    db.commit()
+    log_event("auth.password_reset_success", request, user_id=user.id, email=user.email)
+
+    return MessageResponse(message="Password reset successful")
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        token_type = payload.get("type")
+        if email is None or token_type != "access":
+            raise credentials_exception from None
+    except JWTError:
+        raise credentials_exception from None
+
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise credentials_exception
+
+    return user
+
+
+ADMIN_PERMISSIONS = {
+    "products:manage",
+    "catalog:manage",
+    "leads:manage",
+    "metrics:read",
+    "support:manage",
+    "knowledge:manage",
+    "config:manage",
+}
+
+
+def user_permissions(user: User) -> set[str]:
+    if user.is_admin:
+        return set(ADMIN_PERMISSIONS)
+    return {"customer:access"}
+
+
+def require_permission(permission: str):
+    def dependency(current_user: User = Depends(get_current_user)) -> User:
+        if permission not in user_permissions(current_user):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return current_user
+
+    return dependency
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    return require_permission("catalog:manage")(current_user)
+
+
+def log_admin_action(
+    request: Request,
+    admin_user: User,
+    action: str,
+    resource: str,
+    resource_id: int | None = None,
+) -> None:
+    increment_metric("admin_actions")
+    log_event(
+        "admin.action",
+        request,
+        user_id=admin_user.id,
+        action=action,
+        resource=resource,
+        resource_id=resource_id,
+    )
+
+
+def get_product_or_404(db: Session, product_id: int) -> Product:
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
+
+
+def get_category_or_404(db: Session, category_id: int) -> ProductCategory:
+    category = db.query(ProductCategory).filter(ProductCategory.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return category
+
+
+def get_featured_item_or_404(db: Session, item_id: int) -> FeaturedItem:
+    item = db.query(FeaturedItem).filter(FeaturedItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Featured item not found")
+    return item
+
+
+def get_collection_or_404(db: Session, collection_id: int) -> SeasonalCollection:
+    collection = db.query(SeasonalCollection).filter(SeasonalCollection.id == collection_id).first()
+    if not collection:
+        raise HTTPException(status_code=404, detail="Seasonal collection not found")
+    return collection
+
+
+def get_knowledge_item_or_404(db: Session, item_id: int) -> KnowledgeBaseItem:
+    item = db.query(KnowledgeBaseItem).filter(KnowledgeBaseItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Knowledge-base item not found")
+    return item
+
+
+def get_config_entry_or_404(db: Session, entry_id: int) -> AppConfigEntry:
+    entry = db.query(AppConfigEntry).filter(AppConfigEntry.id == entry_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Config entry not found")
+    return entry
+
+
+def get_record_or_404(db: Session, model, record_id: int, detail: str):
+    record = db.query(model).filter(model.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail=detail)
+    return record
+
+
+def get_user_address_or_404(db: Session, user_id: int, address_id: int) -> UserAddress:
+    address = (
+        db.query(UserAddress)
+        .filter(UserAddress.id == address_id, UserAddress.user_id == user_id)
+        .first()
+    )
+    if not address:
+        raise HTTPException(status_code=404, detail="Address not found")
+    return address
+
+
+def clear_default_addresses(db: Session, user_id: int) -> None:
+    for address in db.query(UserAddress).filter(UserAddress.user_id == user_id).all():
+        address.is_default = False
+        address.updated_at = utc_now()
+
+
+def notification_settings_for_user(
+    db: Session, user_id: int, *, commit: bool = True
+) -> NotificationSettings:
+    # Serialize opt-outs with delivery/registration. Never release this lock
+    # between creating default settings and applying a PATCH.
+    push_devices.lock_owner(db, user_id)
+    settings_row = (
+        db.query(NotificationSettings).filter(NotificationSettings.user_id == user_id)
+        .populate_existing().first()
+    )
+    if settings_row:
+        return settings_row
+
+    settings_row = NotificationSettings(user_id=user_id)
+    db.add(settings_row)
+    if commit:
+        db.commit()
+        db.refresh(settings_row)
+    else:
+        db.flush()
+    return settings_row
+
+
+def ensure_unique_slug(
+    db: Session,
+    model,
+    slug: str,
+    current_id: int | None = None,
+) -> None:
+    query = db.query(model).filter(model.slug == slug)
+    if current_id is not None:
+        query = query.filter(model.id != current_id)
+    if query.first():
+        raise HTTPException(status_code=400, detail="Slug already exists")
+
+
+def ensure_unique_key(
+    db: Session,
+    model,
+    key: str,
+    current_id: int | None = None,
+) -> None:
+    query = db.query(model).filter(model.key == key)
+    if current_id is not None:
+        query = query.filter(model.id != current_id)
+    if query.first():
+        raise HTTPException(status_code=400, detail="Key already exists")
+
+
+def apply_model_updates(target, updates: dict[str, Any]) -> None:
+    for field, value in updates.items():
+        setattr(target, field, value)
+
+
+def knowledge_item_response(item: KnowledgeBaseItem) -> KnowledgeBaseOut:
+    return KnowledgeBaseOut(
+        id=item.id,
+        kind=item.kind,
+        slug=item.slug,
+        title=item.title,
+        content=item.content,
+        tags=load_json_list(item.tags),
+        is_active=item.is_active,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def clamp_limit(limit: int, maximum: int = 50) -> int:
+    return max(1, min(limit, maximum))
+
+
+def metadata_text_match(column, value: str):
+    return cast(column, SqlString).ilike(f"%{value.strip()}%")
+
+
+def product_search_query(
+    db: Session,
+    q: str | None = None,
+    category: str | None = None,
+    metal: str | None = None,
+    min_price: float | None = None,
+    max_price: float | None = None,
+    product_type: str | None = None,
+    audience: str | None = None,
+    purity: str | None = None,
+    min_weight: float | None = None,
+    max_weight: float | None = None,
+    occasion: str | None = None,
+    style: str | None = None,
+    gift_intent: str | None = None,
+    in_stock_only: bool = False,
+):
+    query = db.query(Product).filter(Product.price > 0)
+
+    if q:
+        q_value = q.strip()
+        q_message = q_value.lower()
+        if category is None:
+            category = detect_category(q_message)
+        if metal is None:
+            metal = detect_metal(q_message)
+
+        text_search = product_query_text_search(q_value, category, metal)
+        if text_search:
+            search = f"%{text_search}%"
+            query = query.filter(
+                or_(
+                    Product.name.ilike(search),
+                    Product.description.ilike(search),
+                    Product.sku.ilike(search),
+                    Product.category.ilike(search),
+                    Product.metal.ilike(search),
+                    Product.product_type.ilike(search),
+                    Product.audience.ilike(search),
+                    Product.purity.ilike(search),
+                    metadata_text_match(Product.tags, text_search),
+                    metadata_text_match(Product.occasion, text_search),
+                    metadata_text_match(Product.style, text_search),
+                )
+            )
+    if category:
+        query = query.filter(Product.category.ilike(category))
+    if metal:
+        query = query.filter(Product.metal.ilike(metal))
+    if product_type:
+        query = query.filter(Product.product_type.ilike(product_type))
+    if audience:
+        query = query.filter(Product.audience.ilike(audience))
+    if purity:
+        query = query.filter(Product.purity.ilike(purity))
+    if min_price is not None:
+        query = query.filter(Product.price >= min_price)
+    if max_price is not None:
+        query = query.filter(Product.price <= max_price)
+    if min_weight is not None:
+        query = query.filter(Product.weight >= min_weight)
+    if max_weight is not None:
+        query = query.filter(Product.weight <= max_weight)
+    if occasion:
+        query = query.filter(metadata_text_match(Product.occasion, occasion))
+    if style:
+        query = query.filter(metadata_text_match(Product.style, style))
+    if gift_intent:
+        query = query.filter(
+            or_(
+                metadata_text_match(Product.tags, gift_intent),
+                metadata_text_match(Product.occasion, gift_intent),
+                metadata_text_match(Product.style, gift_intent),
+                Product.audience.ilike(f"%{gift_intent.strip()}%"),
+            )
+        )
+    if in_stock_only:
+        query = query.filter(Product.in_stock == True)
+
+    return query
+
+
+def public_config_values(db: Session) -> dict[str, str]:
+    entries = (
+        db.query(AppConfigEntry)
+        .filter(AppConfigEntry.is_public == True)
+        .order_by(AppConfigEntry.key.asc())
+        .all()
+    )
+    return {entry.key: entry.value for entry in entries}
+
+
+def product_metadata_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        loaded = load_json_list(value)
+        if loaded:
+            return [str(item) for item in loaded]
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def product_out(product: Product) -> ProductOut:
+    return ProductOut(
+        id=product.id,
+        name=product.name,
+        description=product.description,
+        sku=product.sku,
+        category=product.category,
+        metal=product.metal,
+        price=product.price,
+        image=product.image,
+        in_stock=product.in_stock,
+        stock_quantity=product.stock_quantity,
+        is_featured=product.is_featured,
+        product_type=product.product_type,
+        audience=product.audience,
+        purity=product.purity,
+        weight=product.weight,
+        tags=product_metadata_list(product.tags),
+        occasion=product_metadata_list(product.occasion),
+        style=product_metadata_list(product.style),
+    )
+
+
+def saved_product_response(item, product: Product) -> SavedProductOut:
+    return SavedProductOut(
+        id=item.id,
+        product=product_out(product),
+        note=item.note,
+        created_at=item.created_at,
+    )
+
+
+def back_in_stock_response(
+    subscription: BackInStockSubscription, product: Product
+) -> BackInStockSubscriptionOut:
+    return BackInStockSubscriptionOut(
+        id=subscription.id,
+        user_id=subscription.user_id,
+        product=product_out(product),
+        email=subscription.email,
+        phone=subscription.phone,
+        size=subscription.size,
+        variant=subscription.variant,
+        status=subscription.status,
+        created_at=subscription.created_at,
+        updated_at=subscription.updated_at,
+        notified_at=subscription.notified_at,
+        cancelled_at=subscription.cancelled_at,
+    )
+
+
+def active_stock_subscription(
+    db: Session,
+    user_id: int,
+    product_id: int,
+    size: str | None = None,
+    variant: str | None = None,
+) -> BackInStockSubscription | None:
+    return (
+        db.query(BackInStockSubscription)
+        .filter(
+            BackInStockSubscription.user_id == user_id,
+            BackInStockSubscription.product_id == product_id,
+            BackInStockSubscription.status == "active",
+            BackInStockSubscription.size == size,
+            BackInStockSubscription.variant == variant,
+        )
+        .first()
+    )
+
+
+def notify_back_in_stock_subscribers(db: Session, product: Product) -> int:
+    subscriptions = (
+        db.query(BackInStockSubscription)
+        .filter(
+            BackInStockSubscription.product_id == product.id,
+            BackInStockSubscription.status == "active",
+        )
+        .order_by(BackInStockSubscription.created_at.asc())
+        .all()
+    )
+    notified_count = 0
+    for subscription in subscriptions:
+        if subscription.email:
+            send_email(
+                subscription.email,
+                f"{product.name} is back in stock",
+                (
+                    f"Good news. {product.name} is available again.\n\n"
+                    "Open the Sona Jewellery app to view the product or ask Sona AI "
+                    "for similar available options."
+                ),
+            )
+        subscription.status = "notified"
+        subscription.notified_at = utc_now()
+        subscription.updated_at = utc_now()
+        notified_count += 1
+
+    if notified_count:
+        record_integration_event(
+            db,
+            service="stock_alerts",
+            action="back_in_stock_notify",
+            status_value="notified",
+            reference=str(product.id),
+            response_payload={"notified_count": notified_count},
+        )
+    return notified_count
+
+
+BUYING_SUGGESTIONS = [
+    "Show me gold rings under 20000",
+    "Suggest a ring for engagement",
+    "Which jewellery is best for daily wear?",
+    "Gift ideas for mom under 15000",
+    "Gift ideas for wife on anniversary",
+    "Show earrings for office wear",
+    "Suggest a necklace for a wedding saree",
+    "What can I buy for a birthday gift?",
+    "Show lightweight gold jewellery",
+    "Show jewellery under 10000",
+    "Suggest rose gold rings",
+    "Show pearl earrings",
+    "Which necklace suits a round face?",
+    "Suggest jewellery for a bride",
+    "Show simple studs for daily use",
+    "Compare gold and silver jewellery",
+    "What size ring should I buy?",
+    "Show jewellery for a girlfriend",
+    "Suggest a pendant for everyday wear",
+    "Show premium jewellery above 20000",
+    "What jewellery is good for sensitive skin?",
+    "Show traditional earrings",
+    "Suggest minimalist jewellery",
+    "Show jewellery for party wear",
+    "Which jewellery has good resale value?",
+    "Do you have certified gold jewellery?",
+    "Show matching necklace and earrings",
+    "What is best for a first jewellery purchase?",
+    "Suggest jewellery for sister under 12000",
+    "Show in-stock jewellery only",
+]
+
+CATEGORY_KEYWORDS = {
+    "Ring": ["ring", "rings", "engagement", "wedding band", "proposal"],
+    "Necklace": ["necklace", "necklaces", "chain", "choker", "mangalsutra"],
+    "Earring": ["earring", "earrings", "stud", "studs", "hoop", "hoops", "jhumka", "jhumkas"],
+    "Bracelet": ["bracelet", "bracelets", "bangle", "bangles", "kada"],
+    "Pendant": ["pendant", "pendants"],
+    "Anklet": ["anklet", "anklets", "payal"],
+}
+
+OCCASION_KEYWORDS = {
+    "engagement": ["engagement", "proposal"],
+    "wedding": ["wedding", "bridal", "bride", "marriage"],
+    "anniversary": ["anniversary"],
+    "birthday": ["birthday"],
+    "daily wear": ["daily", "everyday", "office", "workwear", "regular"],
+    "party wear": ["party", "reception", "festive", "festival"],
+}
+
+GIFT_KEYWORDS = ["gift", "gifting", "mom", "mother", "wife", "girlfriend", "sister", "daughter"]
+LEAD_INTENT_KEYWORDS = {
+    "availability": ["available", "availability", "in stock", "stock", "ready to ship"],
+    "discount": ["discount", "offer", "deal", "coupon", "sale", "best price"],
+    "custom_order": [
+        "custom",
+        "customize",
+        "customise",
+        "custom order",
+        "engrave",
+        "made to order",
+    ],
+    "gift": GIFT_KEYWORDS,
+    "store_visit": ["store visit", "visit store", "appointment", "book visit"],
+    "callback": ["call me", "callback", "phone call", "talk to support", "human support"],
+    "order_status": [
+        "order status",
+        "track order",
+        "delivery status",
+        "where is my order",
+        "delivery",
+        "shipping",
+        "shipment",
+        "order help",
+        "order support",
+        "help with order",
+        "help me with order",
+        "help with an order",
+    ],
+    "return_refund": ["return", "refund", "cancel", "cancellation"],
+    "complaint": ["complaint", "problem", "issue", "damaged", "wrong item"],
+}
+HANDOFF_KEYWORDS = [
+    "call me",
+    "callback",
+    "talk to support",
+    "human support",
+    "sales",
+    "store visit",
+    "appointment",
+    "book visit",
+    "buy now",
+    "place order",
+    "order status",
+    "track order",
+    "return",
+    "refund",
+    "complaint",
+]
+METAL_KEYWORDS = {
+    "Rose Gold": ["rose gold"],
+    "Gold": ["gold"],
+    "Silver": ["silver"],
+}
+STYLE_KEYWORDS = {
+    "minimalist": ["minimalist", "minimal", "simple", "sleek"],
+    "traditional": ["traditional", "ethnic", "temple", "jhumka", "jhumkas"],
+    "modern": ["modern", "contemporary", "rose gold"],
+    "lightweight": ["lightweight", "light weight", "light"],
+    "premium": ["premium", "luxury", "high end"],
+    "office": ["office", "workwear", "work wear"],
+    "bridal": ["bridal", "bride"],
+}
+RECIPIENT_KEYWORDS = {
+    "mom": ["mom", "mother"],
+    "wife": ["wife"],
+    "girlfriend": ["girlfriend"],
+    "sister": ["sister"],
+    "daughter": ["daughter"],
+}
+PRICE_AMOUNT_PATTERN = r"(?:rs\.?|inr)?\s*([0-9][0-9,]*)(k)?"
+FILTER_KEYS = {
+    "min_price",
+    "max_price",
+    "metal",
+    "category",
+    "gift_intent",
+    "occasion",
+    "in_stock_only",
+    "style",
+    "recipient",
+    "feature",
+}
+
+
+def message_has_any(message: str, keywords: list[str]) -> bool:
+    return any(re.search(rf"\b{re.escape(keyword)}\b", message) for keyword in keywords)
+
+
+def product_query_text_search(q: str, category: str | None, metal: str | None) -> str:
+    text = q.lower()
+    if category:
+        for keyword in CATEGORY_KEYWORDS.get(category, []):
+            text = re.sub(rf"\b{re.escape(keyword)}\b", " ", text)
+    if metal:
+        for keyword in METAL_KEYWORDS.get(metal, []):
+            text = re.sub(rf"\b{re.escape(keyword)}\b", " ", text)
+
+    text = re.sub(PRICE_AMOUNT_PATTERN, " ", text)
+    text = re.sub(
+        r"\b(show|find|search|suggest|recommend|good|best|me|for|under|below|within|"
+        r"upto|up|to|rs|inr|jewellery|jewelry|items|options|products|pieces)\b",
+        " ",
+        text,
+    )
+    return " ".join(text.split())
+
+
+def detect_lead_intent(message: str, filters: dict[str, Any] | None = None) -> str | None:
+    filters = filters or {}
+    for intent, keywords in LEAD_INTENT_KEYWORDS.items():
+        if message_has_any(message, keywords):
+            return intent
+    if filters.get("gift_intent"):
+        return "gift"
+    return None
+
+
+def should_offer_handoff(message: str, intent: str | None) -> bool:
+    return intent is not None or message_has_any(message, HANDOFF_KEYWORDS)
+
+
+def create_chat_lead(
+    db: Session,
+    user: User,
+    session_id: str,
+    message: str,
+    intent: str,
+) -> LeadCapture:
+    lead = LeadCapture(
+        user_id=user.id,
+        session_id=session_id,
+        source="chat",
+        intent=intent,
+        message=message,
+        contact_name=user.username,
+        contact_email=user.email,
+        status="new",
+    )
+    db.add(lead)
+    db.flush()
+    return lead
+
+
+ORDER_REFERENCE_STOPWORDS = {
+    "support",
+    "status",
+    "help",
+    "delivery",
+    "shipping",
+    "shipment",
+    "cancellation",
+    "cancel",
+    "return",
+    "refund",
+}
+
+
+def extract_order_reference(message: str) -> str | None:
+    direct_match = re.search(r"\b(?:ord|order|pay|razorpay)[-_][a-zA-Z0-9_.:-]{3,80}\b", message)
+    if direct_match:
+        return direct_match.group(0).strip(".,;: ")
+
+    contextual_match = re.search(
+        r"\border(?:\s+(?:id|reference|number|no))?\s*[:#-]?\s+([a-zA-Z0-9][a-zA-Z0-9_.:-]{3,80})",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not contextual_match:
+        return None
+
+    candidate = contextual_match.group(1).strip(".,;: ")
+    if candidate.lower() in ORDER_REFERENCE_STOPWORDS:
+        return None
+    return candidate
+
+
+def detect_order_support_request_type(message: str) -> str:
+    msg = message.lower()
+    requested_actions = []
+    if message_has_any(msg, ["cancel", "cancellation"]):
+        requested_actions.append("cancel")
+    if message_has_any(msg, ["return"]):
+        requested_actions.append("return")
+    if message_has_any(msg, ["refund"]):
+        requested_actions.append("refund")
+    if message_has_any(msg, ["delivery", "shipping", "shipment"]):
+        requested_actions.append("delivery")
+    if message_has_any(msg, ["order status", "track order", "where is my order"]):
+        requested_actions.append("status")
+
+    unique_actions = list(dict.fromkeys(requested_actions))
+    if len(unique_actions) == 1:
+        return unique_actions[0]
+    if unique_actions:
+        return "other"
+    return "status"
+
+
+def create_chat_order_support_request(
+    db: Session,
+    user: User,
+    message: str,
+) -> OrderSupportRequest | None:
+    if not message_has_any(
+        message.lower(),
+        [
+            "order",
+            "delivery",
+            "shipping",
+            "shipment",
+            "cancel",
+            "cancellation",
+            "return",
+            "refund",
+        ],
+    ):
+        return None
+
+    order_reference = extract_order_reference(message)
+    request_type = detect_order_support_request_type(message)
+    support_request = OrderSupportRequest(
+        user_id=user.id,
+        order_reference=order_reference,
+        request_type=request_type,
+        message=message,
+        status="received",
+    )
+    db.add(support_request)
+    db.flush()
+    return support_request
+
+
+def build_order_support_reply(
+    order_reference: str | None,
+    request_type: str,
+) -> str:
+    if order_reference:
+        return (
+            f"I captured your {request_type.replace('_', ' ')} support request for "
+            f"order {order_reference}. Our team can now review it from the admin panel."
+        )
+    return (
+        "I can help with delivery, cancellation, return, refund, or order-status support. "
+        "Please share your order ID so the team can trace it quickly."
+    )
+
+
+def create_customer_action_lead(
+    db: Session,
+    user: User,
+    source: str,
+    intent: str,
+    message: str,
+    session_id: str | None = None,
+) -> LeadCapture:
+    lead = LeadCapture(
+        user_id=user.id,
+        session_id=session_id,
+        source=source,
+        intent=intent,
+        message=message,
+        contact_name=user.username,
+        contact_email=user.email,
+        status="new",
+    )
+    db.add(lead)
+    db.flush()
+    return lead
+
+
+def build_handoff_info(intent: str, lead_id: int | None = None) -> HandoffInfo:
+    return HandoffInfo(
+        reason=intent,
+        message=(
+            "I can connect you with jewellery support for availability, pricing, "
+            "custom orders, store visits, or gift help."
+        ),
+        channels=["request_callback", "appointment", "human_support"],
+        lead_id=lead_id,
+    )
+
+
+def detect_category(message: str) -> str | None:
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        if message_has_any(message, keywords):
+            return category
+    return None
+
+
+def detect_occasion(message: str) -> str | None:
+    for occasion, keywords in OCCASION_KEYWORDS.items():
+        if message_has_any(message, keywords):
+            return occasion
+    return None
+
+
+def detect_metal(message: str) -> str | None:
+    matched_metals = [
+        metal for metal, keywords in METAL_KEYWORDS.items() if message_has_any(message, keywords)
+    ]
+    if "Rose Gold" in matched_metals:
+        return "Rose Gold"
+    if len(matched_metals) == 1:
+        return matched_metals[0]
+    if "only gold" in message or "pure gold" in message:
+        return "Gold"
+    return None
+
+
+def detect_style(message: str) -> str | None:
+    for style, keywords in STYLE_KEYWORDS.items():
+        if message_has_any(message, keywords):
+            return style
+    return None
+
+
+def detect_recipient(message: str) -> str | None:
+    for recipient, keywords in RECIPIENT_KEYWORDS.items():
+        if message_has_any(message, keywords):
+            return recipient
+    return None
+
+
+def detect_feature(message: str) -> str | None:
+    if message_has_any(message, ["diamond", "diamonds"]):
+        return "diamond"
+    if message_has_any(message, ["pearl", "pearls"]):
+        return "pearl"
+    return None
+
+
+def parse_price_amount(amount: str, thousands_marker: str | None) -> float:
+    value = float(amount.replace(",", ""))
+    if thousands_marker:
+        value *= 1000
+    return value
+
+
+def normalize_price(value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_price_range(message: str) -> tuple[float, float] | None:
+    patterns = [
+        rf"(?:between|from)\s*{PRICE_AMOUNT_PATTERN}\s*(?:and|to|-)\s*{PRICE_AMOUNT_PATTERN}",
+        rf"{PRICE_AMOUNT_PATTERN}\s*(?:to|-)\s*{PRICE_AMOUNT_PATTERN}",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if not match:
+            continue
+
+        first_amount = parse_price_amount(match.group(1), match.group(2))
+        second_amount = parse_price_amount(match.group(3), match.group(4))
+        return min(first_amount, second_amount), max(first_amount, second_amount)
+
+    return None
+
+
+def extract_budget_limit(message: str) -> float | None:
+    patterns = [
+        rf"(?:under|below|less than|up to|upto|max|maximum|within|budget(?: of)?)\s*{PRICE_AMOUNT_PATTERN}",
+        rf"{PRICE_AMOUNT_PATTERN}\s*(?:or less|max|budget)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if not match:
+            continue
+
+        return parse_price_amount(match.group(1), match.group(2))
+
+    return None
+
+
+def extract_minimum_price(message: str) -> float | None:
+    pattern = rf"(?:above|over|more than|premium above|starting above)\s*{PRICE_AMOUNT_PATTERN}"
+    match = re.search(pattern, message)
+    if not match:
+        return None
+
+    return parse_price_amount(match.group(1), match.group(2))
+
+
+def empty_filter_state() -> dict[str, Any]:
+    return {
+        "min_price": None,
+        "max_price": None,
+        "metal": None,
+        "category": None,
+        "gift_intent": False,
+        "occasion": None,
+        "in_stock_only": False,
+        "style": None,
+        "recipient": None,
+        "feature": None,
+    }
+
+
+def load_json_object(raw_value: str | None) -> dict[str, Any]:
+    if not raw_value:
+        return {}
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def dump_json_object(value: dict[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def normalize_delivery_address(value: dict[str, Any] | str | None) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    text_value = value.strip()
+    return {"formatted": text_value} if text_value else {}
+
+
+def load_json_list(raw_value: str | None) -> list[Any]:
+    if not raw_value:
+        return []
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def dump_json_list(value: list[Any]) -> str:
+    return json.dumps(value)
+
+
+def ai_generated_concept_out(concept: AiGeneratedConcept) -> AiGeneratedConceptOut:
+    return AiGeneratedConceptOut(
+        id=concept.id,
+        concept_id=concept.concept_id,
+        user_id=concept.user_id,
+        name=concept.name,
+        source_prompt=concept.source_prompt,
+        design_brief=concept.design_brief,
+        materials=[str(item) for item in load_json_list(concept.materials)],
+        craft_notes=[str(item) for item in load_json_list(concept.craft_notes)],
+        image_base64=concept.image_base64,
+        image_mime_type=concept.image_mime_type,
+        answer_source=concept.answer_source,
+        category=concept.category,
+        metal=concept.metal,
+        gemstones=[str(item) for item in load_json_list(concept.gemstones)],
+        budget=concept.budget,
+        related_product_ids=[str(item) for item in load_json_list(concept.related_product_ids)],
+        status=concept.status,
+        created_at=concept.created_at,
+    )
+
+
+def local_order_for_user(
+    db: Session,
+    user_id: int,
+    order_reference: str,
+) -> OrderSnapshot | None:
+    return (
+        db.query(OrderSnapshot)
+        .filter(
+            OrderSnapshot.user_id == user_id,
+            OrderSnapshot.order_reference == order_reference,
+        )
+        .first()
+    )
+
+
+def local_order_items(db: Session, order_id: int) -> list[OrderSnapshotItem]:
+    return (
+        db.query(OrderSnapshotItem)
+        .filter(OrderSnapshotItem.order_id == order_id)
+        .order_by(OrderSnapshotItem.id.asc())
+        .all()
+    )
+
+
+def serialize_order_item(item: OrderSnapshotItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "product_reference": item.product_reference,
+        "backend_product_id": item.backend_product_id,
+        "name": item.name,
+        "qty": item.qty,
+        "unit_price": item.unit_price,
+        "image": item.image,
+    }
+
+
+def serialize_order_snapshot(db: Session, order: OrderSnapshot) -> dict[str, Any]:
+    raw_payload = load_json_object(order.raw_payload)
+    metadata = raw_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    delivery_promises = metadata.get("delivery_promises")
+    delivery_promises = delivery_promises if isinstance(delivery_promises, list) else []
+    return {
+        "id": order.id,
+        "user_id": order.user_id,
+        "order_reference": order.order_reference,
+        "status": order.status,
+        "total": order.total,
+        "currency": order.currency,
+        "customer_name": order.customer_name,
+        "customer_email": order.customer_email,
+        "customer_phone": order.customer_phone,
+        "delivery_address": load_json_object(order.delivery_address),
+        "payment_status": order.payment_status,
+        "payment_reference": order.payment_reference,
+        "tracking_number": order.tracking_number,
+        "tracking_url": order.tracking_url,
+        "expected_delivery": order.expected_delivery,
+        "source": order.source,
+        "metadata": metadata,
+        "delivery_promises": delivery_promises,
+        "items": [serialize_order_item(item) for item in local_order_items(db, order.id)],
+        "created_at": order.created_at,
+        "updated_at": order.updated_at,
+    }
+
+
+def order_snapshot_metadata(order: OrderSnapshot) -> dict[str, Any]:
+    metadata = load_json_object(order.raw_payload).get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def local_order_lookup_data(db: Session, order: OrderSnapshot) -> dict[str, Any]:
+    serialized = serialize_order_snapshot(db, order)
+    serialized["order_reference"] = order.order_reference
+    for field in ["created_at", "updated_at"]:
+        value = serialized.get(field)
+        if isinstance(value, datetime):
+            serialized[field] = value.isoformat()
+    return serialized
+
+
+def upsert_local_order_snapshot(
+    db: Session,
+    user: User,
+    payload: OrderSyncRequest,
+) -> OrderSnapshot:
+    order = local_order_for_user(db, user.id, payload.order_reference)
+    now = utc_now()
+    if order is None:
+        order = OrderSnapshot(
+            user_id=user.id,
+            order_reference=payload.order_reference,
+            created_at=now,
+        )
+        db.add(order)
+        db.flush()
+
+    order.status = payload.status
+    order.total = payload.total
+    order.currency = payload.currency or "INR"
+    order.customer_name = payload.customer_name
+    order.customer_email = str(payload.customer_email) if payload.customer_email else None
+    order.customer_phone = payload.customer_phone
+    order.delivery_address = dump_json_object(normalize_delivery_address(payload.delivery_address))
+    order.payment_status = payload.payment_status
+    order.payment_reference = payload.payment_reference
+    order.tracking_number = payload.tracking_number
+    order.tracking_url = payload.tracking_url
+    order.expected_delivery = payload.expected_delivery
+    order.source = payload.source or "android_app"
+    order.raw_payload = dump_json_object(payload.raw_payload or payload.model_dump(mode="json"))
+    order.updated_at = now
+
+    db.query(OrderSnapshotItem).filter(OrderSnapshotItem.order_id == order.id).delete()
+    for item in payload.items:
+        db.add(
+            OrderSnapshotItem(
+                order_id=order.id,
+                product_reference=item.product_id,
+                backend_product_id=item.backend_product_id,
+                name=item.name,
+                qty=item.qty,
+                unit_price=item.price,
+                image=item.image,
+            )
+        )
+
+    return order
+
+
+def razorpay_webhook_is_configured() -> bool:
+    return bool(RAZORPAY_WEBHOOK_SECRET)
+
+
+def razorpay_checkout_is_configured() -> bool:
+    return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+
+
+def razorpay_api_headers() -> dict[str, str]:
+    credentials = f"{RAZORPAY_KEY_ID}:{RAZORPAY_KEY_SECRET}".encode("utf-8")
+    token = base64.b64encode(credentials).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
+def call_razorpay(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if not razorpay_checkout_is_configured():
+        raise RuntimeError("Razorpay checkout API is not configured")
+    url = f"https://api.razorpay.com/v1/{path.lstrip('/')}"
+    increment_metric("razorpay_requests")
+    return json_http_request(method, url, payload, razorpay_api_headers(), timeout=15)
+
+
+def razorpay_dependency_status() -> dict[str, Any]:
+    webhook_configured = razorpay_webhook_is_configured()
+    checkout_configured = razorpay_checkout_is_configured()
+    if webhook_configured or checkout_configured:
+        return {
+            "status": "configured",
+            "critical": False,
+            "provider": "razorpay",
+            "webhook_configured": webhook_configured,
+            "checkout_api_configured": checkout_configured,
+        }
+    return {
+        "status": "disabled",
+        "critical": False,
+        "provider": "razorpay",
+        "webhook_configured": False,
+        "checkout_api_configured": False,
+    }
+
+
+def razorpay_order_total(amount: int) -> float:
+    return round(amount / 100, 2)
+
+
+def parse_optional_int(value: Any, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_optional_float(value: Any, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def request_coupon_code(payload: RazorpayOrderCreate) -> str | None:
+    value = payload.coupon_code or (payload.notes or {}).get("coupon_code")
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def request_gift_voucher_code(payload: RazorpayOrderCreate) -> str | None:
+    value = payload.gift_voucher_code or (payload.notes or {}).get("gift_voucher_code")
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def request_reward_points(payload: RazorpayOrderCreate) -> int:
+    note_value = (payload.notes or {}).get("reward_points_requested")
+    legacy_note_value = (payload.notes or {}).get("reward_points_used")
+    return max(
+        int(payload.reward_points_requested or 0),
+        parse_optional_int(note_value),
+        parse_optional_int(legacy_note_value),
+    )
+
+
+def client_coupon_discount(payload: RazorpayOrderCreate) -> float:
+    return parse_optional_float((payload.notes or {}).get("coupon_discount"))
+
+
+_FIRESTORE_CLIENT: Any | None = None
+
+
+def firestore_commerce_credentials_configured() -> bool:
+    return bool(
+        FIREBASE_SERVICE_ACCOUNT_JSON
+        or FIREBASE_SERVICE_ACCOUNT_PATH
+        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    )
+
+
+def firestore_admin_available() -> bool:
+    return bool(firebase_admin and firebase_credentials and firebase_firestore)
+
+
+def firestore_commerce_is_configured() -> bool:
+    return (
+        FIRESTORE_COMMERCE_ENABLED
+        and bool(FIREBASE_PROJECT_ID)
+        and firestore_commerce_credentials_configured()
+        and firestore_admin_available()
+    )
+
+
+def firestore_commerce_dependency_status() -> dict[str, Any]:
+    if not FIRESTORE_COMMERCE_ENABLED:
+        return {"status": "disabled", "critical": False, "service": "firestore_commerce"}
+    if not FIREBASE_PROJECT_ID:
+        return {
+            "status": "misconfigured",
+            "critical": True,
+            "service": "firestore_commerce",
+            "reason": "missing_firebase_project_id",
+        }
+    if not firestore_commerce_credentials_configured():
+        return {
+            "status": "misconfigured",
+            "critical": True,
+            "service": "firestore_commerce",
+            "reason": "missing_service_account",
+        }
+    if not firestore_admin_available():
+        return {
+            "status": "dependency_missing",
+            "critical": True,
+            "service": "firestore_commerce",
+            "reason": "firebase_admin_not_installed",
+        }
+    return {
+        "status": "configured",
+        "critical": False,
+        "service": "firestore_commerce",
+        "project_id_configured": True,
+        "products_collection": FIRESTORE_PRODUCTS_COLLECTION,
+        "orders_collection": FIRESTORE_ORDERS_COLLECTION,
+    }
+
+
+def get_firestore_client() -> Any:
+    global _FIRESTORE_CLIENT
+    if _FIRESTORE_CLIENT is not None:
+        return _FIRESTORE_CLIENT
+    if not firestore_admin_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase Admin SDK is not installed for Firestore checkout",
+        )
+    if not FIREBASE_PROJECT_ID:
+        raise HTTPException(status_code=503, detail="FIREBASE_PROJECT_ID is not configured")
+    if not firestore_commerce_credentials_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase service account is not configured for Firestore checkout",
+        )
+
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        if FIREBASE_SERVICE_ACCOUNT_JSON:
+            service_account = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
+            credential = firebase_credentials.Certificate(service_account)
+        elif FIREBASE_SERVICE_ACCOUNT_PATH:
+            credential = firebase_credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_PATH)
+        else:
+            credential = firebase_credentials.ApplicationDefault()
+        firebase_admin.initialize_app(credential, {"projectId": FIREBASE_PROJECT_ID})
+
+    _FIRESTORE_CLIENT = firebase_firestore.client()
+    return _FIRESTORE_CLIENT
+
+
+def firestore_server_timestamp() -> Any:
+    return getattr(firebase_firestore, "SERVER_TIMESTAMP", utc_now())
+
+
+def firestore_increment(amount: int | float) -> Any:
+    increment = getattr(firebase_firestore, "Increment", None)
+    return increment(amount) if increment else amount
+
+
+def firestore_snapshot_dict(snapshot: Any) -> dict[str, Any]:
+    if not snapshot or not getattr(snapshot, "exists", False):
+        return {}
+    data = snapshot.to_dict() or {}
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def firestore_document_id(snapshot: Any, fallback: str) -> str:
+    return str(getattr(snapshot, "id", None) or fallback)
+
+
+def firestore_get(ref: Any, transaction: Any | None = None) -> Any:
+    try:
+        if transaction is not None:
+            return ref.get(transaction=transaction)
+    except TypeError:
+        pass
+    return ref.get()
+
+
+def firestore_stream_first(query: Any, transaction: Any | None = None) -> Any | None:
+    try:
+        iterator = query.limit(1).stream(transaction=transaction)
+    except TypeError:
+        iterator = query.limit(1).stream()
+    for snapshot in iterator:
+        return snapshot
+    return None
+
+
+def firestore_query_equal(collection: Any, field: str, value: Any) -> Any:
+    try:
+        return collection.where(field, "==", value)
+    except TypeError:
+        return collection.where(filter=(field, "==", value))
+
+
+def firestore_first_value(data: dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def firestore_to_float(value: Any) -> float:
+    if value is None or value == "":
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def firestore_to_int(value: Any) -> int:
+    if value is None or value == "":
+        return 0
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def firestore_to_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "yes", "1", "active", "available"}:
+        return True
+    if normalized in {"false", "no", "0", "inactive", "unavailable"}:
+        return False
+    return None
+
+
+def firestore_to_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    to_datetime = getattr(value, "to_datetime", None)
+    if callable(to_datetime):
+        return to_datetime()
+    return None
+
+
+def firestore_is_expired(value: Any) -> bool:
+    expires_at = firestore_to_datetime(value)
+    if expires_at is None:
+        return False
+    if expires_at.tzinfo is not None:
+        expires_at = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return expires_at < utc_now()
+
+
+def firestore_normalize_metal(value: Any) -> str:
+    metal = str(value or "").strip().lower()
+    if re.search(r"\bsilver\b", metal):
+        return "silver"
+    if re.search(r"\bgold\b", metal):
+        return "gold"
+    return metal
+
+
+def firestore_normalize_purity(value: Any) -> str:
+    purity = str(value or "22K").strip().upper()
+    if purity == "24KT":
+        return "24K"
+    if purity == "22KT":
+        return "22K"
+    if purity == "18KT":
+        return "18K"
+    if purity in {"80%", "80% HUID", "800 HUID", "SILVER 800"}:
+        return "800"
+    return purity or "22K"
+
+
+def firestore_product_has_dynamic_pricing(product: dict[str, Any]) -> bool:
+    metal_type = firestore_normalize_metal(
+        firestore_first_value(product, ["metalType", "metal_type", "metal", "category"])
+    )
+    has_supported_metal = metal_type in {"gold", "silver"}
+    has_weight = (
+        firestore_to_float(
+            firestore_first_value(
+                product,
+                ["metalWeight", "metal_weight", "netWeight", "net_weight", "weight"],
+            )
+        )
+        > 0
+    )
+    dynamic_pricing = firestore_first_value(product, ["useDynamicPricing", "use_dynamic_pricing"])
+    return (
+        has_supported_metal
+        and has_weight
+        and (dynamic_pricing is None or firestore_to_bool(dynamic_pricing) is True)
+    )
+
+
+def firestore_metal_rate(
+    metal_type: str,
+    purity: str,
+    rates: dict[str, Any],
+    fallback: float,
+) -> float:
+    if metal_type == "silver":
+        return firestore_to_float(rates.get("silver")) or fallback
+    if purity == "18K":
+        explicit_18k = firestore_to_float(rates.get("gold18k"))
+        if explicit_18k > 0:
+            return explicit_18k
+        gold_24k = firestore_to_float(rates.get("gold24k"))
+        if gold_24k > 0:
+            return gold_24k * 18 / 24
+        gold_22k = firestore_to_float(rates.get("gold22k"))
+        if gold_22k > 0:
+            return gold_22k * 18 / 22
+        return fallback
+    if purity == "24K":
+        return firestore_to_float(rates.get("gold24k")) or fallback
+    return firestore_to_float(rates.get("gold22k")) or fallback
+
+
+def firestore_product_price(product: dict[str, Any], rates: dict[str, Any]) -> float:
+    fallback_price = firestore_to_float(
+        firestore_first_value(product, ["price", "sellingPrice", "selling_price", "salePrice"])
+    )
+    if not firestore_product_has_dynamic_pricing(product):
+        return fallback_price
+
+    metal_type = firestore_normalize_metal(
+        firestore_first_value(product, ["metalType", "metal_type", "metal", "category"])
+    )
+    purity = firestore_normalize_purity(
+        firestore_first_value(product, ["purity", "metalPurity", "metal_purity"])
+    )
+    metal_rate = firestore_metal_rate(metal_type, purity, rates, fallback_price)
+    metal_weight = firestore_to_float(
+        firestore_first_value(
+            product,
+            ["metalWeight", "metal_weight", "netWeight", "net_weight", "weight"],
+        )
+    )
+    if metal_rate <= 0 or metal_weight <= 0:
+        return fallback_price
+
+    metal_value = metal_rate * metal_weight
+    wastage_percent = firestore_to_float(
+        firestore_first_value(product, ["wastagePercent", "wastage_percent"])
+    )
+    making_charge = firestore_to_float(
+        firestore_first_value(product, ["makingCharge", "making_charge"])
+    )
+    stone_charge = firestore_to_float(
+        firestore_first_value(product, ["stoneCharge", "stone_charge"])
+    )
+    diamond_charge = firestore_to_float(
+        firestore_first_value(product, ["diamondCharge", "diamond_charge"])
+    )
+    shipping_charge = firestore_to_float(
+        firestore_first_value(product, ["shippingCharge", "shipping_charge"])
+    )
+    gst_percent = firestore_to_float(firestore_first_value(product, ["gstPercent", "gst_percent"]))
+    gst_percent = gst_percent if gst_percent > 0 else 3.0
+    wastage_amount = metal_value * wastage_percent / 100
+    taxable_total = (
+        metal_value
+        + wastage_amount
+        + making_charge
+        + stone_charge
+        + diamond_charge
+        + shipping_charge
+    )
+    return taxable_total + (taxable_total * gst_percent / 100)
+
+
+def firestore_product_stock(product: dict[str, Any]) -> int:
+    return firestore_to_int(
+        firestore_first_value(product, ["stock_quantity", "stockQuantity", "stock", "quantity"])
+    )
+
+
+def firestore_product_active(product: dict[str, Any]) -> bool:
+    active = firestore_to_bool(firestore_first_value(product, ["active", "isActive"]))
+    deleted = firestore_to_bool(firestore_first_value(product, ["deleted", "isDeleted"]))
+    return (active is not False) and deleted is not True
+
+
+def firestore_product_collection(client: Any) -> Any:
+    return client.collection(FIRESTORE_PRODUCTS_COLLECTION)
+
+
+def firestore_find_product(
+    client: Any,
+    reference: str,
+    transaction: Any | None = None,
+) -> tuple[Any, Any, dict[str, Any]] | None:
+    products = firestore_product_collection(client)
+    snapshot = firestore_get(products.document(reference), transaction=transaction)
+    data = firestore_snapshot_dict(snapshot)
+    if data:
+        return products.document(reference), snapshot, data
+
+    for field_name in ["productId", "sku"]:
+        query = firestore_query_equal(products, field_name, reference)
+        snapshot = firestore_stream_first(query, transaction=transaction)
+        data = firestore_snapshot_dict(snapshot)
+        if data:
+            return products.document(firestore_document_id(snapshot, reference)), snapshot, data
+    return None
+
+
+def firestore_read_rates(client: Any) -> dict[str, Any]:
+    snapshot = (
+        client.collection(FIRESTORE_GOLD_RATES_COLLECTION)
+        .document(FIRESTORE_GOLD_RATES_DOCUMENT)
+        .get()
+    )
+    return firestore_snapshot_dict(snapshot)
+
+
+def firestore_user_document(client: Any, uid: str) -> Any:
+    return client.collection(FIRESTORE_USERS_COLLECTION).document(uid)
+
+
+def firestore_uid_for_user(db: Session, user: User, client: Any) -> str | None:
+    firebase_uid = str(getattr(user, "firebase_uid", "") or "").strip()
+    if firebase_uid:
+        return firebase_uid
+
+    email = str(user.email or "").strip().lower()
+    if not email or email.endswith("@phone.sona.invalid"):
+        return None
+
+    query = firestore_query_equal(client.collection(FIRESTORE_USERS_COLLECTION), "email", email)
+    snapshot = firestore_stream_first(query)
+    if not snapshot:
+        return None
+
+    firebase_uid = firestore_document_id(snapshot, "")
+    if firebase_uid:
+        user.firebase_uid = firebase_uid
+        user.auth_provider = "firebase"
+        db.flush()
+    return firebase_uid or None
+
+
+def hydrate_payment_firebase_identity(
+    db: Session,
+    user: User,
+    payload: RazorpayOrderCreate,
+) -> None:
+    if not payload.firebase_id_token:
+        return
+
+    firebase_payload = verify_firebase_id_token(payload.firebase_id_token)
+    email = firebase_email_for_identity(firebase_payload)
+    firebase_uid = str(firebase_payload["sub"])
+    if email != str(user.email or "").lower():
+        raise HTTPException(status_code=403, detail="Firebase token does not match this account")
+    if user.firebase_uid and user.firebase_uid != firebase_uid:
+        raise HTTPException(status_code=409, detail="Firebase identity does not match this user")
+
+    user.firebase_uid = firebase_uid
+    user.auth_provider = "firebase"
+    user.is_verified = True
+    db.flush()
+
+
+def firestore_coupon_reference(client: Any, code: str | None) -> tuple[Any | None, str | None]:
+    normalized = str(code or "").strip().upper()
+    if not normalized:
+        return None, None
+    return client.collection(FIRESTORE_COUPONS_COLLECTION).document(normalized), normalized
+
+
+def firestore_coupon_discount(
+    coupon_data: dict[str, Any],
+    subtotal_rupees: float,
+) -> float:
+    flat_discount = firestore_to_float(coupon_data.get("discount"))
+    discount_percent = firestore_to_float(coupon_data.get("discountPercent"))
+    max_discount = firestore_to_float(coupon_data.get("maxDiscount"))
+    discount = flat_discount
+    if discount_percent > 0:
+        discount = subtotal_rupees * discount_percent / 100
+        if max_discount > 0:
+            discount = min(discount, max_discount)
+    return round(max(min(discount, subtotal_rupees), 0), 2)
+
+
+def firestore_validate_coupon(
+    client: Any,
+    coupon_code: str | None,
+    subtotal_rupees: float,
+    transaction: Any | None = None,
+) -> dict[str, Any]:
+    coupon_ref, normalized_code = firestore_coupon_reference(client, coupon_code)
+    if not coupon_ref or not normalized_code:
+        return {"code": None, "discount": 0.0, "status": "not_requested"}
+
+    coupon_data = firestore_snapshot_dict(firestore_get(coupon_ref, transaction=transaction))
+    if not coupon_data or firestore_to_bool(coupon_data.get("active")) is not True:
+        raise HTTPException(status_code=409, detail="Coupon is invalid or expired")
+    if firestore_is_expired(coupon_data.get("expiresAt")):
+        raise HTTPException(status_code=409, detail="Coupon is invalid or expired")
+
+    min_order = firestore_to_float(coupon_data.get("minOrderAmount"))
+    if min_order > 0 and subtotal_rupees < min_order:
+        raise HTTPException(status_code=409, detail="Minimum order amount is not met for coupon")
+
+    discount = firestore_coupon_discount(coupon_data, subtotal_rupees)
+    if discount <= 0:
+        raise HTTPException(status_code=409, detail="Coupon discount is not valid")
+
+    return {
+        "code": normalized_code,
+        "discount": discount,
+        "status": "applied",
+        "ref": coupon_ref,
+    }
+
+
+def firestore_validate_gift_voucher(
+    client: Any,
+    gift_voucher_code: str | None,
+    remaining_rupees: float,
+    transaction: Any | None = None,
+) -> dict[str, Any]:
+    normalized = str(gift_voucher_code or "").strip().upper()
+    if not normalized:
+        return {"code": None, "redeemed": 0.0, "status": "not_requested"}
+
+    voucher_ref = client.collection(FIRESTORE_GIFT_VOUCHERS_COLLECTION).document(normalized)
+    voucher_data = firestore_snapshot_dict(firestore_get(voucher_ref, transaction=transaction))
+    if not voucher_data or firestore_to_bool(voucher_data.get("active")) is not True:
+        raise HTTPException(status_code=409, detail="Gift voucher is invalid or expired")
+    if firestore_is_expired(voucher_data.get("expiresAt")):
+        raise HTTPException(status_code=409, detail="Gift voucher is invalid or expired")
+
+    balance = firestore_to_float(
+        firestore_first_value(voucher_data, ["balance", "balanceAmount", "remainingBalance"])
+    )
+    if balance <= 0:
+        raise HTTPException(status_code=409, detail="Gift voucher has no remaining balance")
+    redeemed = round(min(balance, max(remaining_rupees, 0)), 2)
+    return {
+        "code": normalized,
+        "redeemed": redeemed,
+        "status": "applied" if redeemed > 0 else "not_applied",
+        "ref": voucher_ref,
+    }
+
+
+def firestore_order_item_payload(
+    document_id: str,
+    product: dict[str, Any],
+    quantity: int,
+    unit_price: float,
+    item: Any,
+) -> dict[str, Any]:
+    product_reference = str(
+        firestore_first_value(product, ["productId", "sku"]) or document_id
+    ).strip()
+    return {
+        "product_id": product_reference,
+        "firestore_product_id": document_id,
+        "cart_item_id": payment_item_cart_reference(item),
+        "name": str(firestore_first_value(product, ["name", "title"]) or product_reference),
+        "qty": quantity,
+        "price": round(unit_price, 2),
+        "image": str(firestore_first_value(product, ["imageUrl", "image"]) or ""),
+        "category": str(
+            firestore_first_value(product, ["subCategory", "productType", "category"]) or ""
+        ),
+        "metal": str(firestore_first_value(product, ["metalType", "metal_type", "metal"]) or ""),
+    }
+
+
+def firestore_checkout_calculation(
+    db: Session,
+    payload: RazorpayOrderCreate,
+    user: User,
+) -> dict[str, Any] | None:
+    if not FIRESTORE_COMMERCE_ENABLED:
+        return None
+    if not firestore_commerce_is_configured():
+        status_data = firestore_commerce_dependency_status()
+        reason = status_data.get("reason") or status_data.get("status")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Firestore checkout is not configured: {reason}",
+        )
+
+    client = get_firestore_client()
+    firebase_uid = firestore_uid_for_user(db, user, client)
+    if not firebase_uid:
+        raise HTTPException(
+            status_code=409,
+            detail="Reconnect the app login before checkout so Firestore cart ownership can be verified",
+        )
+
+    if not payload.items:
+        raise HTTPException(status_code=422, detail="Checkout cart is empty")
+
+    rates = firestore_read_rates(client)
+    currency = (payload.currency or "INR").upper()
+    order_items: list[OrderItemSync] = []
+    source_items: list[dict[str, Any]] = []
+    cart_item_ids: list[str] = []
+    subtotal_paise = 0
+
+    for item in payload.items:
+        reference = payment_item_reference(item)
+        if not reference:
+            raise HTTPException(status_code=422, detail="Cart item must include a product_id")
+        product_match = firestore_find_product(client, reference)
+        if product_match is None:
+            raise HTTPException(status_code=422, detail=f"Product {reference} was not found")
+        _, snapshot, product = product_match
+        document_id = firestore_document_id(snapshot, reference)
+        if not firestore_product_active(product):
+            raise HTTPException(status_code=409, detail=f"Product {reference} is not available")
+
+        quantity = max(parse_optional_int(getattr(item, "qty", 1), default=1), 1)
+        stock = firestore_product_stock(product)
+        if stock < quantity:
+            product_name = str(firestore_first_value(product, ["name", "title"]) or reference)
+            raise HTTPException(
+                status_code=409,
+                detail=f"{product_name} does not have enough stock for checkout",
+            )
+
+        unit_price = firestore_product_price(product, rates)
+        unit_amount = int(round(unit_price * 100))
+        if unit_amount <= 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Product {reference} does not have valid live pricing",
+            )
+        subtotal_paise += unit_amount * quantity
+        item_payload = firestore_order_item_payload(
+            document_id, product, quantity, unit_price, item
+        )
+        order_items.append(
+            OrderItemSync(
+                product_id=item_payload["product_id"],
+                backend_product_id=None,
+                name=item_payload["name"],
+                qty=quantity,
+                price=item_payload["price"],
+                image=item_payload["image"],
+            )
+        )
+        source_items.append(
+            {
+                **item_payload,
+                "requested_product_id": reference,
+                "selected_size": getattr(item, "selected_size", None),
+                "selected_variant": getattr(item, "selected_variant", None),
+                "unit_amount": unit_amount,
+            }
+        )
+        cart_reference = item_payload.get("cart_item_id") or reference
+        if cart_reference:
+            cart_item_ids.append(str(cart_reference))
+
+    if subtotal_paise < 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Checkout total must be at least Rs. 1. Refresh product pricing.",
+        )
+
+    subtotal_rupees = razorpay_order_total(subtotal_paise)
+    coupon = firestore_validate_coupon(client, request_coupon_code(payload), subtotal_rupees)
+    after_coupon = max(subtotal_rupees - coupon["discount"], 0)
+    gift_voucher = firestore_validate_gift_voucher(
+        client,
+        request_gift_voucher_code(payload),
+        after_coupon,
+    )
+    after_voucher = max(after_coupon - gift_voucher["redeemed"], 0)
+
+    user_snapshot = firestore_user_document(client, firebase_uid).get()
+    user_data = firestore_snapshot_dict(user_snapshot)
+    available_points = max(firestore_to_int(user_data.get("rewardPoints")), 0)
+    requested_points = request_reward_points(payload)
+    reward_points_used = min(requested_points, available_points)
+    reward_discount = min(
+        reward_points_used * REWARD_POINT_VALUE_RUPEES,
+        after_voucher,
+    )
+    amount = int(round((after_voucher - reward_discount) * 100))
+    if amount < 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Checkout payable amount must be at least Rs. 1 for Razorpay",
+        )
+
+    if payload.amount is not None and int(payload.amount) != amount:
+        send_monitoring_alert(
+            "payments.client_amount_mismatch",
+            severity="warning",
+            payload={
+                "user_id": user.id,
+                "firebase_uid_configured": True,
+                "client_amount": int(payload.amount),
+                "server_amount": amount,
+                "currency": currency,
+                "coupon_code_present": bool(coupon["code"]),
+                "reward_points_requested": requested_points,
+            },
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Checkout amount changed. Refresh your cart and try again.",
+        )
+
+    reward_points_used = int(reward_discount / REWARD_POINT_VALUE_RUPEES)
+    metadata = {
+        "authority": "firestore",
+        "server_authoritative_pricing": True,
+        "firebase_uid": firebase_uid,
+        "client_amount": payload.amount,
+        "subtotal_amount": subtotal_paise,
+        "payable_amount": amount,
+        "subtotal": subtotal_rupees,
+        "payable_total": razorpay_order_total(amount),
+        "currency": currency,
+        "coupon": {
+            "code": coupon["code"],
+            "discount": coupon["discount"],
+            "status": coupon["status"],
+        },
+        "gift_voucher": {
+            "code": gift_voucher["code"],
+            "redeemed": gift_voucher["redeemed"],
+            "status": gift_voucher["status"],
+        },
+        "rewards": {
+            "requested_points": requested_points,
+            "available_points_at_checkout": available_points,
+            "consumed_points": reward_points_used,
+            "discount": round(reward_discount, 2),
+            "status": "applied" if reward_points_used else "not_requested",
+        },
+        "cart_cleanup": {
+            "status": "pending_firestore_transaction" if cart_item_ids else "not_available",
+            "cart_item_ids": cart_item_ids,
+        },
+        "items": source_items,
+    }
+    return {
+        "amount": amount,
+        "currency": currency,
+        "receipt": payload.receipt or f"sona-{uuid4().hex[:20]}",
+        "items": order_items,
+        "metadata": metadata,
+        "payable_total": razorpay_order_total(amount),
+        "coupon_discount": coupon["discount"],
+        "reward_points_used": reward_points_used,
+        "authority": "firestore",
+    }
+
+
+def payment_item_reference(item: Any) -> str:
+    return str(getattr(item, "product_id", None) or "").strip()
+
+
+def payment_item_cart_reference(item: Any) -> str | None:
+    value = getattr(item, "cart_item_id", None)
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def product_reference_for_order(product: Product, fallback: str | None = None) -> str:
+    if product.sku:
+        return product.sku
+    return fallback or f"snchatbot_{product.id}"
+
+
+def product_id_from_reference(reference: str) -> int | None:
+    text_value = reference.strip()
+    if text_value.isdigit():
+        return int(text_value)
+    match = re.fullmatch(r"(?:snchatbot_|backend_|product_)?(\d+)", text_value, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def lookup_authoritative_product(db: Session, item: Any) -> Product | None:
+    backend_product_id = getattr(item, "backend_product_id", None)
+    if backend_product_id:
+        product = db.query(Product).filter(Product.id == backend_product_id).first()
+        if product:
+            return product
+
+    reference = payment_item_reference(item)
+    resolved_id = product_id_from_reference(reference) if reference else None
+    if resolved_id:
+        product = db.query(Product).filter(Product.id == resolved_id).first()
+        if product:
+            return product
+
+    if reference:
+        product = db.query(Product).filter(Product.sku == reference).first()
+        if product:
+            return product
+        product = db.query(Product).filter(Product.sku == reference.upper()).first()
+        if product:
+            return product
+        return db.query(Product).filter(Product.name == reference).first()
+
+    return None
+
+
+def ensure_payment_product_available(product: Product, quantity: int) -> None:
+    if not product.in_stock or product.stock_quantity < quantity:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{product.name} does not have enough stock for checkout",
+        )
+
+
+def authoritative_checkout_calculation(
+    db: Session,
+    payload: RazorpayOrderCreate,
+    user: User,
+) -> dict[str, Any]:
+    firestore_calculation = (
+        firestore_checkout_calculation(db, payload, user)
+        if payload.commerce_source != "fastapi"
+        else None
+    )
+    if firestore_calculation is not None:
+        return firestore_calculation
+
+    if not payload.items:
+        raise HTTPException(status_code=422, detail="Checkout cart is empty")
+
+    fastapi_checkout = {}
+    if payload.commerce_source == "fastapi":
+        from commerce import validate_checkout
+
+        fastapi_checkout = validate_checkout(db, payload, user)
+
+    currency = (payload.currency or "INR").upper()
+    order_items: list[OrderItemSync] = []
+    subtotal_paise = 0
+    source_items = []
+    cart_item_ids: list[str] = []
+
+    for item in payload.items:
+        product = lookup_authoritative_product(db, item)
+        if product is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Cart item must include a valid backend_product_id, product id, or SKU",
+            )
+
+        quantity = max(parse_optional_int(getattr(item, "qty", 1), default=1), 1)
+        ensure_payment_product_available(product, quantity)
+
+        unit_amount = int(round(float(product.price or 0) * 100))
+        subtotal_paise += unit_amount * quantity
+        product_reference = product_reference_for_order(product, payment_item_reference(item))
+        cart_item_id = payment_item_cart_reference(item)
+        if cart_item_id:
+            cart_item_ids.append(cart_item_id)
+
+        order_items.append(
+            OrderItemSync(
+                product_id=product_reference,
+                backend_product_id=product.id,
+                name=product.name,
+                qty=quantity,
+                price=razorpay_order_total(unit_amount),
+                image=product.image,
+            )
+        )
+        source_items.append(
+            {
+                "requested_product_id": payment_item_reference(item) or None,
+                "requested_backend_product_id": getattr(item, "backend_product_id", None),
+                "cart_item_id": cart_item_id,
+                "selected_size": getattr(item, "selected_size", None),
+                "selected_variant": getattr(item, "selected_variant", None),
+                "resolved_product_id": product.id,
+                "sku": product.sku,
+                "name": product.name,
+                "qty": quantity,
+                "unit_amount": unit_amount,
+            }
+        )
+
+    if subtotal_paise < 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Checkout total must be at least Rs. 1. Refresh product pricing.",
+        )
+
+    coupon_code = request_coupon_code(payload)
+    gift_voucher_code = request_gift_voucher_code(payload)
+    reward_points_requested = request_reward_points(payload)
+    discount_requested = client_coupon_discount(payload)
+    amount = subtotal_paise
+
+    if payload.amount is not None and int(payload.amount) != amount:
+        send_monitoring_alert(
+            "payments.client_amount_mismatch",
+            severity="warning",
+            payload={
+                "user_id": user.id,
+                "client_amount": int(payload.amount),
+                "server_amount": amount,
+                "currency": currency,
+                "coupon_code_present": bool(coupon_code),
+                "reward_points_requested": reward_points_requested,
+            },
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Checkout amount changed. Refresh your cart and try again.",
+        )
+
+    metadata = {
+        "server_authoritative_pricing": True,
+        "commerce_source": payload.commerce_source,
+        "fastapi_checkout": fastapi_checkout,
+        "delivery_promises": fastapi_checkout.get("delivery_promises", []),
+        "client_amount": payload.amount,
+        "subtotal_amount": subtotal_paise,
+        "payable_amount": amount,
+        "subtotal": razorpay_order_total(subtotal_paise),
+        "payable_total": razorpay_order_total(amount),
+        "currency": currency,
+        "coupon": {
+            "code": coupon_code,
+            "client_discount": discount_requested,
+            "discount": 0,
+            "status": "not_configured" if coupon_code or discount_requested else "not_requested",
+        },
+        "gift_voucher": {
+            "code": gift_voucher_code,
+            "redeemed": 0,
+            "status": "not_configured" if gift_voucher_code else "not_requested",
+        },
+        "rewards": {
+            "requested_points": reward_points_requested,
+            "consumed_points": 0,
+            "status": "not_configured" if reward_points_requested else "not_requested",
+        },
+        "cart_cleanup": {
+            "status": "pending_client_cleanup" if cart_item_ids else "not_available",
+            "cart_item_ids": cart_item_ids,
+        },
+        "items": source_items,
+    }
+    return {
+        "amount": amount,
+        "currency": currency,
+        "receipt": payload.receipt or f"sona-{uuid4().hex[:20]}",
+        "items": order_items,
+        "metadata": metadata,
+        "payable_total": razorpay_order_total(amount),
+        "coupon_discount": 0,
+        "reward_points_used": 0,
+    }
+
+
+def razorpay_checkout_notes(
+    payload: RazorpayOrderCreate,
+    user: User,
+    calculation: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    notes: dict[str, str] = {}
+    for key, value in (payload.notes or {}).items():
+        if len(notes) >= 12:
+            break
+        key_text = str(key).strip()[:256]
+        if not key_text or value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            value_text = json.dumps(value, ensure_ascii=True, default=str)
+        else:
+            value_text = str(value)
+        notes[key_text] = value_text[:256]
+
+    notes.setdefault("source", "sona_flutter")
+    notes.setdefault("user_id", str(user.id))
+    notes.setdefault("environment", APP_ENV)
+    if calculation:
+        notes["server_calculated"] = "true"
+        metadata = calculation.get("metadata") if isinstance(calculation, dict) else {}
+        if isinstance(metadata, dict):
+            coupon = metadata.get("coupon")
+            rewards = metadata.get("rewards")
+            if isinstance(coupon, dict) and coupon.get("code"):
+                notes["coupon_code"] = str(coupon["code"])[:256]
+            if isinstance(rewards, dict) and rewards.get("requested_points"):
+                notes["reward_points_requested"] = str(rewards["requested_points"])[:256]
+    return dict(list(notes.items())[:15])
+
+
+def razorpay_order_request_payload(
+    payload: RazorpayOrderCreate,
+    user: User,
+    calculation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    amount = parse_optional_int((calculation or {}).get("amount"), default=0)
+    currency = str((calculation or {}).get("currency") or payload.currency or "INR").upper()
+    receipt = str(
+        (calculation or {}).get("receipt") or payload.receipt or f"sona-{uuid4().hex[:20]}"
+    )
+    return {
+        "amount": amount,
+        "currency": currency,
+        "receipt": receipt,
+        "notes": razorpay_checkout_notes(payload, user, calculation),
+    }
+
+
+def razorpay_signature_is_valid(raw_body: bytes, signature: str | None) -> bool:
+    if not RAZORPAY_WEBHOOK_SECRET or not signature:
+        return False
+    expected_signature = hmac.new(
+        RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    return secrets.compare_digest(signature, expected_signature)
+
+
+def razorpay_checkout_signature_is_valid(
+    order_id: str,
+    payment_id: str,
+    signature: str,
+) -> bool:
+    if not RAZORPAY_KEY_SECRET:
+        return False
+    expected_signature = hmac.new(
+        RAZORPAY_KEY_SECRET.encode("utf-8"),
+        f"{order_id}|{payment_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return secrets.compare_digest(signature, expected_signature)
+
+
+def append_order_raw_payload(
+    order: OrderSnapshot,
+    key: str,
+    payload: dict[str, Any],
+) -> None:
+    raw_payload = load_json_object(order.raw_payload)
+    raw_payload[key] = payload
+    order.raw_payload = dump_json_object(raw_payload)
+
+
+def order_raw_payload(order: OrderSnapshot) -> dict[str, Any]:
+    return load_json_object(order.raw_payload)
+
+
+def order_expected_amount(order: OrderSnapshot) -> int:
+    return int(round(float(order.total or 0) * 100))
+
+
+def order_currency(order: OrderSnapshot) -> str:
+    return str(order.currency or "INR").upper()
+
+
+def order_finalization(order: OrderSnapshot) -> dict[str, Any]:
+    raw_payload = order_raw_payload(order)
+    finalization = raw_payload.get("razorpay_finalization")
+    return finalization if isinstance(finalization, dict) else {}
+
+
+def order_already_finalized(order: OrderSnapshot, payment_id: str) -> bool:
+    finalization = order_finalization(order)
+    if finalization.get("status") == "finalized" and finalization.get("payment_id") == payment_id:
+        return True
+    return order.payment_status in {"verified", "paid"} and order.payment_reference == payment_id
+
+
+def fetch_razorpay_payment(
+    payment_id: str,
+    fallback: dict[str, Any] | None = None,
+) -> tuple[int | None, dict[str, Any]]:
+    if razorpay_checkout_is_configured():
+        return call_razorpay(
+            "GET",
+            f"payments/{urllib.parse.quote(payment_id, safe='')}",
+        )
+    if fallback:
+        return None, fallback
+    raise RuntimeError("Razorpay payment confirmation API is not configured")
+
+
+def payment_amount(payment: dict[str, Any]) -> int:
+    return parse_optional_int(payment.get("amount"), default=0)
+
+
+def payment_currency(payment: dict[str, Any]) -> str:
+    return str(payment.get("currency") or "").upper()
+
+
+def payment_status(payment: dict[str, Any]) -> str:
+    return str(payment.get("status") or "").lower()
+
+
+def decrement_inventory_for_order(db: Session, order: OrderSnapshot) -> list[dict[str, Any]]:
+    updates: list[dict[str, Any]] = []
+    items = local_order_items(db, order.id)
+    quantities: dict[int, int] = {}
+    for item in items:
+        if item.backend_product_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{item.name} is missing backend inventory mapping",
+            )
+        quantities[item.backend_product_id] = quantities.get(item.backend_product_id, 0) + item.qty
+    # Lock in a stable order, including across different orders for the same stock.
+    products = {
+        product.id: product
+        for product in db.query(Product)
+        .filter(Product.id.in_(quantities))
+        .order_by(Product.id)
+        .populate_existing()
+        .with_for_update()
+        .all()
+    }
+    # Validate the entire basket before changing any stock.
+    for item in items:
+        product = products.get(item.backend_product_id)
+        if product is None:
+            raise HTTPException(status_code=409, detail=f"{item.name} is no longer available")
+        if not product.in_stock or product.stock_quantity < quantities[product.id]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{product.name} does not have enough stock to finalize payment",
+            )
+    for item in items:
+        product = products[item.backend_product_id]
+        before = product.stock_quantity
+        product.stock_quantity = before - item.qty
+        product.in_stock = product.stock_quantity > 0
+        updates.append(
+            {
+                "product_id": product.id,
+                "sku": product.sku,
+                "name": product.name,
+                "qty": item.qty,
+                "before": before,
+                "after": product.stock_quantity,
+            }
+        )
+    return updates
+
+
+def order_uses_firestore_commerce(order: OrderSnapshot) -> bool:
+    return order_snapshot_metadata(order).get("authority") == "firestore"
+
+
+def create_firestore_payment_attempt(
+    user: User,
+    order: OrderSnapshot,
+    calculation: dict[str, Any],
+    payload: RazorpayOrderCreate,
+    razorpay_response: dict[str, Any],
+) -> None:
+    if calculation.get("authority") != "firestore":
+        return
+    if not firestore_commerce_is_configured():
+        raise HTTPException(status_code=503, detail="Firestore checkout is not configured")
+
+    client = get_firestore_client()
+    metadata = calculation.get("metadata") if isinstance(calculation, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    firebase_uid = str(metadata.get("firebase_uid") or "").strip()
+    if not firebase_uid:
+        raise HTTPException(status_code=409, detail="Firestore checkout user mapping is missing")
+
+    attempt_ref = client.collection(FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION).document(
+        order.order_reference
+    )
+    attempt_ref.set(
+        {
+            "razorpayOrderId": order.order_reference,
+            "orderReference": order.order_reference,
+            "localOrderId": order.id,
+            "userId": firebase_uid,
+            "sonaUserId": user.id,
+            "amount": calculation["amount"],
+            "currency": calculation["currency"],
+            "payableTotal": calculation["payable_total"],
+            "couponDiscount": calculation.get("coupon_discount", 0),
+            "rewardPointsUsed": calculation.get("reward_points_used", 0),
+            "items": metadata.get("items") or [],
+            "metadata": metadata,
+            "clientPayload": payload.model_dump(mode="json"),
+            "razorpayOrder": razorpay_response,
+            "status": "payment_pending",
+            "finalized": False,
+            "createdAt": firestore_server_timestamp(),
+            "updatedAt": firestore_server_timestamp(),
+        },
+        merge=True,
+    )
+
+
+def firestore_cart_references(
+    user_ref: Any,
+    items: list[dict[str, Any]],
+    transaction: Any | None = None,
+) -> list[Any]:
+    cart_collection = user_ref.collection("cart")
+    references: dict[str, Any] = {}
+    for item in items:
+        direct_ids = [
+            item.get("cart_item_id"),
+            item.get("requested_product_id"),
+            item.get("firestore_product_id"),
+        ]
+        for doc_id in direct_ids:
+            doc_id = str(doc_id or "").strip()
+            if not doc_id:
+                continue
+            ref = cart_collection.document(doc_id)
+            snapshot = firestore_get(ref, transaction=transaction)
+            if firestore_snapshot_dict(snapshot):
+                references[getattr(ref, "path", doc_id)] = ref
+
+        product_id = str(item.get("requested_product_id") or item.get("product_id") or "").strip()
+        if product_id:
+            query = firestore_query_equal(cart_collection, "productId", product_id)
+            snapshot = firestore_stream_first(query, transaction=transaction)
+            if snapshot:
+                ref = cart_collection.document(firestore_document_id(snapshot, product_id))
+                references[getattr(ref, "path", product_id)] = ref
+    return list(references.values())
+
+
+def firestore_build_order_document(
+    order: OrderSnapshot,
+    metadata: dict[str, Any],
+    payment_id: str,
+    payment: dict[str, Any],
+    reward_points_earned: int,
+    referral_rewards_awarded: int,
+) -> dict[str, Any]:
+    coupon = metadata.get("coupon") if isinstance(metadata.get("coupon"), dict) else {}
+    rewards = metadata.get("rewards") if isinstance(metadata.get("rewards"), dict) else {}
+    gift_voucher = (
+        metadata.get("gift_voucher") if isinstance(metadata.get("gift_voucher"), dict) else {}
+    )
+    return {
+        "orderReference": order.order_reference,
+        "razorpayOrderId": order.order_reference,
+        "paymentProvider": "razorpay",
+        "paymentId": payment_id,
+        "paymentStatus": "verified",
+        "razorpayPaymentStatus": payment_status(payment),
+        "status": "placed",
+        "userId": metadata.get("firebase_uid"),
+        "sonaUserId": order.user_id,
+        "userEmail": order.customer_email,
+        "customerName": order.customer_name,
+        "customerPhone": order.customer_phone,
+        "shippingAddress": load_json_object(order.delivery_address),
+        "items": metadata.get("items") or [],
+        "total": order.total,
+        "originalTotal": metadata.get("subtotal", order.total),
+        "couponCode": coupon.get("code") or "",
+        "couponDiscount": coupon.get("discount") or 0,
+        "giftVoucherCode": gift_voucher.get("code") or "",
+        "giftVoucherRedeemed": gift_voucher.get("redeemed") or 0,
+        "totalAfterCoupon": round(
+            float(metadata.get("subtotal", order.total) or 0) - float(coupon.get("discount") or 0),
+            2,
+        ),
+        "rewardPointsUsed": rewards.get("consumed_points") or 0,
+        "rewardPointsEarned": reward_points_earned,
+        "referralRewardsAwarded": referral_rewards_awarded,
+        "currency": order.currency,
+        "updatedAt": firestore_server_timestamp(),
+        "createdAt": firestore_server_timestamp(),
+    }
+
+
+def finalize_firestore_commerce_payment(
+    order: OrderSnapshot,
+    payment_id: str,
+    payment: dict[str, Any],
+    source: str,
+    event_id: str | None = None,
+) -> dict[str, Any]:
+    if not firestore_commerce_is_configured():
+        raise HTTPException(status_code=503, detail="Firestore checkout is not configured")
+
+    client = get_firestore_client()
+    metadata = order_snapshot_metadata(order)
+    firebase_uid = str(metadata.get("firebase_uid") or "").strip()
+    if not firebase_uid:
+        raise HTTPException(status_code=409, detail="Firestore checkout user mapping is missing")
+
+    attempt_ref = client.collection(FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION).document(
+        order.order_reference
+    )
+    order_ref = client.collection(FIRESTORE_ORDERS_COLLECTION).document(order.order_reference)
+    user_ref = firestore_user_document(client, firebase_uid)
+    transaction = client.transaction()
+
+    def run_transaction(transaction: Any) -> dict[str, Any]:
+        attempt_snapshot = firestore_get(attempt_ref, transaction=transaction)
+        attempt_data = firestore_snapshot_dict(attempt_snapshot)
+        finalized_payment_id = str(attempt_data.get("paymentId") or "").strip()
+        if attempt_data.get("finalized") is True:
+            if finalized_payment_id and finalized_payment_id != payment_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Payment attempt was already finalized with another payment",
+                )
+            return {
+                "status": "idempotent",
+                "inventory_updates": [],
+                "reward_points_consumed": metadata.get("rewards", {}).get("consumed_points", 0),
+                "purchase_rewards_awarded": attempt_data.get("rewardPointsEarned", 0),
+                "referral_rewards_awarded": attempt_data.get("referralRewardsAwarded", 0),
+                "coupon_redeemed": bool(metadata.get("coupon", {}).get("discount")),
+                "gift_voucher_redeemed": bool(metadata.get("gift_voucher", {}).get("redeemed")),
+                "cart_cleanup": attempt_data.get("cartCleanup") or {},
+            }
+
+        expected_amount = parse_optional_int(
+            attempt_data.get("amount"), order_expected_amount(order)
+        )
+        expected_currency = str(attempt_data.get("currency") or order_currency(order)).upper()
+        if expected_amount != order_expected_amount(order) or expected_currency != order_currency(
+            order
+        ):
+            raise HTTPException(
+                status_code=409, detail="Payment attempt does not match local order"
+            )
+        if (
+            payment_amount(payment) != expected_amount
+            or payment_currency(payment) != expected_currency
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Razorpay payment amount or currency did not match the order",
+            )
+
+        items = metadata.get("items") if isinstance(metadata.get("items"), list) else []
+        product_updates: list[tuple[Any, dict[str, Any], dict[str, Any]]] = []
+        inventory_updates: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            reference = str(
+                item.get("firestore_product_id")
+                or item.get("requested_product_id")
+                or item.get("product_id")
+                or ""
+            ).strip()
+            if not reference:
+                raise HTTPException(status_code=409, detail="Order item is missing product mapping")
+            product_match = firestore_find_product(client, reference, transaction=transaction)
+            if product_match is None:
+                raise HTTPException(status_code=409, detail=f"Product {reference} was not found")
+            product_ref, snapshot, product = product_match
+            product_doc_id = firestore_document_id(snapshot, reference)
+            if not firestore_product_active(product):
+                raise HTTPException(status_code=409, detail=f"Product {reference} is not available")
+            quantity = max(parse_optional_int(item.get("qty"), 1), 1)
+            before_stock = firestore_product_stock(product)
+            if before_stock < quantity:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Product {reference} does not have enough stock",
+                )
+            after_stock = before_stock - quantity
+            update_payload = {
+                "stock": after_stock,
+                "stock_quantity": after_stock,
+                "stockQuantity": after_stock,
+                "in_stock": after_stock > 0,
+                "inStock": after_stock > 0,
+                "updatedAt": firestore_server_timestamp(),
+            }
+            product_updates.append((product_ref, update_payload, product))
+            inventory_updates.append(
+                {
+                    "product_id": product_doc_id,
+                    "name": firestore_first_value(product, ["name", "title"]) or product_doc_id,
+                    "qty": quantity,
+                    "before": before_stock,
+                    "after": after_stock,
+                }
+            )
+
+        coupon_data = metadata.get("coupon") if isinstance(metadata.get("coupon"), dict) else {}
+        expected_coupon_discount = firestore_to_float(coupon_data.get("discount"))
+        coupon_ref = None
+        if coupon_data.get("code") and expected_coupon_discount > 0:
+            coupon = firestore_validate_coupon(
+                client,
+                str(coupon_data["code"]),
+                firestore_to_float(metadata.get("subtotal")),
+                transaction=transaction,
+            )
+            if abs(firestore_to_float(coupon.get("discount")) - expected_coupon_discount) > 0.01:
+                raise HTTPException(status_code=409, detail="Coupon value changed before payment")
+            coupon_ref = coupon.get("ref")
+
+        gift_data = (
+            metadata.get("gift_voucher") if isinstance(metadata.get("gift_voucher"), dict) else {}
+        )
+        expected_gift_redeemed = firestore_to_float(gift_data.get("redeemed"))
+        gift_ref = None
+        if gift_data.get("code") and expected_gift_redeemed > 0:
+            gift_voucher = firestore_validate_gift_voucher(
+                client,
+                str(gift_data["code"]),
+                expected_gift_redeemed,
+                transaction=transaction,
+            )
+            if firestore_to_float(gift_voucher.get("redeemed")) + 0.01 < expected_gift_redeemed:
+                raise HTTPException(status_code=409, detail="Gift voucher balance changed")
+            gift_ref = gift_voucher.get("ref")
+
+        user_snapshot = firestore_get(user_ref, transaction=transaction)
+        user_data = firestore_snapshot_dict(user_snapshot)
+        rewards = metadata.get("rewards") if isinstance(metadata.get("rewards"), dict) else {}
+        reward_points_used = firestore_to_int(rewards.get("consumed_points"))
+        available_points = max(firestore_to_int(user_data.get("rewardPoints")), 0)
+        if reward_points_used > available_points:
+            raise HTTPException(status_code=409, detail="Reward point balance changed")
+        reward_points_earned = int(float(order.total or 0) // PURCHASE_REWARD_RUPEES_PER_POINT)
+        reward_delta = reward_points_earned - reward_points_used
+
+        referral_rewards_awarded = 0
+        referrer_uid = str(
+            user_data.get("referredBy")
+            or user_data.get("referred_by")
+            or user_data.get("referrerUid")
+            or ""
+        ).strip()
+        referrer_ref = None
+        if (
+            REFERRAL_REWARD_POINTS > 0
+            and referrer_uid
+            and user_data.get("firstPurchaseReferralRewarded") is not True
+        ):
+            referrer_ref = firestore_user_document(client, referrer_uid)
+            firestore_get(referrer_ref, transaction=transaction)
+            referral_rewards_awarded = REFERRAL_REWARD_POINTS
+
+        cart_refs = firestore_cart_references(user_ref, items, transaction=transaction)
+
+        for product_ref, update_payload, _ in product_updates:
+            transaction.update(product_ref, update_payload)
+        transaction.set(
+            user_ref,
+            {
+                "rewardPoints": firestore_increment(reward_delta),
+                "lastOrderId": order.order_reference,
+                "updatedAt": firestore_server_timestamp(),
+                **({"firstPurchaseReferralRewarded": True} if referral_rewards_awarded else {}),
+            },
+            merge=True,
+        )
+        if referrer_ref is not None and referral_rewards_awarded:
+            transaction.set(
+                referrer_ref,
+                {
+                    "rewardPoints": firestore_increment(referral_rewards_awarded),
+                    "updatedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+        if coupon_ref is not None:
+            transaction.set(
+                coupon_ref.collection("redemptions").document(order.order_reference),
+                {
+                    "orderReference": order.order_reference,
+                    "userId": firebase_uid,
+                    "discount": expected_coupon_discount,
+                    "redeemedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+            transaction.set(
+                coupon_ref,
+                {
+                    "redeemedCount": firestore_increment(1),
+                    "lastRedeemedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+        if gift_ref is not None and expected_gift_redeemed > 0:
+            transaction.set(
+                gift_ref.collection("redemptions").document(order.order_reference),
+                {
+                    "orderReference": order.order_reference,
+                    "userId": firebase_uid,
+                    "amount": expected_gift_redeemed,
+                    "redeemedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+            transaction.set(
+                gift_ref,
+                {
+                    "balance": firestore_increment(-expected_gift_redeemed),
+                    "updatedAt": firestore_server_timestamp(),
+                },
+                merge=True,
+            )
+
+        for cart_ref in cart_refs:
+            transaction.delete(cart_ref)
+
+        cart_cleanup = {
+            "status": "completed" if cart_refs else "not_found",
+            "cart_item_ids": metadata.get("cart_cleanup", {}).get("cart_item_ids") or [],
+            "removed_count": len(cart_refs),
+        }
+        order_document = firestore_build_order_document(
+            order,
+            metadata,
+            payment_id,
+            payment,
+            reward_points_earned,
+            referral_rewards_awarded,
+        )
+        transaction.set(order_ref, order_document, merge=True)
+        transaction.set(
+            attempt_ref,
+            {
+                "status": "finalized",
+                "finalized": True,
+                "paymentId": payment_id,
+                "paymentStatus": "verified",
+                "source": source,
+                "eventId": event_id,
+                "inventoryUpdates": inventory_updates,
+                "rewardPointsUsed": reward_points_used,
+                "rewardPointsEarned": reward_points_earned,
+                "referralRewardsAwarded": referral_rewards_awarded,
+                "couponRedeemed": coupon_ref is not None,
+                "giftVoucherRedeemed": gift_ref is not None,
+                "cartCleanup": cart_cleanup,
+                "updatedAt": firestore_server_timestamp(),
+                "finalizedAt": firestore_server_timestamp(),
+            },
+            merge=True,
+        )
+        return {
+            "status": "finalized",
+            "inventory_updates": inventory_updates,
+            "reward_points_consumed": reward_points_used,
+            "purchase_rewards_awarded": reward_points_earned,
+            "referral_rewards_awarded": referral_rewards_awarded,
+            "coupon_redeemed": coupon_ref is not None,
+            "gift_voucher_redeemed": gift_ref is not None,
+            "cart_cleanup": cart_cleanup,
+        }
+
+    transactional = getattr(firebase_firestore, "transactional", None)
+    if transactional:
+        return transactional(run_transaction)(transaction)
+    return run_transaction(transaction)
+
+
+def mark_razorpay_finalization_failure(
+    db: Session,
+    order: OrderSnapshot,
+    payment_id: str,
+    reason: str,
+    source: str,
+    payment: dict[str, Any],
+    event_id: str | None = None,
+) -> None:
+    failure_payload = {
+        "status": "failed",
+        "reason": reason,
+        "source": source,
+        "payment_id": payment_id,
+        "event_id": event_id,
+        "payment_status": payment_status(payment) or None,
+        "payment_amount": payment_amount(payment) or None,
+        "payment_currency": payment_currency(payment) or None,
+        "expected_amount": order_expected_amount(order),
+        "expected_currency": order_currency(order),
+        "failed_at": utc_now().isoformat(),
+    }
+    append_order_raw_payload(order, "razorpay_finalization_failure", failure_payload)
+    order.updated_at = utc_now()
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="finalize_payment",
+        status_value="failed",
+        user_id=order.user_id,
+        reference=order.order_reference,
+        request_payload=failure_payload,
+        error=reason,
+    )
+    send_monitoring_alert(
+        "payments.razorpay_finalization_failed",
+        severity="error",
+        payload={
+            "order_reference": order.order_reference,
+            "payment_id": payment_id,
+            "reason": reason,
+            "source": source,
+        },
+    )
+
+
+def finalize_razorpay_payment(
+    db: Session,
+    order: OrderSnapshot,
+    payment_id: str,
+    source: str,
+    payment: dict[str, Any] | None = None,
+    event_id: str | None = None,
+) -> dict[str, Any]:
+    # Serialize verify/webhook/reconciliation for this order. Refresh any stale
+    # identity-map copy after waiting for the other transaction to commit.
+    order = (
+        db.query(OrderSnapshot)
+        .filter(OrderSnapshot.id == order.id)
+        .populate_existing()
+        .with_for_update()
+        .one()
+    )
+    if order_already_finalized(order, payment_id):
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="finalize_payment",
+            status_value="idempotent",
+            user_id=order.user_id,
+            reference=order.order_reference,
+            request_payload={
+                "payment_id": payment_id,
+                "source": source,
+                "event_id": event_id,
+            },
+        )
+        return {"status": "idempotent", "order": order}
+
+    if order_finalization(order).get("status") == "finalized" or order.payment_status in {
+        "verified", "paid"
+    }:
+        raise HTTPException(status_code=409, detail="Order already finalized with another payment")
+
+    try:
+        _, confirmed_payment = fetch_razorpay_payment(payment_id, fallback=payment)
+    except Exception as exc:
+        mark_razorpay_finalization_failure(
+            db,
+            order,
+            payment_id,
+            "payment_confirmation_failed",
+            source,
+            payment or {},
+            event_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not confirm Razorpay payment status",
+        ) from exc
+
+    confirmed_status = payment_status(confirmed_payment)
+    if confirmed_status != "captured":
+        if confirmed_status in {"failed", "authorized"}:
+            order.payment_status = confirmed_status
+        mark_razorpay_finalization_failure(
+            db,
+            order,
+            payment_id,
+            f"payment_not_captured:{confirmed_status or 'unknown'}",
+            source,
+            confirmed_payment,
+            event_id,
+        )
+        raise HTTPException(status_code=409, detail="Razorpay payment is not captured")
+
+    actual_amount = payment_amount(confirmed_payment)
+    actual_currency = payment_currency(confirmed_payment)
+    expected_amount = order_expected_amount(order)
+    expected_currency = order_currency(order)
+    if actual_amount != expected_amount or actual_currency != expected_currency:
+        mark_razorpay_finalization_failure(
+            db,
+            order,
+            payment_id,
+            "amount_or_currency_mismatch",
+            source,
+            confirmed_payment,
+            event_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Razorpay payment amount or currency did not match the order",
+        )
+
+    try:
+        if order_uses_firestore_commerce(order):
+            commerce_finalization = finalize_firestore_commerce_payment(
+                order,
+                payment_id,
+                confirmed_payment,
+                source,
+                event_id,
+            )
+            inventory_updates = commerce_finalization.get("inventory_updates", [])
+        else:
+            commerce_finalization = {}
+            # Callers retain failure audit records, but must never commit a
+            # partially decremented basket when downstream finalization fails.
+            with db.begin_nested():
+                inventory_updates = decrement_inventory_for_order(db, order)
+                from commerce import clean_paid_cart
+
+                commerce_finalization = clean_paid_cart(db, order)
+    except HTTPException:
+        mark_razorpay_finalization_failure(
+            db,
+            order,
+            payment_id,
+            "inventory_finalization_failed",
+            source,
+            confirmed_payment,
+            event_id,
+        )
+        raise
+
+    now = utc_now()
+    order.payment_status = "verified"
+    order.payment_reference = payment_id
+    if order.status in {"", "created", "payment_pending", "pending_payment"}:
+        order.status = "placed"
+    order.updated_at = now
+
+    raw_payload = order_raw_payload(order)
+    metadata = raw_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    cart_cleanup = metadata.get("cart_cleanup")
+    cart_cleanup = cart_cleanup if isinstance(cart_cleanup, dict) else {}
+    finalization_payload = {
+        "status": "finalized",
+        "payment_id": payment_id,
+        "source": source,
+        "event_id": event_id,
+        "amount": actual_amount,
+        "currency": actual_currency,
+        "finalized_at": now.isoformat(),
+        "inventory_decremented": True,
+        "inventory_updates": inventory_updates,
+        "reward_points_consumed": commerce_finalization.get("reward_points_consumed", 0),
+        "purchase_rewards_awarded": commerce_finalization.get("purchase_rewards_awarded", 0),
+        "referral_rewards_awarded": commerce_finalization.get("referral_rewards_awarded", 0),
+        "coupon_redeemed": commerce_finalization.get("coupon_redeemed", False),
+        "gift_voucher_redeemed": commerce_finalization.get("gift_voucher_redeemed", False),
+        "cart_cleanup": commerce_finalization.get(
+            "cart_cleanup",
+            {
+                "status": "pending_client_cleanup"
+                if cart_cleanup.get("cart_item_ids")
+                else "not_available",
+                "cart_item_ids": cart_cleanup.get("cart_item_ids") or [],
+            },
+        ),
+    }
+    raw_payload["razorpay_finalization"] = finalization_payload
+    order.raw_payload = dump_json_object(raw_payload)
+    from order_notifications import enqueue_verified_payment
+
+    enqueue_verified_payment(db, order)
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="finalize_payment",
+        status_value="finalized",
+        user_id=order.user_id,
+        reference=order.order_reference,
+        request_payload={
+            "payment_id": payment_id,
+            "source": source,
+            "event_id": event_id,
+        },
+        response_payload=finalization_payload,
+    )
+    return {"status": "finalized", "order": order}
+
+
+def razorpay_entity(payload: dict[str, Any], kind: str) -> dict[str, Any]:
+    envelope = payload.get("payload")
+    if not isinstance(envelope, dict):
+        return {}
+    resource = envelope.get(kind)
+    if not isinstance(resource, dict):
+        return {}
+    entity = resource.get("entity")
+    return entity if isinstance(entity, dict) else {}
+
+
+def find_order_by_razorpay_ids(
+    db: Session,
+    razorpay_order_id: str | None,
+    payment_id: str | None,
+) -> OrderSnapshot | None:
+    filters = []
+    if razorpay_order_id:
+        filters.append(OrderSnapshot.order_reference == razorpay_order_id)
+    if payment_id:
+        filters.append(OrderSnapshot.payment_reference == payment_id)
+    if not filters:
+        return None
+    return (
+        db.query(OrderSnapshot)
+        .filter(or_(*filters))
+        .order_by(OrderSnapshot.updated_at.desc(), OrderSnapshot.id.desc())
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+
+
+def razorpay_payment_status(event_name: str, payment: dict[str, Any]) -> str | None:
+    payment_state = str(payment.get("status") or "").lower()
+    if event_name == "payment.captured" or payment_state == "captured":
+        return "verified"
+    if event_name == "payment.authorized" or payment_state == "authorized":
+        return "authorized"
+    if event_name == "payment.failed" or payment_state == "failed":
+        return "failed"
+    if event_name == "refund.processed":
+        return "refunded"
+    if event_name == "refund.failed":
+        return "refund_failed"
+    if event_name == "refund.created":
+        return "refund_pending"
+    return None
+
+
+def razorpay_dispute_status(event_name: str) -> str | None:
+    if not event_name.startswith("payment.dispute"):
+        return None
+    if event_name.endswith(".won"):
+        return "dispute_won"
+    if event_name.endswith(".lost"):
+        return "dispute_lost"
+    if event_name.endswith(".closed"):
+        return "dispute_closed"
+    return "dispute_open"
+
+
+def razorpay_webhook_event_id(
+    payload: dict[str, Any],
+    event_name: str,
+    razorpay_order_id: str | None,
+    payment_id: str | None,
+) -> str:
+    event_id = str(payload.get("id") or "").strip()
+    if event_id:
+        return event_id
+    reference = payment_id or razorpay_order_id or str(payload.get("created_at") or "")
+    return f"{event_name}:{reference or hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode('utf-8')).hexdigest()}"
+
+
+def razorpay_webhook_event_exists(db: Session, event_id: str) -> bool:
+    return (
+        db.query(ExternalIntegrationEvent)
+        .filter(
+            ExternalIntegrationEvent.service == "razorpay",
+            ExternalIntegrationEvent.action == "webhook_event",
+            ExternalIntegrationEvent.reference == event_id,
+        )
+        .first()
+        is not None
+    )
+
+
+def apply_razorpay_webhook(
+    db: Session,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    event_name = str(payload.get("event") or "unknown")
+    payment = razorpay_entity(payload, "payment")
+    refund = razorpay_entity(payload, "refund")
+    dispute = razorpay_entity(payload, "dispute")
+    order_entity = razorpay_entity(payload, "order")
+    payment_id = str(
+        payment.get("id") or refund.get("payment_id") or dispute.get("payment_id") or ""
+    ).strip()
+    razorpay_order_id = str(payment.get("order_id") or order_entity.get("id") or "").strip()
+    amount = payment.get("amount") or refund.get("amount")
+    currency = payment.get("currency") or refund.get("currency")
+    event_id = razorpay_webhook_event_id(
+        payload,
+        event_name,
+        razorpay_order_id or None,
+        payment_id or None,
+    )
+    if razorpay_webhook_event_exists(db, event_id):
+        return {
+            "event": event_name,
+            "status": "duplicate",
+            "order_reference": razorpay_order_id or None,
+            "payment_id": payment_id or None,
+        }
+
+    audit_payload = {
+        "event_id": event_id,
+        "event": event_name,
+        "payment_id": payment_id or None,
+        "razorpay_order_id": razorpay_order_id or None,
+        "payment_status": payment.get("status") or None,
+        "amount": amount,
+        "currency": currency,
+    }
+    order = find_order_by_razorpay_ids(db, razorpay_order_id, payment_id)
+    # Another delivery may have committed while this request waited for the order lock.
+    if order is not None and razorpay_webhook_event_exists(db, event_id):
+        return {
+            "event": event_name, "status": "duplicate",
+            "order_reference": razorpay_order_id or None, "payment_id": payment_id or None,
+        }
+    response_payload: dict[str, Any] = {}
+    status_value = "unmatched"
+
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="webhook_event",
+        status_value="received",
+        user_id=order.user_id if order else None,
+        reference=event_id,
+        request_payload=audit_payload,
+    )
+
+    if order is not None:
+        status_value = "received"
+        if event_name == "payment.captured":
+            if not payment_id:
+                status_value = "finalization_failed"
+                response_payload["error"] = "Missing Razorpay payment id"
+                send_monitoring_alert(
+                    "payments.razorpay_webhook_missing_payment_id",
+                    severity="error",
+                    payload=audit_payload,
+                )
+            else:
+                try:
+                    finalization = finalize_razorpay_payment(
+                        db,
+                        order,
+                        payment_id,
+                        source="webhook",
+                        payment=payment,
+                        event_id=event_id,
+                    )
+                    status_value = str(finalization["status"])
+                except HTTPException as exc:
+                    status_value = "finalization_failed"
+                    response_payload["error"] = exc.detail
+        else:
+            normalized_payment_status = razorpay_payment_status(event_name, payment)
+            normalized_dispute_status = razorpay_dispute_status(event_name)
+            normalized_status = normalized_payment_status or normalized_dispute_status
+            if normalized_status:
+                if normalized_status == "failed" and order.payment_status in {"verified", "paid"}:
+                    status_value = "ignored_out_of_order"
+                else:
+                    order.payment_status = normalized_status
+                    status_value = "updated"
+            if payment_id and not order.payment_reference:
+                order.payment_reference = payment_id
+            if normalized_dispute_status:
+                send_monitoring_alert(
+                    "payments.razorpay_dispute_event",
+                    severity="warning",
+                    payload={
+                        "order_reference": order.order_reference,
+                        "payment_id": payment_id,
+                        "event": event_name,
+                    },
+                )
+        append_order_raw_payload(order, "last_razorpay_webhook", audit_payload)
+        order.updated_at = utc_now()
+        response_payload = {
+            **response_payload,
+            "order_snapshot_id": order.id,
+            "order_reference": order.order_reference,
+            "payment_status": order.payment_status,
+        }
+    else:
+        send_monitoring_alert(
+            "payments.razorpay_unmatched_webhook",
+            severity="warning",
+            payload=audit_payload,
+        )
+
+    record_integration_event(
+        db,
+        service="razorpay",
+        action=event_name,
+        status_value=status_value,
+        user_id=order.user_id if order else None,
+        reference=razorpay_order_id or payment_id or None,
+        request_payload=audit_payload,
+        response_payload=response_payload,
+    )
+    return {
+        "event": event_name,
+        "status": status_value,
+        "order_reference": razorpay_order_id or None,
+        "payment_id": payment_id or None,
+    }
+
+
+def reconcile_razorpay_orders(db: Session, limit: int = 50) -> dict[str, Any]:
+    candidates = (
+        db.query(OrderSnapshot)
+        .filter(
+            OrderSnapshot.source == "razorpay_checkout",
+            or_(
+                OrderSnapshot.payment_status.is_(None),
+                OrderSnapshot.payment_status.in_(
+                    ["pending", "authorized", "created", "payment_pending"]
+                ),
+            ),
+        )
+        .order_by(OrderSnapshot.created_at.asc(), OrderSnapshot.id.asc())
+        .limit(limit)
+        .all()
+    )
+    result = {
+        "checked": len(candidates),
+        "finalized": 0,
+        "already_finalized": 0,
+        "no_captured_payment": 0,
+        "failed": 0,
+        "errors": [],
+    }
+    for order in candidates:
+        try:
+            _, payments_response = call_razorpay(
+                "GET",
+                f"orders/{urllib.parse.quote(order.order_reference, safe='')}/payments",
+            )
+            payments = payments_response.get("items")
+            payments = payments if isinstance(payments, list) else []
+            captured_payments = [
+                item
+                for item in payments
+                if isinstance(item, dict) and payment_status(item) == "captured"
+            ]
+            if not captured_payments:
+                result["no_captured_payment"] += 1
+                continue
+
+            captured_payment = captured_payments[-1]
+            payment_id = str(captured_payment.get("id") or "").strip()
+            if not payment_id:
+                raise HTTPException(status_code=409, detail="Captured payment is missing id")
+            # Reconciliation catches arbitrary failures and later commits its
+            # audit. Preserve payment/stock/inbox/outbox atomicity on that path.
+            with db.begin_nested():
+                finalization = finalize_razorpay_payment(
+                    db,
+                    order,
+                    payment_id,
+                    source="reconciliation",
+                    payment=captured_payment,
+                )
+            if finalization["status"] == "idempotent":
+                result["already_finalized"] += 1
+            else:
+                result["finalized"] += 1
+        except Exception as exc:
+            result["failed"] += 1
+            result["errors"].append(
+                {
+                    "order_reference": order.order_reference,
+                    "error": exc.__class__.__name__,
+                }
+            )
+            record_integration_event(
+                db,
+                service="razorpay",
+                action="reconcile_payment",
+                status_value="failed",
+                user_id=order.user_id,
+                reference=order.order_reference,
+                error=exc.__class__.__name__,
+            )
+            send_monitoring_alert(
+                "payments.razorpay_reconciliation_failed",
+                severity="error",
+                payload={
+                    "order_reference": order.order_reference,
+                    "error": exc.__class__.__name__,
+                },
+            )
+    return result
+
+
+def integration_status() -> dict[str, Any]:
+    return {
+        "order_backend": {
+            "enabled": True,
+            "source": "local_postgres",
+        },
+        "oms": {
+            "enabled": oms_is_configured(),
+            "base_url_configured": bool(OMS_BASE_URL),
+            "api_key_configured": bool(OMS_API_KEY),
+        },
+        "firebase_auth": {
+            "enabled": firebase_auth_is_configured(),
+            "project_id_configured": bool(FIREBASE_PROJECT_ID),
+            "require_email_verified": FIREBASE_REQUIRE_EMAIL_VERIFIED,
+        },
+        "firestore_commerce": {
+            "enabled": FIRESTORE_COMMERCE_ENABLED,
+            "configured": firestore_commerce_is_configured(),
+            "products_collection": FIRESTORE_PRODUCTS_COLLECTION,
+            "orders_collection": FIRESTORE_ORDERS_COLLECTION,
+            "payment_attempts_collection": FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION,
+        },
+        "sms_otp": {
+            "enabled": SMS_OTP_ENABLED,
+            "provider": SMS_PROVIDER,
+            "configured": sms_otp_is_configured(),
+        },
+        "razorpay": {
+            "webhook_configured": razorpay_webhook_is_configured(),
+            "checkout_api_configured": razorpay_checkout_is_configured(),
+        },
+        "llm": {
+            "enabled": LLM_ENABLED and bool(LLM_BASE_URL and LLM_API_KEY),
+            "base_url_configured": bool(LLM_BASE_URL),
+            "api_key_configured": bool(LLM_API_KEY),
+            "model": LLM_MODEL,
+        },
+        "monitoring": {
+            "webhook_configured": bool(MONITORING_WEBHOOK_URL),
+            "sentry_configured": bool(SENTRY_DSN),
+            "sentry_active": sentry_is_configured(),
+            "sentry_release_configured": bool(SENTRY_RELEASE),
+            "sentry_traces_sample_rate": SENTRY_TRACES_SAMPLE_RATE,
+            "sentry_profiles_sample_rate": SENTRY_PROFILES_SAMPLE_RATE,
+            "sentry_send_default_pii": SENTRY_SEND_DEFAULT_PII,
+            "alert_error_threshold": ALERT_ERROR_THRESHOLD,
+        },
+    }
+
+
+def oms_is_configured() -> bool:
+    return OMS_ENABLED and bool(OMS_BASE_URL)
+
+
+def oms_headers() -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if OMS_API_KEY:
+        headers["Authorization"] = f"Bearer {OMS_API_KEY}"
+    return headers
+
+
+def call_oms(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if not oms_is_configured():
+        raise RuntimeError("OMS integration is not configured")
+    url = f"{OMS_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    increment_metric("oms_requests")
+    return json_http_request(method, url, payload, oms_headers(), OMS_TIMEOUT_SECONDS)
+
+
+def lookup_oms_order(order_reference: str) -> tuple[str, dict[str, Any], str | None, int | None]:
+    if not oms_is_configured():
+        return "disabled", {}, "OMS integration is not configured", None
+
+    try:
+        status_code, body = call_oms("GET", f"/orders/{order_reference}")
+    except urllib.error.HTTPError as exc:
+        increment_metric("oms_failures")
+        return "failed", {}, f"OMS returned {exc.code}", exc.code
+    except Exception as exc:
+        increment_metric("oms_failures")
+        return "failed", {}, exc.__class__.__name__, None
+
+    return "synced", body, None, status_code
+
+
+def submit_oms_order_action(
+    order_reference: str | None,
+    action: str,
+    payload: dict[str, Any],
+) -> tuple[str, dict[str, Any], str | None, int | None]:
+    if not order_reference:
+        return "capture_only", {}, "Missing order reference", None
+    if not oms_is_configured():
+        return "capture_only", {}, "OMS integration is not configured", None
+
+    try:
+        status_code, body = call_oms("POST", f"/orders/{order_reference}/{action}", payload)
+    except urllib.error.HTTPError as exc:
+        increment_metric("oms_failures")
+        return "failed", {}, f"OMS returned {exc.code}", exc.code
+    except Exception as exc:
+        increment_metric("oms_failures")
+        return "failed", {}, exc.__class__.__name__, None
+
+    return "synced", body, None, status_code
+
+
+def lookup_order_backend(
+    db: Session,
+    user: User,
+    order_reference: str,
+) -> tuple[str, dict[str, Any], str | None, int | None]:
+    integration_state, data, error, status_code = lookup_oms_order(order_reference)
+    if integration_state == "synced":
+        return integration_state, data, error, status_code
+
+    local_order = local_order_for_user(db, user.id, order_reference)
+    if local_order:
+        fallback_state = "local" if integration_state == "disabled" else "local_fallback"
+        return fallback_state, local_order_lookup_data(db, local_order), error, status_code
+
+    return integration_state, data, error, status_code
+
+
+def submit_order_action_backend(
+    db: Session,
+    user: User,
+    order_reference: str | None,
+    action: str,
+    payload: dict[str, Any],
+) -> tuple[str, dict[str, Any], str | None, int | None]:
+    integration_state, data, error, status_code = submit_oms_order_action(
+        order_reference,
+        action,
+        payload,
+    )
+    if integration_state == "synced":
+        return integration_state, data, error, status_code
+
+    if order_reference:
+        local_order = local_order_for_user(db, user.id, order_reference)
+        if local_order:
+            local_order.status = f"{action}_requested"
+            local_order.updated_at = utc_now()
+            fallback_state = "local" if integration_state == "capture_only" else "local_fallback"
+            return fallback_state, local_order_lookup_data(db, local_order), error, status_code
+
+    return integration_state, data, error, status_code
+
+
+def order_request_status(integration_state: str) -> str:
+    if integration_state == "synced":
+        return "synced_to_oms"
+    if integration_state in {"local", "local_fallback"}:
+        return "synced_to_order_backend"
+    if integration_state == "failed":
+        return "oms_failed"
+    return "received"
+
+
+def llm_is_configured() -> bool:
+    return LLM_ENABLED and bool(LLM_BASE_URL and LLM_API_KEY)
+
+
+def normalized_llm_base_url() -> str:
+    return LLM_BASE_URL.rstrip("/") if LLM_BASE_URL else ""
+
+
+def llm_uses_openai_responses_api() -> bool:
+    base_url = normalized_llm_base_url().lower()
+    return "api.openai.com" in base_url and not base_url.endswith("/chat/completions")
+
+
+def llm_endpoint_url() -> str:
+    base_url = normalized_llm_base_url()
+    if llm_uses_openai_responses_api():
+        if base_url.endswith("/responses"):
+            return base_url
+        return f"{base_url}/responses"
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
+LLM_CONTEXT_PRODUCT_LIMIT = 5
+LLM_CONTEXT_KNOWLEDGE_LIMIT = 4
+LLM_REPLY_MAX_CHARS = 900
+LLM_UNSAFE_REPLY_PATTERNS = [
+    r"\bguaranteed\s+(?:return|profit|investment)\b",
+    r"\binvestment\s+guarantee\b",
+    r"\bmedical\s+(?:advice|claim|cure|treatment)\b",
+    r"\b(?:password|otp|one[-\s]?time password)\b",
+    r"\b(?:upi|bank account|credit card|debit card)\b",
+    r"https?://",
+]
+LLM_SYSTEM_INSTRUCTIONS = (
+    "You are a jewellery ecommerce assistant. Answer only from the supplied catalog, FAQ, "
+    "and policy context. Do not invent stock, pricing, discounts, certification, warranty, "
+    "medical claims, investment guarantees, payment links, or order actions. Keep the answer "
+    "under 120 words. If the context is insufficient, ask one short follow-up or suggest "
+    "human support."
+)
+
+
+def tokenize_for_relevance(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {token for token in re.findall(r"[a-z0-9]+", value.lower()) if len(token) >= 3}
+
+
+def knowledge_item_tags(item: KnowledgeBaseItem) -> list[Any]:
+    return load_json_list(item.tags)
+
+
+def relevant_knowledge_items(
+    db: Session,
+    message: str,
+    filters: dict[str, Any],
+    limit: int = LLM_CONTEXT_KNOWLEDGE_LIMIT,
+) -> list[KnowledgeBaseItem]:
+    search_parts = []
+    for value in [message, *compact_filters(filters).values()]:
+        if value is None or value is False or value == "":
+            continue
+        search_parts.append(str(value))
+    search_text = " ".join(search_parts)
+    search_tokens = tokenize_for_relevance(search_text)
+    if not search_tokens:
+        return []
+
+    candidates = (
+        db.query(KnowledgeBaseItem)
+        .filter(KnowledgeBaseItem.is_active == True)
+        .order_by(
+            KnowledgeBaseItem.kind.asc(), KnowledgeBaseItem.title.asc(), KnowledgeBaseItem.id.asc()
+        )
+        .all()
+    )
+    scored_items: list[tuple[int, KnowledgeBaseItem]] = []
+    for item in candidates:
+        title_tokens = tokenize_for_relevance(item.title)
+        tag_tokens = tokenize_for_relevance(" ".join(str(tag) for tag in knowledge_item_tags(item)))
+        content_tokens = tokenize_for_relevance(item.content)
+        score = (
+            len(search_tokens & title_tokens) * 4
+            + len(search_tokens & tag_tokens) * 3
+            + len(search_tokens & content_tokens)
+        )
+        if score > 0:
+            scored_items.append((score, item))
+
+    scored_items.sort(key=lambda row: (-row[0], row[1].kind, row[1].title, row[1].id))
+    return [item for _, item in scored_items[:limit]]
+
+
+def llm_product_context(products: list[Product]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": product.id,
+            "name": product.name,
+            "category": product.category,
+            "metal": product.metal,
+            "price": product.price,
+            "in_stock": product.in_stock,
+            "stock_quantity": product.stock_quantity,
+            "product_type": product.product_type,
+            "audience": product.audience,
+            "purity": product.purity,
+            "weight": product.weight,
+            "tags": product.tags or [],
+            "occasion": product.occasion or [],
+            "style": product.style or [],
+        }
+        for product in products[:LLM_CONTEXT_PRODUCT_LIMIT]
+    ]
+
+
+def llm_knowledge_context(knowledge_items: list[KnowledgeBaseItem]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": item.id,
+            "kind": item.kind,
+            "title": item.title,
+            "content": item.content[:700],
+            "tags": knowledge_item_tags(item)[:8],
+        }
+        for item in knowledge_items[:LLM_CONTEXT_KNOWLEDGE_LIMIT]
+    ]
+
+
+def validate_llm_reply(generated: str, fallback_reply: str) -> str:
+    reply = re.sub(r"\s+", " ", generated).strip()
+    if not reply:
+        raise ValueError("LLM returned an empty response")
+    if len(reply) > LLM_REPLY_MAX_CHARS:
+        raise ValueError("LLM response exceeded safe length")
+    for pattern in LLM_UNSAFE_REPLY_PATTERNS:
+        if re.search(pattern, reply, flags=re.IGNORECASE):
+            raise ValueError("LLM response failed safety checks")
+    if fallback_reply and reply.lower() == fallback_reply.lower():
+        return fallback_reply
+    return reply
+
+
+def build_llm_prompt(
+    message: str,
+    products: list[Product],
+    knowledge_items: list[KnowledgeBaseItem],
+    filters: dict[str, Any],
+    fallback_reply: str,
+) -> dict[str, Any]:
+    product_context = llm_product_context(products)
+    knowledge_context = llm_knowledge_context(knowledge_items)
+    grounded_context = {
+        "customer_message": message,
+        "applied_filters": compact_filters(filters),
+        "catalog_products": product_context,
+        "knowledge_context": knowledge_context,
+        "fallback_reply": fallback_reply,
+    }
+
+    if llm_uses_openai_responses_api():
+        payload: dict[str, Any] = {
+            "model": LLM_MODEL,
+            "instructions": LLM_SYSTEM_INSTRUCTIONS,
+            "input": json.dumps(grounded_context, default=str),
+            "max_output_tokens": LLM_MAX_TOKENS,
+        }
+        if LLM_MODEL.startswith("gpt-6"):
+            payload["reasoning"] = {"effort": "low"}
+        return payload
+
+    return {
+        "model": LLM_MODEL,
+        "temperature": 0.2,
+        "max_tokens": LLM_MAX_TOKENS,
+        "messages": [
+            {
+                "role": "system",
+                "content": LLM_SYSTEM_INSTRUCTIONS,
+            },
+            {
+                "role": "user",
+                "content": json.dumps(grounded_context, default=str),
+            },
+        ],
+    }
+
+
+def extract_llm_generated_text(body: dict[str, Any]) -> str:
+    output_text = body.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    output = body.get("output", [])
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content_items = item.get("content", [])
+            if not isinstance(content_items, list):
+                continue
+            for content in content_items:
+                if not isinstance(content, dict):
+                    continue
+                text = content.get("text") or content.get("output_text")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+
+    choices = body.get("choices", [])
+    if choices:
+        message_body = choices[0].get("message", {})
+        return str(message_body.get("content") or "").strip()
+    return ""
+
+
+def try_llm_reply(
+    db: Session,
+    user: User,
+    message: str,
+    products: list[Product],
+    filters: dict[str, Any],
+    fallback_reply: str,
+) -> tuple[str, str, list[str]]:
+    if not llm_is_configured():
+        return fallback_reply, "rules", []
+
+    knowledge_items = relevant_knowledge_items(db, message, filters)
+    payload = build_llm_prompt(message, products, knowledge_items, filters, fallback_reply)
+    increment_metric("llm_requests")
+    try:
+        status_code, body = json_http_request(
+            "POST",
+            llm_endpoint_url(),
+            payload,
+            {"Authorization": f"Bearer {LLM_API_KEY}"},
+            LLM_TIMEOUT_SECONDS,
+        )
+        generated = extract_llm_generated_text(body)
+        generated = validate_llm_reply(generated, fallback_reply)
+        record_integration_event(
+            db,
+            service="llm",
+            action="responses" if llm_uses_openai_responses_api() else "chat_completion",
+            status_value="synced",
+            user_id=user.id,
+            request_payload={
+                "message": message,
+                "model": LLM_MODEL,
+                "product_ids": [product.id for product in products[:LLM_CONTEXT_PRODUCT_LIMIT]],
+                "knowledge_ids": [item.id for item in knowledge_items],
+            },
+            response_payload={"reply": generated},
+            status_code=status_code,
+        )
+        tool_calls = ["llm_completion"]
+        if knowledge_items:
+            tool_calls.insert(0, "knowledge_lookup")
+        return generated, "llm_grounded_catalog", tool_calls
+    except Exception as exc:
+        increment_metric("llm_failures")
+        record_integration_event(
+            db,
+            service="llm",
+            action="responses" if llm_uses_openai_responses_api() else "chat_completion",
+            status_value="failed",
+            user_id=user.id,
+            request_payload={
+                "message": message,
+                "model": LLM_MODEL,
+                "product_ids": [product.id for product in products[:LLM_CONTEXT_PRODUCT_LIMIT]],
+                "knowledge_ids": [item.id for item in knowledge_items],
+            },
+            error=exc.__class__.__name__,
+        )
+        log_event(
+            "llm.request_failed",
+            level=logging.WARNING,
+            user_id=user.id,
+            error_type=exc.__class__.__name__,
+        )
+        return fallback_reply, "rules_fallback", []
+
+
+def has_product_search_signal(filters: dict[str, Any]) -> bool:
+    return any(
+        filters.get(key)
+        for key in [
+            "min_price",
+            "max_price",
+            "metal",
+            "category",
+            "gift_intent",
+            "occasion",
+            "in_stock_only",
+            "style",
+            "recipient",
+            "feature",
+        ]
+    )
+
+
+def detect_chat_intent(message: str, filters: dict[str, Any], lead_intent: str | None) -> str:
+    msg = message.lower()
+    if lead_intent:
+        return lead_intent
+    if filters.get("gift_intent"):
+        return "gift"
+    if filters.get("occasion"):
+        return "occasion"
+    if has_product_search_signal(filters):
+        return "product_search"
+    if build_buying_advice_reply(msg, 0):
+        return "buying_advice"
+    if message_has_any(msg, ["hello", "hi", "hey", "help"]):
+        return "greeting"
+    return "unmatched"
+
+
+def is_unmatched_query(intent: str, result_count: int, filters: dict[str, Any]) -> bool:
+    if intent in {"order_status", "return_refund", "complaint"}:
+        return False
+    return intent == "unmatched" or (result_count == 0 and not has_product_search_signal(filters))
+
+
+def is_low_conversion_search(
+    result_count: int, filters: dict[str, Any], lead_captured: bool
+) -> bool:
+    return has_product_search_signal(filters) and not lead_captured and 0 < result_count <= 2
+
+
+def chat_confidence(
+    intent: str, result_count: int, filters: dict[str, Any], unmatched: bool
+) -> float:
+    if unmatched:
+        return 0.35
+    if result_count > 0 and has_product_search_signal(filters):
+        return 0.92
+    if intent in {
+        "gift",
+        "availability",
+        "discount",
+        "custom_order",
+        "store_visit",
+        "callback",
+        "order_status",
+        "return_refund",
+        "complaint",
+    }:
+        return 0.84
+    if intent == "buying_advice":
+        return 0.78
+    if result_count == 0:
+        return 0.55
+    return 0.7
+
+
+def answer_source_for_chat(intent: str, result_count: int, lead_captured: bool) -> str:
+    if lead_captured:
+        return "handoff_flow"
+    if result_count > 0:
+        return "catalog_search"
+    if intent == "buying_advice":
+        return "reply_template"
+    return "catalog_fallback"
+
+
+def guardrails_for_chat(message: str, intent: str, unmatched: bool) -> list[str]:
+    guardrails = ["jewellery-domain", "catalog-grounded", "no-payment-or-order-creation"]
+    if unmatched:
+        guardrails.append("fallback-used")
+    if intent in {"order_status", "return_refund", "complaint"}:
+        guardrails.append("oms-not-connected-capture-only")
+    if message_has_any(message.lower(), ["investment guarantee", "medical", "allergy cure"]):
+        guardrails.append("no-medical-or-financial-guarantee")
+    return guardrails
+
+
+def feedback_type_from_payload(payload: FeedbackCreate) -> str:
+    if payload.feedback_type:
+        return payload.feedback_type
+    if payload.helpful is True or (payload.rating is not None and payload.rating >= 4):
+        return "thumbs_up"
+    if payload.helpful is False:
+        return "not_helpful"
+    if payload.rating is not None and payload.rating <= 2:
+        return "thumbs_down"
+    return "neutral"
+
+
+def feedback_sentiment(feedback_type: str, rating: int | None) -> str:
+    if feedback_type == "thumbs_up" or (rating is not None and rating >= 4):
+        return "positive"
+    if feedback_type in {"thumbs_down", "not_helpful"} or (rating is not None and rating <= 2):
+        return "negative"
+    return "neutral"
+
+
+def feedback_needs_review(feedback_type: str, sentiment: str) -> bool:
+    return feedback_type == "not_helpful" or sentiment == "negative"
+
+
+def record_chat_analytics(
+    db: Session,
+    response_id: str,
+    user: User,
+    session_id: str,
+    user_message: str,
+    assistant_reply: str,
+    intent: str,
+    applied_filters: dict[str, Any],
+    products: list[Product],
+    result_count: int,
+    unmatched: bool,
+    low_conversion: bool,
+    lead_captured: bool,
+) -> ChatResponseAnalytics:
+    analytics = ChatResponseAnalytics(
+        response_id=response_id,
+        user_id=user.id,
+        session_id=session_id,
+        user_message=user_message,
+        assistant_reply=assistant_reply,
+        intent=intent,
+        applied_filters=dump_json_object(applied_filters),
+        product_ids=dump_json_list([product.id for product in products]),
+        product_names=dump_json_list([product.name for product in products]),
+        result_count=result_count,
+        unmatched=unmatched,
+        low_conversion=low_conversion,
+        lead_captured=lead_captured,
+    )
+    db.add(analytics)
+    return analytics
+
+
+def top_counter_items(counter: Counter, limit: int = 10) -> list[dict[str, Any]]:
+    return [{"name": str(name), "count": count} for name, count in counter.most_common(limit)]
+
+
+def analytics_row_summary(row: ChatResponseAnalytics) -> dict[str, Any]:
+    return {
+        "response_id": row.response_id,
+        "session_id": row.session_id,
+        "user_id": row.user_id,
+        "message": row.user_message,
+        "intent": row.intent,
+        "applied_filters": load_json_object(row.applied_filters),
+        "result_count": row.result_count,
+        "created_at": row.created_at,
+    }
+
+
+def chat_analytics_snapshot(db: Session, limit: int = 500) -> dict[str, Any]:
+    limit = min(max(limit, 1), 1000)
+    rows = (
+        db.query(ChatResponseAnalytics)
+        .order_by(ChatResponseAnalytics.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    feedback_rows = (
+        db.query(ResponseFeedback).order_by(ResponseFeedback.created_at.desc()).limit(limit).all()
+    )
+
+    intent_counter: Counter[str] = Counter()
+    filter_counter: Counter[str] = Counter()
+    product_counter: Counter[tuple[int | None, str]] = Counter()
+    user_sessions: dict[int, set[str]] = defaultdict(set)
+    user_interactions: Counter[int] = Counter()
+
+    for row in rows:
+        intent_counter[row.intent] += 1
+        user_interactions[row.user_id] += 1
+        user_sessions[row.user_id].add(row.session_id)
+
+        for key, value in load_json_object(row.applied_filters).items():
+            filter_counter[f"{key}:{value}"] += 1
+
+        product_ids = load_json_list(row.product_ids)
+        product_names = load_json_list(row.product_names)
+        for index, product_name in enumerate(product_names):
+            product_id = product_ids[index] if index < len(product_ids) else None
+            product_counter[(product_id, str(product_name))] += 1
+
+    feedback_counter: Counter[str] = Counter(row.feedback_type for row in feedback_rows)
+    repeat_users = [
+        {
+            "user_id": user_id,
+            "interactions": user_interactions[user_id],
+            "sessions": len(sessions),
+        }
+        for user_id, sessions in user_sessions.items()
+        if user_interactions[user_id] > 1 or len(sessions) > 1
+    ]
+    repeat_users.sort(key=lambda item: (item["interactions"], item["sessions"]), reverse=True)
+
+    most_requested_products = [
+        {"product_id": product_id, "name": name, "count": count}
+        for (product_id, name), count in product_counter.most_common(10)
+    ]
+
+    unmatched_queries = [
+        analytics_row_summary(row) for row in rows if row.unmatched or row.result_count == 0
+    ][:10]
+    low_conversion_searches = [analytics_row_summary(row) for row in rows if row.low_conversion][
+        :10
+    ]
+
+    return {
+        "total_interactions": len(rows),
+        "top_intents": top_counter_items(intent_counter),
+        "top_filters": top_counter_items(filter_counter),
+        "repeat_users": repeat_users[:10],
+        "most_requested_products": most_requested_products,
+        "unmatched_queries": unmatched_queries,
+        "low_conversion_searches": low_conversion_searches,
+        "feedback_summary": dict(feedback_counter),
+    }
+
+
+def review_reasons(
+    row: ChatResponseAnalytics,
+    feedback: ResponseFeedback | None = None,
+) -> list[str]:
+    reasons = []
+    if row.unmatched:
+        reasons.append("unmatched_query")
+    if row.result_count == 0:
+        reasons.append("no_results")
+    if row.low_conversion:
+        reasons.append("low_conversion_search")
+    if feedback and feedback.feedback_type in {"thumbs_down", "not_helpful"}:
+        reasons.append(feedback.feedback_type)
+    return reasons
+
+
+def transcript_review_items(
+    db: Session,
+    limit: int = 25,
+    include_reviewed: bool = False,
+) -> list[dict[str, Any]]:
+    limit = min(max(limit, 1), 100)
+    negative_feedback = (
+        db.query(ResponseFeedback)
+        .filter(ResponseFeedback.feedback_type.in_(["thumbs_down", "not_helpful"]))
+        .order_by(ResponseFeedback.created_at.desc())
+        .all()
+    )
+    latest_feedback_by_response = {}
+    for feedback in negative_feedback:
+        if feedback.response_id and feedback.response_id not in latest_feedback_by_response:
+            latest_feedback_by_response[feedback.response_id] = feedback
+    negative_response_ids = list(latest_feedback_by_response.keys())
+
+    filters = [
+        ChatResponseAnalytics.unmatched == True,
+        ChatResponseAnalytics.low_conversion == True,
+        ChatResponseAnalytics.result_count == 0,
+    ]
+    if negative_response_ids:
+        filters.append(ChatResponseAnalytics.response_id.in_(negative_response_ids))
+
+    query = db.query(ChatResponseAnalytics).filter(or_(*filters))
+    if not include_reviewed:
+        query = query.filter(ChatResponseAnalytics.reviewed_at.is_(None))
+
+    rows = query.order_by(ChatResponseAnalytics.created_at.desc()).limit(limit).all()
+    items = []
+    for row in rows:
+        feedback = latest_feedback_by_response.get(row.response_id)
+        items.append(
+            {
+                "response_id": row.response_id,
+                "session_id": row.session_id,
+                "user_id": row.user_id,
+                "user_message": row.user_message,
+                "assistant_reply": row.assistant_reply,
+                "intent": row.intent,
+                "applied_filters": load_json_object(row.applied_filters),
+                "result_count": row.result_count,
+                "product_names": load_json_list(row.product_names),
+                "reasons": review_reasons(row, feedback),
+                "feedback": (
+                    {
+                        "feedback_type": feedback.feedback_type,
+                        "rating": feedback.rating,
+                        "comment": feedback.comment,
+                    }
+                    if feedback
+                    else None
+                ),
+                "reviewed_at": row.reviewed_at,
+                "review_notes": row.review_notes,
+                "created_at": row.created_at,
+            }
+        )
+    return items
+
+
+def normalize_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
+    state = empty_filter_state()
+    if not filters:
+        return state
+
+    for key in FILTER_KEYS:
+        if key in filters:
+            state[key] = filters[key]
+
+    state["min_price"] = normalize_price(state.get("min_price"))
+    state["max_price"] = normalize_price(state.get("max_price"))
+    state["gift_intent"] = bool(state.get("gift_intent"))
+    state["in_stock_only"] = bool(state.get("in_stock_only"))
+    return state
+
+
+def compact_filters(filters: dict[str, Any]) -> dict[str, Any]:
+    compacted = {}
+    for key in [
+        "min_price",
+        "max_price",
+        "metal",
+        "category",
+        "gift_intent",
+        "occasion",
+        "in_stock_only",
+        "style",
+        "recipient",
+        "feature",
+    ]:
+        value = filters.get(key)
+        if value is None or value is False or value == "":
+            continue
+        if isinstance(value, float) and value.is_integer():
+            compacted[key] = int(value)
+        else:
+            compacted[key] = value
+    return compacted
+
+
+def should_reset_filters(message: str) -> bool:
+    return any(
+        phrase in message
+        for phrase in [
+            "start over",
+            "reset filters",
+            "clear filters",
+            "all jewellery",
+            "show me jewellery",
+            "show jewellery",
+        ]
+    )
+
+
+REFERENTIAL_FOLLOWUP_KEYWORDS = [
+    "same",
+    "similar",
+    "these",
+    "those",
+    "them",
+    "ones",
+    "another",
+    "different",
+    "show more",
+    "more like",
+    "like this",
+    "like these",
+]
+
+
+def is_referential_filter_followup(
+    message: str,
+    updates: dict[str, Any],
+    relative_price: str | None,
+) -> bool:
+    if relative_price:
+        return True
+    if message_has_any(message, REFERENTIAL_FOLLOWUP_KEYWORDS):
+        return True
+    if message.startswith(("only ", "just ")):
+        refinement_keys = {"metal", "in_stock_only"}
+        return bool(updates) and set(updates).issubset(refinement_keys)
+    return False
+
+
+def should_start_new_search_frame(
+    message: str,
+    updates: dict[str, Any],
+    reset_filters: bool,
+    relative_price: str | None,
+) -> bool:
+    if reset_filters:
+        return True
+    if is_referential_filter_followup(message, updates, relative_price):
+        return False
+    if "category" in updates:
+        return True
+    if {"min_price", "max_price"} & set(updates) and (
+        {"metal", "gift_intent", "occasion", "style", "recipient", "feature"} & set(updates)
+    ):
+        return True
+    if message.startswith(
+        (
+            "show ",
+            "find ",
+            "search ",
+            "suggest ",
+            "recommend ",
+            "i want ",
+            "i need ",
+            "need ",
+            "looking for ",
+        )
+    ):
+        meaningful_keys = set(updates) - {"in_stock_only"}
+        return bool(meaningful_keys)
+    return False
+
+
+def parse_filter_updates(message: str) -> tuple[dict[str, Any], set[str], bool, str | None]:
+    msg = message.lower()
+    updates: dict[str, Any] = {}
+    clear_keys: set[str] = set()
+    relative_price: str | None = None
+
+    category = detect_category(msg)
+    if category:
+        updates["category"] = category
+
+    metal = detect_metal(msg)
+    if metal:
+        updates["metal"] = metal
+    elif message_has_any(msg, ["any metal", "all metals", "another metal", "different metal"]):
+        clear_keys.add("metal")
+
+    price_range = extract_price_range(msg)
+    if price_range:
+        updates["min_price"], updates["max_price"] = price_range
+    else:
+        budget_limit = extract_budget_limit(msg)
+        if budget_limit is not None:
+            updates["max_price"] = budget_limit
+
+        minimum_price = extract_minimum_price(msg)
+        if minimum_price is not None:
+            updates["min_price"] = minimum_price
+
+    if message_has_any(msg, ["any price", "no budget", "remove budget"]):
+        clear_keys.update({"min_price", "max_price"})
+
+    if message_has_any(msg, ["cheaper", "lower price", "less expensive"]):
+        relative_price = "cheaper"
+    elif message_has_any(
+        msg, ["more expensive", "higher price", "higher budget", "premium", "luxury"]
+    ):
+        relative_price = "premium"
+
+    if message_has_any(msg, ["in stock", "available", "ready to ship"]):
+        updates["in_stock_only"] = True
+    elif message_has_any(msg, ["include out of stock", "show out of stock"]):
+        updates["in_stock_only"] = False
+
+    occasion = detect_occasion(msg)
+    if occasion:
+        updates["occasion"] = occasion
+
+    if message_has_any(msg, GIFT_KEYWORDS):
+        updates["gift_intent"] = True
+
+    style = detect_style(msg)
+    if style:
+        updates["style"] = style
+
+    recipient = detect_recipient(msg)
+    if recipient:
+        updates["recipient"] = recipient
+
+    feature = detect_feature(msg)
+    if feature:
+        updates["feature"] = feature
+
+    return updates, clear_keys, should_reset_filters(msg), relative_price
+
+
+def cheaper_price_limit(current_limit: float | None) -> float:
+    if current_limit is None:
+        return 20000
+    discount = max(1000, current_limit * 0.2)
+    return max(1000, round((current_limit - discount) / 1000) * 1000)
+
+
+def merge_filter_state(previous_filters: dict[str, Any], message: str) -> dict[str, Any]:
+    updates, clear_keys, reset_filters, relative_price = parse_filter_updates(message)
+    msg = message.lower()
+    starts_new_search = should_start_new_search_frame(
+        msg,
+        updates,
+        reset_filters,
+        relative_price,
+    )
+    filters = empty_filter_state() if starts_new_search else normalize_filters(previous_filters)
+
+    for key in clear_keys:
+        filters[key] = False if key in {"gift_intent", "in_stock_only"} else None
+
+    if "max_price" in updates and "min_price" not in updates:
+        filters["min_price"] = None
+    if "min_price" in updates and "max_price" not in updates:
+        filters["max_price"] = None
+
+    filters.update(updates)
+
+    if relative_price == "cheaper":
+        filters["max_price"] = cheaper_price_limit(filters.get("max_price"))
+        filters["min_price"] = None
+    elif relative_price == "premium" and "min_price" not in updates:
+        filters["min_price"] = filters.get("max_price") or filters.get("min_price") or 20000
+        filters["max_price"] = None
+
+    return normalize_filters(filters)
+
+
+def category_options_for_filters(filters: dict[str, Any]) -> list[str] | None:
+    if filters.get("category"):
+        return [filters["category"]]
+
+    occasion = filters.get("occasion")
+    if occasion == "engagement":
+        return ["Ring"]
+    if occasion == "wedding":
+        return ["Ring", "Necklace", "Earring"]
+    if occasion == "party wear":
+        return ["Necklace", "Earring", "Ring"]
+    if filters.get("gift_intent"):
+        return ["Ring", "Necklace", "Earring", "Bracelet", "Pendant"]
+    return None
+
+
+def filter_products(
+    db: Session,
+    filters: dict[str, Any],
+    limit: int = 5,
+) -> tuple[List[Product], int]:
+    query = db.query(Product).filter(Product.price > 0)
+
+    categories = category_options_for_filters(filters)
+    if categories:
+        query = query.filter(or_(*[Product.category.ilike(category) for category in categories]))
+
+    if filters.get("metal"):
+        query = query.filter(Product.metal.ilike(filters["metal"]))
+
+    if filters.get("occasion"):
+        query = query.filter(metadata_text_match(Product.occasion, filters["occasion"]))
+
+    if filters.get("style"):
+        query = query.filter(
+            or_(
+                metadata_text_match(Product.style, filters["style"]),
+                metadata_text_match(Product.tags, filters["style"]),
+            )
+        )
+
+    if filters.get("recipient"):
+        query = query.filter(
+            or_(
+                Product.audience.ilike(f"%{filters['recipient']}%"),
+                metadata_text_match(Product.tags, filters["recipient"]),
+            )
+        )
+
+    feature = filters.get("feature")
+    if feature == "diamond":
+        query = query.filter(
+            or_(Product.name.ilike("%diamond%"), metadata_text_match(Product.tags, "diamond"))
+        )
+    elif feature == "pearl":
+        query = query.filter(
+            or_(
+                Product.name.ilike("%pearl%"),
+                Product.metal.ilike("%pearl%"),
+                metadata_text_match(Product.tags, "pearl"),
+            )
+        )
+
+    if filters.get("min_price") is not None:
+        query = query.filter(Product.price >= filters["min_price"])
+
+    if filters.get("max_price") is not None:
+        query = query.filter(Product.price <= filters["max_price"])
+
+    if filters.get("in_stock_only"):
+        query = query.filter(Product.in_stock == True)
+
+    result_count = query.count()
+    products = query.order_by(Product.price.asc(), Product.id.asc()).limit(limit).all()
+    return products, result_count
+
+
+def build_buying_advice_reply(message: str, count: int) -> str | None:
+    if message_has_any(message, ["size", "measurement", "measure"]):
+        return "For ring sizing, measure an existing ring or your finger in millimeters, then choose the closest size. I can also show ring options while you confirm the size."
+    if message_has_any(message, ["sensitive skin", "allergy", "hypoallergenic"]):
+        return "For sensitive skin, choose nickel-free pieces and prefer gold, silver, or clearly certified materials. I can show simple daily-wear options that are easier on skin."
+    if message_has_any(message, ["certified", "certificate", "hallmark", "authentic"]):
+        return "For gold jewellery, look for hallmarking and a clear invoice. For diamond pieces, ask for certification details before buying."
+    if message_has_any(message, ["resale", "investment", "value"]):
+        return "For resale value, gold usually performs better than fashion jewellery. Choose classic designs, keep the invoice, and check purity before buying."
+    if message_has_any(message, ["compare", "difference"]):
+        return "Gold is classic and has stronger resale value, silver is lighter on budget, rose gold feels modern, and pearls work well for soft occasion looks."
+    if message_has_any(message, ["first purchase", "first jewellery"]):
+        return "For a first jewellery purchase, start with a simple ring, studs, or a minimal necklace that matches daily outfits and stays within your budget."
+    if message_has_any(message, ["matching", "set", "combo"]):
+        return f"I found {count} jewellery options. For a matching look, pair a simple necklace with earrings in the same metal tone."
+    return None
+
+
+def build_reply(message: str, count: int, filters: dict[str, Any]) -> str:
+    msg = message.lower()
+    category = filters.get("category")
+    occasion = filters.get("occasion")
+    budget_limit = filters.get("max_price")
+    minimum_price = filters.get("min_price")
+    metal = filters.get("metal")
+    has_gift_intent = filters.get("gift_intent") or message_has_any(msg, GIFT_KEYWORDS)
+    advice_reply = build_buying_advice_reply(msg, count)
+
+    if advice_reply:
+        return advice_reply
+
+    if count == 0:
+        if budget_limit is not None:
+            return "I could not find matching jewellery within that budget right now. Try a higher budget, a simpler design, or another category."
+        if minimum_price is not None:
+            return "I could not find jewellery above that price right now. Try a lower premium range or a different category."
+        if category:
+            return f"I could not find matching {category.lower()} options right now, but I can suggest nearby styles, gifts, and budget-friendly alternatives."
+        return "I could not find matching jewellery right now, but I can help with rings, earrings, necklaces, gifts, and budget-based suggestions."
+    if filters.get("in_stock_only"):
+        return f"I found {count} in-stock jewellery options for you."
+    if has_gift_intent:
+        return f"I found {count} jewellery gift options you may like."
+    if occasion:
+        return f"I found {count} jewellery options for {occasion}."
+    if budget_limit is not None:
+        return f"I found {count} jewellery options within your budget."
+    if minimum_price is not None:
+        return f"I found {count} premium jewellery options for you."
+    if category in {"Ring", "Necklace", "Earring"}:
+        return f"I found {count} {category.lower()} options for you."
+    if metal:
+        return f"I found {count} {metal.lower()} jewellery options for you."
+
+    return f"I found {count} jewellery options for you."
+
+
+def update_session_preferences(chat_session: ChatSession, filters: dict[str, Any]) -> None:
+    preferences = load_json_object(chat_session.preferences)
+
+    if filters.get("min_price") is not None or filters.get("max_price") is not None:
+        preferences["budget"] = {
+            "min_price": filters.get("min_price"),
+            "max_price": filters.get("max_price"),
+        }
+
+    if filters.get("style"):
+        preferences["style"] = filters["style"]
+
+    if filters.get("metal"):
+        preferences["preferred_metal"] = filters["metal"]
+
+    if filters.get("category"):
+        favorite_categories = preferences.get("favorite_categories", [])
+        if not isinstance(favorite_categories, list):
+            favorite_categories = []
+        if filters["category"] not in favorite_categories:
+            favorite_categories.append(filters["category"])
+        preferences["favorite_categories"] = favorite_categories[-5:]
+
+    if filters.get("occasion"):
+        preferences["last_occasion"] = filters["occasion"]
+
+    if filters.get("gift_intent"):
+        preferences["gift_shopping"] = True
+
+    if filters.get("recipient"):
+        preferences["gift_recipient"] = filters["recipient"]
+
+    chat_session.preferences = dump_json_object(preferences)
+
+
+def build_suggested_next_questions(filters: dict[str, Any], result_count: int) -> list[str]:
+    questions: list[str] = []
+
+    if result_count == 0:
+        if filters.get("max_price") is not None:
+            questions.append("Show similar options with a higher budget")
+        if filters.get("metal"):
+            questions.append("Show the same style in another metal")
+        if filters.get("category"):
+            questions.append("Show nearby categories")
+
+    if filters.get("category") and not filters.get("metal"):
+        questions.append("Do you prefer gold, rose gold, or silver?")
+    if not filters.get("category"):
+        questions.append("Are you looking for rings, earrings, or necklaces?")
+    if filters.get("max_price") is None and filters.get("min_price") is None:
+        questions.append("What budget should I stay within?")
+    if not filters.get("occasion"):
+        questions.append("Is this for daily wear, gifting, or a special occasion?")
+    if filters.get("gift_intent") and not filters.get("recipient"):
+        questions.append("Who is the gift for?")
+    if not filters.get("in_stock_only"):
+        questions.append("Should I show in-stock items only?")
+
+    fallback_questions = [
+        "Show cheaper options",
+        "Only show gold jewellery",
+        "Show matching necklace and earrings",
+    ]
+    questions.extend(fallback_questions)
+
+    deduped = []
+    for question in questions:
+        if question not in deduped:
+            deduped.append(question)
+
+    return deduped[:5]
+
+
+def get_buying_suggestions(message: str, limit: int = 30) -> list[str]:
+    msg = message.lower()
+    priority_terms = [
+        "gift",
+        "ring",
+        "earring",
+        "necklace",
+        "daily",
+        "wedding",
+        "anniversary",
+        "budget",
+        "gold",
+        "silver",
+    ]
+
+    ranked = []
+    for term in priority_terms:
+        if term in msg:
+            ranked.extend(
+                suggestion for suggestion in BUYING_SUGGESTIONS if term in suggestion.lower()
+            )
+
+    ranked.extend(BUYING_SUGGESTIONS)
+
+    deduped = []
+    for suggestion in ranked:
+        if suggestion not in deduped:
+            deduped.append(suggestion)
+
+    return deduped[:limit]
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+def database_dependency_status(db: Session) -> dict[str, Any]:
+    try:
+        db.execute(text("SELECT 1"))
+        inspector = inspect(db.get_bind())
+        required_tables = set(Base.metadata.tables.keys())
+        existing_tables = set(inspector.get_table_names())
+        missing_tables = sorted(required_tables - existing_tables)
+        if missing_tables:
+            return {
+                "status": "error",
+                "critical": True,
+                "error_type": "MissingDatabaseTables",
+                "missing_table_count": len(missing_tables),
+                "missing_tables": missing_tables[:10],
+            }
+        return {"status": "ok", "critical": True}
+    except Exception as exc:
+        return {
+            "status": "error",
+            "critical": True,
+            "error_type": exc.__class__.__name__,
+        }
+
+
+def email_dependency_status() -> dict[str, Any]:
+    if EMAIL_PROVIDER == "brevo":
+        if brevo_is_configured():
+            return {
+                "status": "configured",
+                "critical": False,
+                "provider": "brevo",
+                "api_url": BREVO_API_URL,
+            }
+        return {
+            "status": "misconfigured",
+            "critical": False,
+            "provider": "brevo",
+            "missing": [
+                name
+                for name, configured in {
+                    "BREVO_API_KEY": bool(BREVO_API_KEY),
+                    "EMAIL_FROM": bool(EMAIL_FROM),
+                }.items()
+                if not configured
+            ],
+        }
+
+    if EMAIL_PROVIDER == "resend":
+        if resend_is_configured():
+            return {
+                "status": "configured",
+                "critical": False,
+                "provider": "resend",
+                "api_url": RESEND_API_URL,
+            }
+        return {
+            "status": "misconfigured",
+            "critical": False,
+            "provider": "resend",
+            "missing": [
+                name
+                for name, configured in {
+                    "RESEND_API_KEY": bool(RESEND_API_KEY),
+                    "EMAIL_FROM": bool(EMAIL_FROM),
+                }.items()
+                if not configured
+            ],
+        }
+
+    if smtp_is_configured():
+        return {
+            "status": "configured",
+            "critical": False,
+            "provider": "smtp",
+            "host": EMAIL_HOST,
+            "port": EMAIL_PORT,
+        }
+    return {"status": "disabled", "critical": False, "provider": EMAIL_PROVIDER}
+
+
+def optional_service_status(enabled: bool, configured: bool, name: str) -> dict[str, Any]:
+    if enabled and configured:
+        return {"status": "configured", "critical": False, "service": name}
+    if enabled and not configured:
+        return {"status": "misconfigured", "critical": False, "service": name}
+    return {"status": "disabled", "critical": False, "service": name}
+
+
+def dependency_snapshot(db: Session) -> dict[str, Any]:
+    dependencies = {
+        "database": database_dependency_status(db),
+        "email": email_dependency_status(),
+        "sms_otp": sms_dependency_status(),
+        "oms": optional_service_status(OMS_ENABLED, bool(OMS_BASE_URL), "oms"),
+        "razorpay": razorpay_dependency_status(),
+        "firestore_commerce": firestore_commerce_dependency_status(),
+        "firebase_auth": optional_service_status(
+            FIREBASE_AUTH_ENABLED, bool(FIREBASE_PROJECT_ID), "firebase_auth"
+        ),
+        "llm": optional_service_status(LLM_ENABLED, bool(LLM_BASE_URL and LLM_API_KEY), "llm"),
+        "monitoring": optional_service_status(
+            bool(MONITORING_WEBHOOK_URL or SENTRY_DSN),
+            bool(MONITORING_WEBHOOK_URL or SENTRY_DSN),
+            "monitoring",
+        ),
+    }
+    status_value = "ok"
+    for dependency in dependencies.values():
+        if dependency["critical"] and dependency["status"] != "ok":
+            status_value = "error"
+            break
+    return {"status": status_value, "dependencies": dependencies}
+
+
+@app.get("/ready")
+def readiness(response: Response, db: Session = Depends(get_db)):
+    snapshot = dependency_snapshot(db)
+    if snapshot["status"] != "ok":
+        response.status_code = 503
+    return snapshot
+
+
+@app.get("/readiness")
+def readiness_alias(response: Response, db: Session = Depends(get_db)):
+    return readiness(response, db)
+
+
+@app.get("/dependencies")
+def dependencies(response: Response, db: Session = Depends(get_db)):
+    snapshot = dependency_snapshot(db)
+    if snapshot["status"] != "ok":
+        response.status_code = 503
+    return snapshot
+
+
+@app.post("/register", response_model=UserOut)
+@limiter.limit("5/minute")
+def register(
+    request: Request,
+    user: UserRegister,
+    db: Session = Depends(get_db),
+):
+    validate_password_strength(user.password)
+
+    existing_email = db.query(User).filter(User.email == user.email).first()
+    if existing_email:
+        log_event("auth.register_duplicate_email", request, email=user.email)
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    existing_username = db.query(User).filter(User.username == user.username).first()
+    if existing_username:
+        log_event("auth.register_duplicate_username", request, username=user.username)
+        raise HTTPException(status_code=400, detail="Username already taken")
+
+    new_user = User(
+        username=user.username,
+        email=user.email,
+        hashed_password=hash_password(user.password),
+        is_verified=False,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    raw_token = generate_opaque_token()
+    token_hash = hash_opaque_token(raw_token)
+
+    db.add(
+        EmailVerificationToken(
+            user_id=new_user.id,
+            token_hash=token_hash,
+            is_used=False,
+            expires_at=utc_now() + timedelta(minutes=EMAIL_VERIFICATION_EXPIRE_MINUTES),
+        )
+    )
+    db.commit()
+
+    verify_link = url_with_token(FRONTEND_VERIFY_URL, raw_token)
+    send_verification_email(new_user.email, verify_link)
+    log_event("auth.register_success", request, user_id=new_user.id, email=new_user.email)
+
+    return new_user
+
+
+@app.post("/login", response_model=TokenResponse)
+@limiter.limit("5/minute")
+def login(
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    if login_is_locked(form_data.username, request):
+        increment_metric("failed_logins")
+        log_event(
+            "auth.login_locked",
+            request,
+            email=form_data.username,
+            success=False,
+            reason="lockout",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Try again later.",
+        )
+
+    user = db.query(User).filter(User.email == form_data.username).first()
+
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        record_login_failure(form_data.username, request)
+        increment_metric("failed_logins")
+        log_event(
+            "auth.login_failed",
+            request,
+            email=form_data.username,
+            success=False,
+            reason="invalid_credentials",
+        )
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    if not user.is_verified:
+        log_event(
+            "auth.login_blocked_unverified",
+            request,
+            user_id=user.id,
+            email=user.email,
+            success=False,
+        )
+        raise HTTPException(status_code=403, detail="Please verify your email before logging in")
+
+    clear_login_failures(form_data.username, request)
+
+    access_token = create_access_token({"sub": user.email})
+    refresh_token, token_jti, family_id = build_refresh_token_for_user(user.email)
+    store_refresh_token(db, user.id, refresh_token, token_jti, family_id, request)
+    db.commit()
+    log_event("auth.login_success", request, user_id=user.id, email=user.email, success=True)
+
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+    )
+
+
+@app.post("/auth/firebase", response_model=TokenResponse)
+@limiter.limit("10/minute")
+def firebase_auth(
+    request: Request,
+    payload: FirebaseAuthRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        firebase_payload = verify_firebase_id_token(payload.id_token)
+    except HTTPException as exc:
+        log_event(
+            "auth.firebase_login_failed",
+            request,
+            success=False,
+            status_code=exc.status_code,
+            reason=str(exc.detail),
+        )
+        raise
+
+    email = firebase_email_for_identity(firebase_payload)
+    firebase_uid = str(firebase_payload["sub"])
+    user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
+    if user is None:
+        user = db.query(User).filter(User.email == email).first()
+    created = False
+
+    if user is None:
+        user = User(
+            username=firebase_username_for_email(db, email, firebase_uid),
+            email=email,
+            hashed_password=hash_password(generate_opaque_token()),
+            is_verified=True,
+            is_admin=False,
+            firebase_uid=firebase_uid,
+            auth_provider="firebase",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        created = True
+        log_event(
+            "auth.firebase_user_created",
+            request,
+            user_id=user.id,
+            email=user.email,
+        )
+    elif user.firebase_uid and user.firebase_uid != firebase_uid:
+        log_event(
+            "auth.firebase_identity_conflict",
+            request,
+            user_id=user.id,
+            email=user.email,
+            success=False,
+        )
+        raise HTTPException(status_code=409, detail="Firebase identity does not match this user")
+    elif (
+        not user.is_verified
+        or user.firebase_uid != firebase_uid
+        or user.auth_provider != "firebase"
+    ):
+        user.is_verified = True
+        user.firebase_uid = firebase_uid
+        user.auth_provider = "firebase"
+        db.commit()
+        db.refresh(user)
+
+    token_response = issue_token_pair(db, user, request)
+    log_event(
+        "auth.firebase_login_success",
+        request,
+        user_id=user.id,
+        email=user.email,
+        success=True,
+        created=created,
+    )
+    return token_response
+
+
+@app.post("/auth/otp/request", response_model=OtpRequestOut)
+@limiter.limit("3/minute")
+def request_phone_otp(
+    request: Request,
+    payload: OtpRequestCreate,
+    db: Session = Depends(get_db),
+):
+    if not SMS_OTP_ENABLED:
+        raise HTTPException(status_code=503, detail="Phone OTP login is not enabled")
+    if not is_testing() and not sms_otp_is_configured():
+        raise HTTPException(status_code=503, detail="SMS OTP provider is not configured")
+
+    phone = normalize_phone_number(payload.phone)
+    phone_hash = phone_auth_hash(phone)
+    masked = phone_mask(phone)
+    latest = latest_phone_otp_challenge(db, phone_hash, status_value="sent")
+    now = utc_now()
+    if latest and latest.sent_at >= now - timedelta(seconds=OTP_RESEND_COOLDOWN_SECONDS):
+        retry_after = OTP_RESEND_COOLDOWN_SECONDS - int((now - latest.sent_at).total_seconds())
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {max(retry_after, 1)} seconds before requesting another OTP",
+        )
+
+    otp = generate_otp_code()
+    challenge = PhoneOtpChallenge(
+        phone_hash=phone_hash,
+        phone_masked=masked,
+        otp_hash=hash_otp_code(phone_hash, otp),
+        provider=SMS_PROVIDER,
+        purpose="login",
+        status="sent",
+        attempts=0,
+        max_attempts=OTP_MAX_ATTEMPTS,
+        created_ip=client_ip(request),
+        created_user_agent=client_user_agent(request),
+        sent_at=now,
+        expires_at=now + timedelta(minutes=OTP_EXPIRE_MINUTES),
+    )
+    db.add(challenge)
+    db.commit()
+
+    if not send_otp_sms(phone, otp):
+        challenge.status = "send_failed"
+        challenge.updated_at = utc_now()
+        db.commit()
+        log_event("auth.otp_send_failed", request, phone_masked=masked, provider=SMS_PROVIDER)
+        raise HTTPException(status_code=502, detail="Could not send OTP. Try again later.")
+
+    log_event("auth.otp_requested", request, phone_masked=masked, provider=SMS_PROVIDER)
+    return OtpRequestOut(
+        message="OTP sent",
+        phone_masked=masked,
+        expires_in_seconds=OTP_EXPIRE_MINUTES * 60,
+        resend_after_seconds=OTP_RESEND_COOLDOWN_SECONDS,
+    )
+
+
+@app.post("/auth/otp/verify", response_model=TokenResponse)
+@limiter.limit("5/minute")
+def verify_phone_otp(
+    request: Request,
+    payload: OtpVerifyRequest,
+    db: Session = Depends(get_db),
+):
+    if not SMS_OTP_ENABLED:
+        raise HTTPException(status_code=503, detail="Phone OTP login is not enabled")
+
+    phone = normalize_phone_number(payload.phone)
+    phone_hash = phone_auth_hash(phone)
+    challenge = latest_phone_otp_challenge(db, phone_hash, status_value="sent")
+    if not challenge or challenge.expires_at < utc_now():
+        if challenge and challenge.status == "sent":
+            challenge.status = "expired"
+            challenge.updated_at = utc_now()
+            db.commit()
+        log_event(
+            "auth.otp_verify_failed", request, phone_masked=phone_mask(phone), reason="expired"
+        )
+        raise HTTPException(status_code=400, detail="OTP expired or not found")
+
+    if challenge.attempts >= challenge.max_attempts:
+        challenge.status = "locked"
+        challenge.updated_at = utc_now()
+        db.commit()
+        raise HTTPException(status_code=429, detail="Too many OTP attempts. Request a new OTP.")
+
+    otp = re.sub(r"\D", "", payload.otp)
+    expected = hash_otp_code(phone_hash, otp)
+    if not secrets.compare_digest(challenge.otp_hash, expected):
+        challenge.attempts += 1
+        if challenge.attempts >= challenge.max_attempts:
+            challenge.status = "locked"
+        challenge.updated_at = utc_now()
+        db.commit()
+        increment_metric("failed_logins")
+        log_event(
+            "auth.otp_verify_failed",
+            request,
+            phone_masked=challenge.phone_masked,
+            reason="invalid_otp",
+            attempts=challenge.attempts,
+        )
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+
+    challenge.status = "verified"
+    challenge.verified_at = utc_now()
+    challenge.verified_ip = client_ip(request)
+    challenge.verified_user_agent = client_user_agent(request)
+    challenge.updated_at = utc_now()
+    user, created = phone_user_for_number(db, phone)
+    token_response = issue_token_pair(db, user, request)
+    log_event(
+        "auth.otp_login_success",
+        request,
+        user_id=user.id,
+        phone_masked=challenge.phone_masked,
+        created=created,
+        success=True,
+    )
+    return token_response
+
+
+@app.post("/refresh", response_model=TokenResponse)
+@limiter.limit("10/minute")
+def refresh_token_endpoint(
+    request: Request, req: RefreshTokenRequest, db: Session = Depends(get_db)
+):
+    credentials_exception = HTTPException(status_code=401, detail="Invalid refresh token")
+
+    try:
+        payload = jwt.decode(req.refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        token_type = payload.get("type")
+        token_jti = payload.get("jti")
+        family_id = payload.get("family_id")
+        if email is None or token_type != "refresh":
+            log_event("auth.refresh_failed", request, reason="invalid_claims")
+            raise credentials_exception from None
+    except JWTError:
+        log_event("auth.refresh_failed", request, reason="jwt_decode_error")
+        raise credentials_exception from None
+
+    if push_devices.enabled():
+        # Same owner-first lock order as registration and logout.
+        db.query(User).filter(User.email == email).with_for_update().first()
+    stored_token = (
+        db.query(RefreshToken).filter(RefreshToken.token == req.refresh_token)
+        .populate_existing().first()
+    )
+
+    if not stored_token:
+        log_event("auth.refresh_failed", request, email=email, reason="token_not_found")
+        raise credentials_exception
+
+    mark_refresh_token_used(stored_token, request)
+
+    if stored_token.is_revoked:
+        revoke_user_refresh_tokens(
+            db,
+            stored_token.user_id,
+            "suspected_reuse",
+            request,
+        )
+        db.commit()
+        log_event(
+            "auth.refresh_reuse_detected",
+            request,
+            user_id=stored_token.user_id,
+            reason="suspected_reuse",
+        )
+        raise credentials_exception
+
+    if stored_token.token_jti and token_jti and stored_token.token_jti != token_jti:
+        revoke_user_refresh_tokens(
+            db,
+            stored_token.user_id,
+            "token_jti_mismatch",
+            request,
+        )
+        db.commit()
+        log_event(
+            "auth.refresh_failed",
+            request,
+            user_id=stored_token.user_id,
+            reason="token_jti_mismatch",
+        )
+        raise credentials_exception
+
+    if stored_token.expires_at < utc_now():
+        revoke_refresh_token(stored_token, "expired", request)
+        db.commit()
+        log_event(
+            "auth.refresh_failed",
+            request,
+            user_id=stored_token.user_id,
+            reason="expired",
+        )
+        raise credentials_exception
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        log_event("auth.refresh_failed", request, email=email, reason="user_not_found")
+        raise credentials_exception
+    if user.id != stored_token.user_id:
+        revoke_user_refresh_tokens(
+            db,
+            stored_token.user_id,
+            "token_user_mismatch",
+            request,
+        )
+        db.commit()
+        log_event(
+            "auth.refresh_failed",
+            request,
+            user_id=stored_token.user_id,
+            email=email,
+            reason="token_user_mismatch",
+        )
+        raise credentials_exception
+
+    revoke_refresh_token(stored_token, "rotated", request)
+
+    new_access_token = create_access_token({"sub": user.email})
+    new_refresh_token, new_token_jti, new_family_id = build_refresh_token_for_user(
+        user.email,
+        stored_token.family_id or family_id,
+    )
+    new_token_row = store_refresh_token(
+        db,
+        user.id,
+        new_refresh_token,
+        new_token_jti,
+        new_family_id,
+        request,
+        parent_token_id=stored_token.id,
+    )
+    stored_token.replaced_by_token_id = new_token_row.id
+    db.commit()
+    increment_metric("token_refreshes")
+    log_event(
+        "auth.refresh_success",
+        request,
+        user_id=user.id,
+        token_id=stored_token.id,
+        replacement_token_id=new_token_row.id,
+    )
+
+    return TokenResponse(
+        access_token=new_access_token,
+        refresh_token=new_refresh_token,
+    )
+
+
+@app.post("/logout", response_model=MessageResponse)
+@limiter.limit("10/minute")
+def logout(
+    request: Request,
+    req: RefreshTokenRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if push_devices.enabled():
+        push_devices.lock_owner(db, current_user.id)
+    token_row = (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.token == req.refresh_token,
+            RefreshToken.user_id == current_user.id,
+        )
+        .populate_existing()
+        .first()
+    )
+
+    if token_row:
+        revoke_refresh_token(token_row, "logout", request)
+        if push_devices.enabled():
+            # Revoke the family, including a replacement from a concurrent refresh.
+            family_tokens = (
+                db.query(RefreshToken)
+                .filter_by(user_id=current_user.id, family_id=token_row.family_id)
+                .populate_existing().all()
+                if token_row.family_id else [token_row]
+            )
+            for family_token in family_tokens:
+                revoke_refresh_token(family_token, "logout", request)
+            push_devices.detach_family(db, current_user.id, token_row.family_id)
+        db.commit()
+        log_event(
+            "auth.logout",
+            request,
+            user_id=current_user.id,
+            refresh_token_id=token_row.id,
+        )
+
+    return MessageResponse(message="Logged out successfully")
+
+
+@app.post("/logout-all-devices", response_model=MessageResponse)
+@limiter.limit("5/minute")
+def logout_all_devices(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    revoked_count = revoke_user_refresh_tokens(
+        db,
+        current_user.id,
+        "logout_all_devices",
+        request,
+    )
+    db.commit()
+    log_event(
+        "auth.logout_all_devices",
+        request,
+        user_id=current_user.id,
+        revoked_count=revoked_count,
+    )
+    return MessageResponse(message=f"Logged out from {revoked_count} device sessions")
+
+
+@app.get("/me", response_model=UserOut)
+def me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+@app.get("/users/me/addresses", response_model=list[UserAddressOut])
+def list_my_addresses(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(UserAddress)
+        .filter(UserAddress.user_id == current_user.id)
+        .order_by(UserAddress.is_default.desc(), UserAddress.created_at.desc())
+        .all()
+    )
+
+
+@app.post("/users/me/addresses", response_model=UserAddressOut)
+def create_my_address(
+    payload: UserAddressCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    existing_count = db.query(UserAddress).filter(UserAddress.user_id == current_user.id).count()
+    make_default = payload.is_default or existing_count == 0
+    if make_default:
+        clear_default_addresses(db, current_user.id)
+
+    address = UserAddress(
+        user_id=current_user.id,
+        **payload.model_dump(exclude={"is_default"}),
+        is_default=make_default,
+    )
+    db.add(address)
+    db.commit()
+    db.refresh(address)
+    return address
+
+
+@app.patch("/users/me/addresses/{address_id}", response_model=UserAddressOut)
+def update_my_address(
+    address_id: int,
+    payload: UserAddressUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    address = get_user_address_or_404(db, current_user.id, address_id)
+    updates = payload.model_dump(exclude_unset=True)
+    if updates.get("is_default") is True:
+        clear_default_addresses(db, current_user.id)
+    apply_model_updates(address, updates)
+    address.updated_at = utc_now()
+    db.commit()
+    db.refresh(address)
+    return address
+
+
+@app.delete("/users/me/addresses/{address_id}", response_model=MessageResponse)
+def delete_my_address(
+    address_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    address = get_user_address_or_404(db, current_user.id, address_id)
+    was_default = address.is_default
+    db.delete(address)
+    db.commit()
+
+    if was_default:
+        replacement = (
+            db.query(UserAddress)
+            .filter(UserAddress.user_id == current_user.id)
+            .order_by(UserAddress.created_at.desc())
+            .first()
+        )
+        if replacement:
+            replacement.is_default = True
+            replacement.updated_at = utc_now()
+            db.commit()
+
+    return MessageResponse(message="Address deleted")
+
+
+@app.get("/users/me/notification-settings", response_model=NotificationSettingsOut)
+def get_my_notification_settings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return notification_settings_for_user(db, current_user.id)
+
+
+@app.patch("/users/me/notification-settings", response_model=NotificationSettingsOut)
+def update_my_notification_settings(
+    payload: NotificationSettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    settings_row = notification_settings_for_user(db, current_user.id, commit=False)
+    apply_model_updates(settings_row, payload.model_dump(exclude_unset=True))
+    settings_row.updated_at = utc_now()
+    db.commit()
+    db.refresh(settings_row)
+    return settings_row
+
+
+def chat_session_summary(db: Session, session: ChatSession) -> ChatSessionOut:
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session.session_id)
+        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .all()
+    )
+    last_message = messages[-1] if messages else None
+    return ChatSessionOut(
+        session_id=session.session_id,
+        last_filters=load_json_object(session.last_filters),
+        preferences=load_json_object(session.preferences),
+        created_at=session.created_at,
+        message_count=len(messages),
+        last_message_at=last_message.created_at if last_message else None,
+    )
+
+
+@app.get("/chat/sessions", response_model=list[ChatSessionOut])
+def list_chat_sessions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    sessions = (
+        db.query(ChatSession)
+        .filter(ChatSession.user_id == str(current_user.id))
+        .order_by(ChatSession.created_at.desc())
+        .all()
+    )
+    return [chat_session_summary(db, session) for session in sessions]
+
+
+@app.get("/chat/sessions/{session_id}", response_model=ChatSessionDetailOut)
+def get_chat_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.session_id == session_id,
+            ChatSession.user_id == str(current_user.id),
+        )
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    summary = chat_session_summary(db, session)
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session.session_id)
+        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .all()
+    )
+    return ChatSessionDetailOut(
+        **summary.model_dump(),
+        messages=[ChatMessageOut.model_validate(message) for message in messages],
+    )
+
+
+@app.get("/products", response_model=list[ProductOut])
+def list_products(
+    q: str | None = None,
+    category: str | None = None,
+    metal: str | None = None,
+    product_type: str | None = None,
+    audience: str | None = None,
+    gender: str | None = None,
+    purity: str | None = None,
+    min_price: float | None = Query(default=None, ge=0),
+    max_price: float | None = Query(default=None, ge=0),
+    min_weight: float | None = Query(default=None, ge=0),
+    max_weight: float | None = Query(default=None, ge=0),
+    gift_intent: str | None = None,
+    occasion: str | None = None,
+    style: str | None = None,
+    in_stock_only: bool = False,
+    limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = product_search_query(
+        db,
+        q=q,
+        category=category,
+        metal=metal,
+        min_price=min_price,
+        max_price=max_price,
+        product_type=product_type,
+        audience=audience or gender,
+        purity=purity,
+        min_weight=min_weight,
+        max_weight=max_weight,
+        occasion=occasion,
+        style=style,
+        gift_intent=gift_intent,
+        in_stock_only=in_stock_only,
+    )
+    return (
+        query.order_by(Product.price.asc(), Product.id.asc())
+        .offset(offset)
+        .limit(clamp_limit(limit))
+        .all()
+    )
+
+
+@app.post("/products/{product_id}/back-in-stock", response_model=BackInStockSubscriptionOut)
+def subscribe_back_in_stock(
+    product_id: int,
+    payload: BackInStockSubscribeRequest | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    if product.in_stock and product.stock_quantity > 0:
+        raise HTTPException(status_code=400, detail="Product is already in stock")
+
+    payload = payload or BackInStockSubscribeRequest()
+    existing = active_stock_subscription(
+        db,
+        current_user.id,
+        product.id,
+        payload.size,
+        payload.variant,
+    )
+    if existing:
+        return back_in_stock_response(existing, product)
+
+    subscription = BackInStockSubscription(
+        user_id=current_user.id,
+        product_id=product.id,
+        email=str(payload.email) if payload.email else current_user.email,
+        phone=payload.phone,
+        size=payload.size,
+        variant=payload.variant,
+        status="active",
+    )
+    db.add(subscription)
+    db.commit()
+    db.refresh(subscription)
+    db.refresh(product)
+    log_event(
+        "stock_alert.created",
+        user_id=current_user.id,
+        product_id=product.id,
+        size=payload.size,
+        variant=payload.variant,
+    )
+    return back_in_stock_response(subscription, product)
+
+
+@app.get("/back-in-stock/my", response_model=list[BackInStockSubscriptionOut])
+def list_my_back_in_stock_alerts(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(BackInStockSubscription)
+        .filter(BackInStockSubscription.user_id == current_user.id)
+        .order_by(BackInStockSubscription.created_at.desc())
+        .all()
+    )
+    product_ids = {row.product_id for row in rows}
+    products = {
+        product.id: product
+        for product in db.query(Product).filter(Product.id.in_(product_ids)).all()
+    }
+    return [
+        back_in_stock_response(row, products[row.product_id])
+        for row in rows
+        if row.product_id in products
+    ]
+
+
+@app.delete("/back-in-stock/{subscription_id}", response_model=MessageResponse)
+def cancel_back_in_stock_alert(
+    subscription_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    subscription = (
+        db.query(BackInStockSubscription)
+        .filter(
+            BackInStockSubscription.id == subscription_id,
+            BackInStockSubscription.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Stock alert not found")
+
+    subscription.status = "cancelled"
+    subscription.cancelled_at = utc_now()
+    subscription.updated_at = utc_now()
+    db.commit()
+    return MessageResponse(message="Stock alert cancelled")
+
+
+@app.get("/products/{product_id}/similar", response_model=list[ProductOut])
+def similar_products(
+    product_id: int,
+    limit: int = Query(default=6, ge=1, le=20),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    filters = []
+    if product.category:
+        filters.append(Product.category.ilike(product.category))
+    if product.metal:
+        filters.append(Product.metal.ilike(product.metal))
+
+    query = db.query(Product).filter(Product.id != product.id)
+    if filters:
+        query = query.filter(or_(*filters))
+
+    return (
+        query.order_by(Product.in_stock.desc(), Product.price.asc(), Product.id.asc())
+        .limit(clamp_limit(limit, 20))
+        .all()
+    )
+
+
+@app.get("/products/{product_id}", response_model=ProductOut)
+def get_product(product_id: int, db: Session = Depends(get_db)):
+    return get_product_or_404(db, product_id)
+
+
+@app.get("/featured-products", response_model=list[ProductOut])
+def featured_products(
+    limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    featured_items = (
+        db.query(FeaturedItem)
+        .filter(FeaturedItem.is_active == True)
+        .order_by(FeaturedItem.display_order.asc(), FeaturedItem.id.asc())
+        .limit(clamp_limit(limit))
+        .all()
+    )
+    products: list[Product] = []
+    for item in featured_items:
+        product = db.query(Product).filter(Product.id == item.product_id).first()
+        if product:
+            products.append(product)
+
+    if len(products) < limit:
+        seen_ids = {product.id for product in products}
+        fallback_products = (
+            db.query(Product)
+            .filter(Product.is_featured == True, Product.id.notin_(seen_ids))
+            .order_by(Product.id.asc())
+            .limit(clamp_limit(limit) - len(products))
+            .all()
+        )
+        products.extend(fallback_products)
+
+    return products[: clamp_limit(limit)]
+
+
+@app.get("/seasonal-collections", response_model=list[SeasonalCollectionOut])
+def seasonal_collections(db: Session = Depends(get_db)):
+    now = utc_now()
+    return (
+        db.query(SeasonalCollection)
+        .filter(
+            SeasonalCollection.is_active == True,
+            or_(SeasonalCollection.starts_at.is_(None), SeasonalCollection.starts_at <= now),
+            or_(SeasonalCollection.ends_at.is_(None), SeasonalCollection.ends_at >= now),
+        )
+        .order_by(SeasonalCollection.starts_at.asc(), SeasonalCollection.id.asc())
+        .all()
+    )
+
+
+@app.get("/categories", response_model=list[CategoryOut])
+def list_categories(db: Session = Depends(get_db)):
+    return (
+        db.query(ProductCategory)
+        .filter(ProductCategory.is_active == True)
+        .order_by(ProductCategory.name.asc())
+        .all()
+    )
+
+
+def list_public_knowledge(db: Session, kind: str) -> list[KnowledgeBaseOut]:
+    items = (
+        db.query(KnowledgeBaseItem)
+        .filter(KnowledgeBaseItem.kind == kind, KnowledgeBaseItem.is_active == True)
+        .order_by(KnowledgeBaseItem.title.asc(), KnowledgeBaseItem.id.asc())
+        .all()
+    )
+    return [knowledge_item_response(item) for item in items]
+
+
+@app.get("/faqs", response_model=list[KnowledgeBaseOut])
+def list_faqs(db: Session = Depends(get_db)):
+    return list_public_knowledge(db, "faq")
+
+
+@app.get("/policies", response_model=list[KnowledgeBaseOut])
+def list_policies(db: Session = Depends(get_db)):
+    return list_public_knowledge(db, "policy")
+
+
+@app.get("/mobile/config")
+def mobile_config(db: Session = Depends(get_db)):
+    return {
+        "api_version": "v1",
+        "oms_connected": oms_is_configured(),
+        "capabilities": {
+            "auth": True,
+            "refresh_token_rotation": True,
+            "firebase_token_auth": firebase_auth_is_configured(),
+            "phone_otp_auth": SMS_OTP_ENABLED and (sms_otp_is_configured() or is_testing()),
+            "chat": True,
+            "chat_session_memory": True,
+            "product_search": True,
+            "product_metadata": True,
+            "back_in_stock_alerts": True,
+            "ai_search": True,
+            "ai_recommendations": True,
+            "personalized_recommendations": True,
+            "ai_concepts": True,
+            "wishlist": True,
+            "save_for_later": True,
+            "feedback": True,
+            "customer_actions": True,
+            "order_support_capture": True,
+            "order_sync": True,
+            "order_backend_lookup": True,
+            "oms_order_lookup": True,
+            "razorpay_checkout": razorpay_checkout_is_configured(),
+            "razorpay_webhook": razorpay_webhook_is_configured(),
+            "firestore_authoritative_checkout": firestore_commerce_is_configured(),
+            "llm_grounded_answers": llm_is_configured(),
+            "addresses": True,
+            "notification_settings": True,
+            "saved_chat_history": True,
+            "human_handoff": True,
+            "admin": False,
+        },
+        "chat_contract": {
+            "response_fields": [
+                "response_id",
+                "reply",
+                "products",
+                "applied_filters",
+                "result_count",
+                "suggested_next_questions",
+                "intent",
+                "confidence",
+                "answer_source",
+                "tool_calls",
+                "guardrails",
+                "lead_captured",
+                "handoff",
+            ],
+            "guardrail_mode": "catalog-grounded",
+        },
+        "public_config": public_config_values(db),
+        "integrations": integration_status(),
+    }
+
+
+@app.get("/admin/products", response_model=list[ProductOut])
+def admin_list_products(
+    admin_user: User = Depends(require_permission("products:manage")),
+    db: Session = Depends(get_db),
+):
+    return db.query(Product).order_by(Product.id.asc()).all()
+
+
+@app.post("/admin/products", response_model=ProductOut)
+def admin_create_product(
+    request: Request,
+    product_in: ProductCreate,
+    admin_user: User = Depends(require_permission("products:manage")),
+    db: Session = Depends(get_db),
+):
+    product = Product(**product_in.model_dump())
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    log_admin_action(request, admin_user, "create", "product", product.id)
+    return product
+
+
+@app.get("/admin/products/{product_id}", response_model=ProductOut)
+def admin_get_product(
+    product_id: int,
+    admin_user: User = Depends(require_permission("products:manage")),
+    db: Session = Depends(get_db),
+):
+    return get_product_or_404(db, product_id)
+
+
+@app.patch("/admin/products/{product_id}", response_model=ProductOut)
+def admin_update_product(
+    product_id: int,
+    request: Request,
+    product_in: ProductUpdate,
+    admin_user: User = Depends(require_permission("products:manage")),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    apply_model_updates(product, product_in.model_dump(exclude_unset=True))
+    db.commit()
+    db.refresh(product)
+    log_admin_action(request, admin_user, "update", "product", product.id)
+    return product
+
+
+@app.patch("/admin/products/{product_id}/inventory", response_model=ProductOut)
+def admin_update_inventory(
+    product_id: int,
+    request: Request,
+    inventory: InventoryUpdate,
+    admin_user: User = Depends(require_permission("products:manage")),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    updates = inventory.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No inventory updates provided")
+
+    was_available = product.in_stock and product.stock_quantity > 0
+
+    if "stock_quantity" in updates:
+        product.stock_quantity = updates["stock_quantity"]
+        if "in_stock" not in updates:
+            product.in_stock = product.stock_quantity > 0
+    if "in_stock" in updates:
+        product.in_stock = updates["in_stock"]
+
+    became_available = not was_available and product.in_stock and product.stock_quantity > 0
+    if became_available:
+        notify_back_in_stock_subscribers(db, product)
+
+    db.commit()
+    db.refresh(product)
+    log_admin_action(request, admin_user, "update_inventory", "product", product.id)
+    return product
+
+
+@app.post(
+    "/admin/products/{product_id}/back-in-stock/notify",
+    response_model=BackInStockNotifyOut,
+)
+def admin_notify_back_in_stock(
+    product_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("products:manage")),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    notified_count = notify_back_in_stock_subscribers(db, product)
+    db.commit()
+    log_admin_action(request, admin_user, "notify_back_in_stock", "product", product.id)
+    return BackInStockNotifyOut(
+        product_id=product.id,
+        notified_count=notified_count,
+        message=f"Notified {notified_count} back-in-stock subscribers",
+    )
+
+
+@app.delete("/admin/products/{product_id}", response_model=MessageResponse)
+def admin_delete_product(
+    product_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("products:manage")),
+    db: Session = Depends(get_db),
+):
+    product = get_product_or_404(db, product_id)
+    db.delete(product)
+    db.commit()
+    log_admin_action(request, admin_user, "delete", "product", product_id)
+    return MessageResponse(message="Product deleted")
+
+
+@app.get("/admin/categories", response_model=list[CategoryOut])
+def admin_list_categories(
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    return db.query(ProductCategory).order_by(ProductCategory.name.asc()).all()
+
+
+@app.post("/admin/categories", response_model=CategoryOut)
+def admin_create_category(
+    request: Request,
+    category_in: CategoryCreate,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    slug = category_in.slug or slugify(category_in.name)
+    ensure_unique_slug(db, ProductCategory, slug)
+    category = ProductCategory(
+        name=category_in.name,
+        slug=slug,
+        description=category_in.description,
+        is_active=category_in.is_active,
+    )
+    db.add(category)
+    db.commit()
+    db.refresh(category)
+    log_admin_action(request, admin_user, "create", "category", category.id)
+    return category
+
+
+@app.patch("/admin/categories/{category_id}", response_model=CategoryOut)
+def admin_update_category(
+    category_id: int,
+    request: Request,
+    category_in: CategoryUpdate,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    category = get_category_or_404(db, category_id)
+    updates = category_in.model_dump(exclude_unset=True)
+    if "name" in updates and "slug" not in updates:
+        updates["slug"] = slugify(updates["name"])
+    if "slug" in updates:
+        ensure_unique_slug(db, ProductCategory, updates["slug"], category.id)
+    apply_model_updates(category, updates)
+    db.commit()
+    db.refresh(category)
+    log_admin_action(request, admin_user, "update", "category", category.id)
+    return category
+
+
+@app.delete("/admin/categories/{category_id}", response_model=MessageResponse)
+def admin_delete_category(
+    category_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    category = get_category_or_404(db, category_id)
+    db.delete(category)
+    db.commit()
+    log_admin_action(request, admin_user, "delete", "category", category_id)
+    return MessageResponse(message="Category deleted")
+
+
+@app.get("/admin/featured-items", response_model=list[FeaturedItemOut])
+def admin_list_featured_items(
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(FeaturedItem)
+        .order_by(
+            FeaturedItem.display_order.asc(),
+            FeaturedItem.id.asc(),
+        )
+        .all()
+    )
+
+
+@app.post("/admin/featured-items", response_model=FeaturedItemOut)
+def admin_create_featured_item(
+    request: Request,
+    item_in: FeaturedItemCreate,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    get_product_or_404(db, item_in.product_id)
+    item = FeaturedItem(**item_in.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    log_admin_action(request, admin_user, "create", "featured_item", item.id)
+    return item
+
+
+@app.patch("/admin/featured-items/{item_id}", response_model=FeaturedItemOut)
+def admin_update_featured_item(
+    item_id: int,
+    request: Request,
+    item_in: FeaturedItemUpdate,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    item = get_featured_item_or_404(db, item_id)
+    updates = item_in.model_dump(exclude_unset=True)
+    if "product_id" in updates:
+        get_product_or_404(db, updates["product_id"])
+    apply_model_updates(item, updates)
+    db.commit()
+    db.refresh(item)
+    log_admin_action(request, admin_user, "update", "featured_item", item.id)
+    return item
+
+
+@app.delete("/admin/featured-items/{item_id}", response_model=MessageResponse)
+def admin_delete_featured_item(
+    item_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    item = get_featured_item_or_404(db, item_id)
+    db.delete(item)
+    db.commit()
+    log_admin_action(request, admin_user, "delete", "featured_item", item_id)
+    return MessageResponse(message="Featured item deleted")
+
+
+@app.get("/admin/seasonal-collections", response_model=list[SeasonalCollectionOut])
+def admin_list_seasonal_collections(
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    return db.query(SeasonalCollection).order_by(SeasonalCollection.id.asc()).all()
+
+
+@app.post("/admin/seasonal-collections", response_model=SeasonalCollectionOut)
+def admin_create_seasonal_collection(
+    request: Request,
+    collection_in: SeasonalCollectionCreate,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    slug = collection_in.slug or slugify(collection_in.name)
+    ensure_unique_slug(db, SeasonalCollection, slug)
+    collection = SeasonalCollection(
+        **collection_in.model_dump(exclude={"slug"}),
+        slug=slug,
+    )
+    db.add(collection)
+    db.commit()
+    db.refresh(collection)
+    log_admin_action(request, admin_user, "create", "seasonal_collection", collection.id)
+    return collection
+
+
+@app.patch("/admin/seasonal-collections/{collection_id}", response_model=SeasonalCollectionOut)
+def admin_update_seasonal_collection(
+    collection_id: int,
+    request: Request,
+    collection_in: SeasonalCollectionUpdate,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    collection = get_collection_or_404(db, collection_id)
+    updates = collection_in.model_dump(exclude_unset=True)
+    if "name" in updates and "slug" not in updates:
+        updates["slug"] = slugify(updates["name"])
+    if "slug" in updates:
+        ensure_unique_slug(db, SeasonalCollection, updates["slug"], collection.id)
+    apply_model_updates(collection, updates)
+    db.commit()
+    db.refresh(collection)
+    log_admin_action(request, admin_user, "update", "seasonal_collection", collection.id)
+    return collection
+
+
+@app.delete("/admin/seasonal-collections/{collection_id}", response_model=MessageResponse)
+def admin_delete_seasonal_collection(
+    collection_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("catalog:manage")),
+    db: Session = Depends(get_db),
+):
+    collection = get_collection_or_404(db, collection_id)
+    db.delete(collection)
+    db.commit()
+    log_admin_action(request, admin_user, "delete", "seasonal_collection", collection_id)
+    return MessageResponse(message="Seasonal collection deleted")
+
+
+@app.get("/admin/knowledge-base", response_model=list[KnowledgeBaseOut])
+def admin_list_knowledge_base(
+    kind: str | None = None,
+    admin_user: User = Depends(require_permission("knowledge:manage")),
+    db: Session = Depends(get_db),
+):
+    query = db.query(KnowledgeBaseItem)
+    if kind:
+        query = query.filter(KnowledgeBaseItem.kind == kind)
+    items = query.order_by(KnowledgeBaseItem.kind.asc(), KnowledgeBaseItem.title.asc()).all()
+    return [knowledge_item_response(item) for item in items]
+
+
+@app.post("/admin/knowledge-base", response_model=KnowledgeBaseOut)
+def admin_create_knowledge_base_item(
+    request: Request,
+    item_in: KnowledgeBaseCreate,
+    admin_user: User = Depends(require_permission("knowledge:manage")),
+    db: Session = Depends(get_db),
+):
+    slug = item_in.slug or slugify(item_in.title)
+    ensure_unique_slug(db, KnowledgeBaseItem, slug)
+    item = KnowledgeBaseItem(
+        kind=item_in.kind,
+        slug=slug,
+        title=item_in.title,
+        content=item_in.content,
+        tags=dump_json_list(item_in.tags or []),
+        is_active=item_in.is_active,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    log_admin_action(request, admin_user, "create", "knowledge_base", item.id)
+    return knowledge_item_response(item)
+
+
+@app.patch("/admin/knowledge-base/{item_id}", response_model=KnowledgeBaseOut)
+def admin_update_knowledge_base_item(
+    item_id: int,
+    request: Request,
+    item_in: KnowledgeBaseUpdate,
+    admin_user: User = Depends(require_permission("knowledge:manage")),
+    db: Session = Depends(get_db),
+):
+    item = get_knowledge_item_or_404(db, item_id)
+    updates = item_in.model_dump(exclude_unset=True)
+    if "title" in updates and "slug" not in updates:
+        updates["slug"] = slugify(updates["title"])
+    if "slug" in updates:
+        ensure_unique_slug(db, KnowledgeBaseItem, updates["slug"], item.id)
+    if "tags" in updates:
+        updates["tags"] = dump_json_list(updates["tags"] or [])
+    apply_model_updates(item, updates)
+    item.updated_at = utc_now()
+    db.commit()
+    db.refresh(item)
+    log_admin_action(request, admin_user, "update", "knowledge_base", item.id)
+    return knowledge_item_response(item)
+
+
+@app.delete("/admin/knowledge-base/{item_id}", response_model=MessageResponse)
+def admin_delete_knowledge_base_item(
+    item_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("knowledge:manage")),
+    db: Session = Depends(get_db),
+):
+    item = get_knowledge_item_or_404(db, item_id)
+    db.delete(item)
+    db.commit()
+    log_admin_action(request, admin_user, "delete", "knowledge_base", item_id)
+    return MessageResponse(message="Knowledge-base item deleted")
+
+
+@app.get("/admin/config", response_model=list[AppConfigOut])
+def admin_list_config(
+    admin_user: User = Depends(require_permission("config:manage")),
+    db: Session = Depends(get_db),
+):
+    return db.query(AppConfigEntry).order_by(AppConfigEntry.key.asc()).all()
+
+
+@app.post("/admin/config", response_model=AppConfigOut)
+def admin_create_config_entry(
+    request: Request,
+    entry_in: AppConfigCreate,
+    admin_user: User = Depends(require_permission("config:manage")),
+    db: Session = Depends(get_db),
+):
+    ensure_unique_key(db, AppConfigEntry, entry_in.key)
+    entry = AppConfigEntry(**entry_in.model_dump())
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    log_admin_action(request, admin_user, "create", "config", entry.id)
+    return entry
+
+
+@app.patch("/admin/config/{entry_id}", response_model=AppConfigOut)
+def admin_update_config_entry(
+    entry_id: int,
+    request: Request,
+    entry_in: AppConfigUpdate,
+    admin_user: User = Depends(require_permission("config:manage")),
+    db: Session = Depends(get_db),
+):
+    entry = get_config_entry_or_404(db, entry_id)
+    updates = entry_in.model_dump(exclude_unset=True)
+    apply_model_updates(entry, updates)
+    entry.updated_at = utc_now()
+    db.commit()
+    db.refresh(entry)
+    log_admin_action(request, admin_user, "update", "config", entry.id)
+    return entry
+
+
+@app.delete("/admin/config/{entry_id}", response_model=MessageResponse)
+def admin_delete_config_entry(
+    entry_id: int,
+    request: Request,
+    admin_user: User = Depends(require_permission("config:manage")),
+    db: Session = Depends(get_db),
+):
+    entry = get_config_entry_or_404(db, entry_id)
+    db.delete(entry)
+    db.commit()
+    log_admin_action(request, admin_user, "delete", "config", entry_id)
+    return MessageResponse(message="Config entry deleted")
+
+
+@app.get("/admin/leads", response_model=list[LeadCaptureOut])
+def admin_list_leads(
+    admin_user: User = Depends(require_permission("leads:manage")),
+    db: Session = Depends(get_db),
+):
+    return db.query(LeadCapture).order_by(LeadCapture.created_at.desc()).all()
+
+
+@app.get("/admin/metrics")
+def admin_metrics(
+    admin_user: User = Depends(require_permission("metrics:read")),
+):
+    return metrics_snapshot()
+
+
+@app.get("/admin/integrations/status")
+def admin_integrations_status(
+    admin_user: User = Depends(require_permission("metrics:read")),
+):
+    return integration_status()
+
+
+@app.get("/admin/integrations/events", response_model=list[ExternalIntegrationEventOut])
+def admin_integration_events(
+    service: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("metrics:read")),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ExternalIntegrationEvent)
+    if service:
+        query = query.filter(ExternalIntegrationEvent.service == service)
+    return query.order_by(ExternalIntegrationEvent.created_at.desc()).limit(limit).all()
+
+
+@app.post("/admin/email/test", response_model=MessageResponse)
+def admin_test_email(
+    request: Request,
+    payload: EmailTestRequest | None = None,
+    admin_user: User = Depends(require_permission("metrics:read")),
+):
+    if not email_provider_is_configured():
+        raise HTTPException(status_code=400, detail="Email provider is not configured")
+
+    to_email = str(payload.to_email) if payload and payload.to_email else admin_user.email
+    sent = send_email(
+        to_email,
+        "Jewellery Chat email test",
+        (
+            "This is a test email from your Jewellery Chat backend.\n\n"
+            "If you received this, email delivery is working."
+        ),
+    )
+    if not sent:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Email test failed. Check EMAIL_PROVIDER, EMAIL_FROM, and the selected "
+                "provider secret such as RESEND_API_KEY or SMTP credentials."
+            ),
+        )
+
+    log_admin_action(request, admin_user, "test_email", "email")
+    return MessageResponse(message="Email test sent")
+
+
+@app.post("/admin/alerts/test", response_model=MessageResponse)
+def admin_test_alert(
+    request: Request,
+    admin_user: User = Depends(require_permission("metrics:read")),
+):
+    payload = {
+        "admin_user_id": admin_user.id,
+        "request_id": request_id_from_request(request),
+    }
+    webhook_sent = send_monitoring_alert(
+        "monitoring.test_alert",
+        severity="info",
+        payload=payload,
+    )
+    sentry_sent = capture_message_for_monitoring(
+        "monitoring.test_alert",
+        severity="info",
+        request=request,
+        payload=payload,
+    )
+    if webhook_sent or sentry_sent:
+        log_admin_action(request, admin_user, "test_alert", "monitoring")
+        return MessageResponse(
+            message=(
+                "Monitoring alert sent "
+                f"(webhook={str(webhook_sent).lower()}, sentry={str(sentry_sent).lower()})"
+            )
+        )
+    return MessageResponse(message="Monitoring webhook and Sentry are not configured")
+
+
+@app.get("/admin/analytics/chat")
+def admin_chat_analytics(
+    limit: int = 500,
+    admin_user: User = Depends(require_permission("metrics:read")),
+    db: Session = Depends(get_db),
+):
+    return chat_analytics_snapshot(db, limit)
+
+
+@app.get("/admin/chat-transcripts/review")
+def admin_chat_transcript_review(
+    limit: int = 25,
+    include_reviewed: bool = False,
+    admin_user: User = Depends(require_permission("metrics:read")),
+    db: Session = Depends(get_db),
+):
+    return transcript_review_items(db, limit, include_reviewed)
+
+
+@app.patch("/admin/chat-transcripts/{response_id}/review")
+def admin_mark_chat_transcript_reviewed(
+    response_id: str,
+    payload: TranscriptReviewUpdate,
+    request: Request,
+    admin_user: User = Depends(require_permission("metrics:read")),
+    db: Session = Depends(get_db),
+):
+    row = (
+        db.query(ChatResponseAnalytics)
+        .filter(ChatResponseAnalytics.response_id == response_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Chat response not found")
+
+    row.reviewed_at = utc_now()
+    row.review_notes = payload.notes
+    db.commit()
+    log_admin_action(request, admin_user, "review", "chat_transcript", row.id)
+    return {
+        "message": "Chat transcript marked reviewed",
+        "response_id": row.response_id,
+        "reviewed_at": row.reviewed_at,
+    }
+
+
+@app.patch("/admin/leads/{lead_id}", response_model=LeadCaptureOut)
+def admin_update_lead_status(
+    lead_id: int,
+    request: Request,
+    lead_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("leads:manage")),
+    db: Session = Depends(get_db),
+):
+    lead = db.query(LeadCapture).filter(LeadCapture.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    lead.status = lead_in.status
+    db.commit()
+    db.refresh(lead)
+    log_admin_action(request, admin_user, "update_status", "lead", lead.id)
+    return lead
+
+
+@app.get("/admin/request-callbacks", response_model=list[CallbackRequestOut])
+def admin_list_callback_requests(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return db.query(CallbackRequest).order_by(CallbackRequest.created_at.desc()).limit(limit).all()
+
+
+@app.patch("/admin/request-callbacks/{callback_id}", response_model=CallbackRequestOut)
+def admin_update_callback_request(
+    callback_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    callback = get_record_or_404(db, CallbackRequest, callback_id, "Callback request not found")
+    callback.status = status_in.status
+    db.commit()
+    db.refresh(callback)
+    log_admin_action(request, admin_user, "update_status", "callback_request", callback.id)
+    return callback
+
+
+@app.get("/admin/appointments", response_model=list[AppointmentOut])
+def admin_list_appointments(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(AppointmentBooking)
+        .order_by(AppointmentBooking.appointment_time.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.patch("/admin/appointments/{appointment_id}", response_model=AppointmentOut)
+def admin_update_appointment(
+    appointment_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    appointment = get_record_or_404(db, AppointmentBooking, appointment_id, "Appointment not found")
+    appointment.status = status_in.status
+    db.commit()
+    db.refresh(appointment)
+    log_admin_action(request, admin_user, "update_status", "appointment", appointment.id)
+    return appointment
+
+
+@app.get("/admin/custom-orders", response_model=list[CustomOrderOut])
+def admin_list_custom_orders(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(CustomOrderRequest)
+        .order_by(CustomOrderRequest.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.patch("/admin/custom-orders/{request_id}", response_model=CustomOrderOut)
+def admin_update_custom_order(
+    request_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    custom_order = get_record_or_404(
+        db, CustomOrderRequest, request_id, "Custom order request not found"
+    )
+    custom_order.status = status_in.status
+    db.commit()
+    db.refresh(custom_order)
+    log_admin_action(request, admin_user, "update_status", "custom_order", custom_order.id)
+    return custom_order
+
+
+@app.get("/admin/ai-concepts", response_model=list[AiGeneratedConceptOut])
+def admin_list_ai_concepts(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    concepts = (
+        db.query(AiGeneratedConcept)
+        .order_by(AiGeneratedConcept.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [ai_generated_concept_out(concept) for concept in concepts]
+
+
+@app.get("/admin/complaints", response_model=list[ComplaintOut])
+def admin_list_complaints(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return db.query(ComplaintTicket).order_by(ComplaintTicket.created_at.desc()).limit(limit).all()
+
+
+@app.patch("/admin/complaints/{ticket_id}", response_model=ComplaintOut)
+def admin_update_complaint(
+    ticket_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    complaint = get_record_or_404(db, ComplaintTicket, ticket_id, "Complaint ticket not found")
+    complaint.status = status_in.status
+    db.commit()
+    db.refresh(complaint)
+    log_admin_action(request, admin_user, "update_status", "complaint", complaint.id)
+    return complaint
+
+
+@app.get("/admin/orders", response_model=list[OrderSnapshotOut])
+def admin_list_orders(
+    status_filter: str | None = Query(default=None, alias="status"),
+    source: str | None = None,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    query = db.query(OrderSnapshot).order_by(OrderSnapshot.created_at.desc())
+    if status_filter:
+        query = query.filter(OrderSnapshot.status == status_filter)
+    if source:
+        query = query.filter(OrderSnapshot.source == source)
+    return [serialize_order_snapshot(db, order) for order in query.all()]
+
+
+@app.patch("/admin/orders/{order_id}", response_model=OrderSnapshotOut)
+def admin_update_order(
+    order_id: int,
+    payload: OrderStatusUpdate,
+    request: Request,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    order = db.query(OrderSnapshot).filter(OrderSnapshot.id == order_id).with_for_update().first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    previous_status = order.status
+    updates = payload.model_dump(exclude_unset=True)
+    if "delivery_address" in updates:
+        order.delivery_address = dump_json_object(updates.pop("delivery_address") or {})
+    for field, value in updates.items():
+        setattr(order, field, value)
+    order.updated_at = utc_now()
+    from order_notifications import enqueue_admin_order_status
+
+    enqueue_admin_order_status(db, order, previous_status, admin_user.id)
+    log_admin_action(request, admin_user, "update", "order", order.id)
+    db.commit()
+    db.refresh(order)
+    return serialize_order_snapshot(db, order)
+
+
+@app.post("/admin/payments/razorpay/reconcile")
+def admin_reconcile_razorpay_payments(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    if not razorpay_checkout_is_configured():
+        raise HTTPException(status_code=503, detail="Razorpay checkout API is not configured")
+
+    result = reconcile_razorpay_orders(db, limit=limit)
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="reconcile_payment",
+        status_value="completed",
+        user_id=admin_user.id,
+        response_payload=result,
+    )
+    db.commit()
+    log_admin_action(request, admin_user, "reconcile", "razorpay_payments")
+    return result
+
+
+@app.get("/admin/orders/support", response_model=list[OrderSupportOut])
+def admin_list_order_support_requests(
+    limit: int = Query(default=100, ge=1, le=500),
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(OrderSupportRequest)
+        .order_by(OrderSupportRequest.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.patch("/admin/orders/support/{request_id}", response_model=OrderSupportOut)
+def admin_update_order_support_request(
+    request_id: int,
+    request: Request,
+    status_in: LeadStatusUpdate,
+    admin_user: User = Depends(require_permission("support:manage")),
+    db: Session = Depends(get_db),
+):
+    order_request = get_record_or_404(
+        db, OrderSupportRequest, request_id, "Order support request not found"
+    )
+    order_request.status = status_in.status
+    db.commit()
+    db.refresh(order_request)
+    log_admin_action(request, admin_user, "update_status", "order_support", order_request.id)
+    return order_request
+
+
+def create_or_update_saved_item(
+    db: Session,
+    model,
+    user_id: int,
+    payload: SavedItemCreate,
+):
+    product = get_product_or_404(db, payload.product_id)
+    item = (
+        db.query(model)
+        .filter(
+            model.user_id == user_id,
+            model.product_id == payload.product_id,
+        )
+        .first()
+    )
+    if item:
+        item.note = payload.note
+    else:
+        item = model(
+            user_id=user_id,
+            product_id=payload.product_id,
+            note=payload.note,
+        )
+        db.add(item)
+    db.commit()
+    db.refresh(item)
+    return saved_product_response(item, product)
+
+
+def list_saved_items(db: Session, model, user_id: int) -> list[SavedProductOut]:
+    items = db.query(model).filter(model.user_id == user_id).order_by(model.created_at.desc()).all()
+    responses = []
+    for item in items:
+        product = db.query(Product).filter(Product.id == item.product_id).first()
+        if product:
+            responses.append(saved_product_response(item, product))
+    return responses
+
+
+def delete_saved_item(db: Session, model, user_id: int, item_id: int) -> None:
+    item = (
+        db.query(model)
+        .filter(
+            model.id == item_id,
+            model.user_id == user_id,
+        )
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Saved item not found")
+    db.delete(item)
+    db.commit()
+
+
+@app.get("/wishlist", response_model=list[SavedProductOut])
+def list_wishlist(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return list_saved_items(db, WishlistItem, current_user.id)
+
+
+@app.post("/wishlist", response_model=SavedProductOut)
+def add_to_wishlist(
+    payload: SavedItemCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return create_or_update_saved_item(db, WishlistItem, current_user.id, payload)
+
+
+@app.delete("/wishlist/{item_id}", response_model=MessageResponse)
+def remove_from_wishlist(
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    delete_saved_item(db, WishlistItem, current_user.id, item_id)
+    return MessageResponse(message="Wishlist item removed")
+
+
+@app.get("/save-for-later", response_model=list[SavedProductOut])
+def list_save_for_later(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return list_saved_items(db, SaveForLaterItem, current_user.id)
+
+
+@app.post("/save-for-later", response_model=SavedProductOut)
+def add_to_save_for_later(
+    payload: SavedItemCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return create_or_update_saved_item(db, SaveForLaterItem, current_user.id, payload)
+
+
+@app.delete("/save-for-later/{item_id}", response_model=MessageResponse)
+def remove_from_save_for_later(
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    delete_saved_item(db, SaveForLaterItem, current_user.id, item_id)
+    return MessageResponse(message="Saved item removed")
+
+
+@app.post("/request-callback", response_model=CallbackRequestOut)
+def request_callback(
+    payload: CallbackRequestCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    callback = CallbackRequest(
+        user_id=current_user.id,
+        name=payload.name or current_user.username,
+        phone=payload.phone,
+        email=str(payload.email) if payload.email else current_user.email,
+        reason=payload.reason,
+        preferred_time=payload.preferred_time,
+        status="new",
+    )
+    db.add(callback)
+    db.commit()
+    db.refresh(callback)
+    return callback
+
+
+@app.get("/request-callbacks/my", response_model=list[CallbackRequestOut])
+def list_my_callback_requests(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(CallbackRequest)
+        .filter(CallbackRequest.user_id == current_user.id)
+        .order_by(CallbackRequest.created_at.desc())
+        .all()
+    )
+
+
+@app.post("/appointments", response_model=AppointmentOut)
+def book_appointment(
+    payload: AppointmentCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    appointment = AppointmentBooking(
+        user_id=current_user.id,
+        name=payload.name or current_user.username,
+        phone=payload.phone,
+        email=str(payload.email) if payload.email else current_user.email,
+        store_location=payload.store_location,
+        appointment_time=payload.appointment_time,
+        purpose=payload.purpose,
+        status="requested",
+    )
+    db.add(appointment)
+    db.commit()
+    db.refresh(appointment)
+    return appointment
+
+
+@app.get("/appointments/my", response_model=list[AppointmentOut])
+def list_my_appointments(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(AppointmentBooking)
+        .filter(AppointmentBooking.user_id == current_user.id)
+        .order_by(AppointmentBooking.appointment_time.asc())
+        .all()
+    )
+
+
+@app.post("/custom-orders", response_model=CustomOrderOut)
+def create_custom_order_request(
+    payload: CustomOrderCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if payload.product_id is not None:
+        get_product_or_404(db, payload.product_id)
+
+    custom_order = CustomOrderRequest(
+        user_id=current_user.id,
+        product_id=payload.product_id,
+        session_id=payload.session_id,
+        description=payload.description,
+        budget=payload.budget,
+        metal=payload.metal,
+        category=payload.category,
+        status="requested",
+    )
+    db.add(custom_order)
+    create_customer_action_lead(
+        db,
+        current_user,
+        source="custom_order",
+        intent="custom_order",
+        message=payload.description,
+        session_id=payload.session_id,
+    )
+    db.commit()
+    db.refresh(custom_order)
+    return custom_order
+
+
+@app.get("/custom-orders/my", response_model=list[CustomOrderOut])
+def list_my_custom_orders(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(CustomOrderRequest)
+        .filter(CustomOrderRequest.user_id == current_user.id)
+        .order_by(CustomOrderRequest.created_at.desc())
+        .all()
+    )
+
+
+@app.post("/ai-concepts", response_model=AiGeneratedConceptOut)
+def save_ai_generated_concept(
+    payload: AiGeneratedConceptCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    existing = (
+        db.query(AiGeneratedConcept)
+        .filter(
+            AiGeneratedConcept.user_id == current_user.id,
+            AiGeneratedConcept.concept_id == payload.concept_id,
+        )
+        .first()
+    )
+
+    fields = {
+        "name": payload.name,
+        "source_prompt": payload.source_prompt,
+        "design_brief": payload.design_brief,
+        "materials": dump_json_list(payload.materials),
+        "craft_notes": dump_json_list(payload.craft_notes),
+        "image_base64": payload.image_base64,
+        "image_mime_type": payload.image_mime_type,
+        "answer_source": payload.answer_source,
+        "category": payload.category,
+        "metal": payload.metal,
+        "gemstones": dump_json_list(payload.gemstones),
+        "budget": payload.budget,
+        "related_product_ids": dump_json_list(payload.related_product_ids),
+    }
+
+    created_new = existing is None
+    if existing:
+        for key, value in fields.items():
+            setattr(existing, key, value)
+        concept = existing
+    else:
+        concept = AiGeneratedConcept(
+            concept_id=payload.concept_id,
+            user_id=current_user.id,
+            status="generated",
+            **fields,
+        )
+        db.add(concept)
+
+    if created_new:
+        create_customer_action_lead(
+            db,
+            current_user,
+            source="ai_concept",
+            intent="custom_order",
+            message=f"{payload.name}: {payload.design_brief}",
+            session_id=payload.concept_id,
+        )
+    db.commit()
+    db.refresh(concept)
+    return ai_generated_concept_out(concept)
+
+
+@app.get("/ai-concepts/my", response_model=list[AiGeneratedConceptOut])
+def list_my_ai_generated_concepts(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    concepts = (
+        db.query(AiGeneratedConcept)
+        .filter(AiGeneratedConcept.user_id == current_user.id)
+        .order_by(AiGeneratedConcept.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return [ai_generated_concept_out(concept) for concept in concepts]
+
+
+@app.post("/complaints", response_model=ComplaintOut)
+def create_complaint_ticket(
+    payload: ComplaintCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    complaint = ComplaintTicket(
+        user_id=current_user.id,
+        order_reference=payload.order_reference,
+        category=payload.category,
+        message=payload.message,
+        priority=payload.priority,
+        status="open",
+    )
+    db.add(complaint)
+    create_customer_action_lead(
+        db,
+        current_user,
+        source="complaint",
+        intent="complaint",
+        message=payload.message,
+    )
+    db.commit()
+    db.refresh(complaint)
+    return complaint
+
+
+@app.get("/complaints/my", response_model=list[ComplaintOut])
+def list_my_complaints(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(ComplaintTicket)
+        .filter(ComplaintTicket.user_id == current_user.id)
+        .order_by(ComplaintTicket.created_at.desc())
+        .all()
+    )
+
+
+@app.post("/payments/razorpay/orders", response_model=RazorpayOrderOut)
+def create_razorpay_checkout_order(
+    request: Request,
+    payload: RazorpayOrderCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not razorpay_checkout_is_configured():
+        raise HTTPException(status_code=503, detail="Razorpay checkout API is not configured")
+
+    hydrate_payment_firebase_identity(db, current_user, payload)
+    calculation = authoritative_checkout_calculation(db, payload, current_user)
+    request_payload = razorpay_order_request_payload(payload, current_user, calculation)
+    try:
+        status_code, razorpay_response = call_razorpay("POST", "orders", request_payload)
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="create_order",
+            status_value="failed",
+            user_id=current_user.id,
+            request_payload=request_payload,
+            response_payload={"error_body": error_body[:1200]},
+            status_code=exc.code,
+            error=f"Razorpay returned {exc.code}",
+        )
+        db.commit()
+        log_event(
+            "payments.razorpay_order_create_failed",
+            request,
+            level=logging.ERROR,
+            status_code=exc.code,
+            error_body=error_body[:500],
+        )
+        raise HTTPException(status_code=502, detail="Could not create Razorpay order") from exc
+    except Exception as exc:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="create_order",
+            status_value="failed",
+            user_id=current_user.id,
+            request_payload=request_payload,
+            error=exc.__class__.__name__,
+        )
+        db.commit()
+        log_event(
+            "payments.razorpay_order_create_failed",
+            request,
+            level=logging.ERROR,
+            error_type=exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=502, detail="Could not create Razorpay order") from exc
+
+    razorpay_order_id = str(razorpay_response.get("id") or "").strip()
+    if not razorpay_order_id:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="create_order",
+            status_value="failed",
+            user_id=current_user.id,
+            request_payload=request_payload,
+            response_payload=razorpay_response,
+            status_code=status_code,
+            error="Missing Razorpay order id",
+        )
+        db.commit()
+        raise HTTPException(status_code=502, detail="Razorpay order response was invalid")
+
+    amount = int(razorpay_response.get("amount") or 0)
+    currency = str(razorpay_response.get("currency") or payload.currency).upper()
+    if amount != calculation["amount"] or currency != calculation["currency"]:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="create_order",
+            status_value="amount_mismatch",
+            user_id=current_user.id,
+            request_payload=request_payload,
+            response_payload=razorpay_response,
+            status_code=status_code,
+            error="Razorpay order amount or currency did not match backend calculation",
+        )
+        db.commit()
+        send_monitoring_alert(
+            "payments.razorpay_order_amount_mismatch",
+            severity="error",
+            payload={
+                "expected_amount": calculation["amount"],
+                "actual_amount": amount,
+                "expected_currency": calculation["currency"],
+                "actual_currency": currency,
+            },
+        )
+        raise HTTPException(status_code=502, detail="Razorpay order response amount was invalid")
+
+    order_payload = OrderSyncRequest(
+        order_reference=razorpay_order_id,
+        status="payment_pending",
+        total=calculation["payable_total"],
+        currency=currency,
+        items=calculation["items"],
+        customer_name=payload.customer_name,
+        customer_email=payload.customer_email,
+        customer_phone=payload.customer_phone,
+        delivery_address=payload.delivery_address,
+        payment_status="pending",
+        source="razorpay_checkout",
+        raw_payload={
+            "metadata": calculation["metadata"],
+            "client_payload": payload.model_dump(mode="json"),
+            "razorpay_create_request": request_payload,
+            "razorpay_order": razorpay_response,
+        },
+    )
+    order = upsert_local_order_snapshot(db, current_user, order_payload)
+    try:
+        create_firestore_payment_attempt(
+            current_user,
+            order,
+            calculation,
+            payload,
+            razorpay_response,
+        )
+    except HTTPException:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="firestore_commerce",
+            action="create_payment_attempt",
+            status_value="failed",
+            user_id=current_user.id,
+            reference=razorpay_order_id,
+            request_payload={"calculation_authority": calculation.get("authority", "local")},
+            error="Could not create Firestore payment attempt",
+        )
+        db.commit()
+        send_monitoring_alert(
+            "payments.firestore_payment_attempt_failed",
+            severity="error",
+            payload={
+                "order_reference": razorpay_order_id,
+                "user_id": current_user.id,
+            },
+        )
+        raise
+    except Exception as exc:
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="firestore_commerce",
+            action="create_payment_attempt",
+            status_value="failed",
+            user_id=current_user.id,
+            reference=razorpay_order_id,
+            request_payload={"calculation_authority": calculation.get("authority", "local")},
+            error=exc.__class__.__name__,
+        )
+        db.commit()
+        send_monitoring_alert(
+            "payments.firestore_payment_attempt_failed",
+            severity="error",
+            payload={
+                "order_reference": razorpay_order_id,
+                "user_id": current_user.id,
+                "error": exc.__class__.__name__,
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not lock checkout attempt in Firestore",
+        ) from exc
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="create_order",
+        status_value="created",
+        user_id=current_user.id,
+        reference=razorpay_order_id,
+        request_payload=request_payload,
+        response_payload=razorpay_response,
+        status_code=status_code,
+    )
+    increment_metric("razorpay_order_creates")
+    db.commit()
+    db.refresh(order)
+    log_event(
+        "payments.razorpay_order_created",
+        request,
+        order_reference=razorpay_order_id,
+        amount=amount,
+        currency=currency,
+    )
+    return RazorpayOrderOut(
+        key_id=RAZORPAY_KEY_ID or "",
+        keyId=RAZORPAY_KEY_ID or "",
+        order_id=razorpay_order_id,
+        razorpayOrderId=razorpay_order_id,
+        order_reference=razorpay_order_id,
+        local_order_id=order.id,
+        amount=amount,
+        currency=currency,
+        receipt=razorpay_response.get("receipt") or request_payload["receipt"],
+        status=str(razorpay_response.get("status") or "created"),
+        payable_total=order.total,
+        payableTotal=order.total,
+        coupon_discount=calculation["coupon_discount"],
+        couponDiscount=calculation["coupon_discount"],
+        reward_points_used=calculation["reward_points_used"],
+        rewardPointsUsed=calculation["reward_points_used"],
+        server_calculated=True,
+    )
+
+
+@app.post("/payments/razorpay/verify", response_model=RazorpayPaymentVerifyOut)
+def verify_razorpay_checkout_payment(
+    request: Request,
+    payload: RazorpayPaymentVerifyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not razorpay_checkout_is_configured():
+        raise HTTPException(status_code=503, detail="Razorpay checkout API is not configured")
+
+    order = local_order_for_user(db, current_user.id, payload.razorpay_order_id)
+    if order is None:
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="verify_payment",
+            status_value="missing_order",
+            user_id=current_user.id,
+            reference=payload.razorpay_order_id,
+            request_payload=payload.model_dump(),
+            error="Order does not belong to current user or was not created by backend",
+        )
+        db.commit()
+        raise HTTPException(status_code=404, detail="Razorpay order was not found")
+
+    if not razorpay_checkout_signature_is_valid(
+        payload.razorpay_order_id,
+        payload.razorpay_payment_id,
+        payload.razorpay_signature,
+    ):
+        increment_metric("razorpay_failures")
+        record_integration_event(
+            db,
+            service="razorpay",
+            action="verify_payment",
+            status_value="invalid_signature",
+            user_id=current_user.id,
+            reference=payload.razorpay_order_id,
+            request_payload={
+                "razorpay_order_id": payload.razorpay_order_id,
+                "razorpay_payment_id": payload.razorpay_payment_id,
+            },
+            error="Invalid Razorpay payment signature",
+        )
+        db.commit()
+        log_event(
+            "payments.razorpay_checkout_invalid_signature",
+            request,
+            level=logging.WARNING,
+            order_reference=payload.razorpay_order_id,
+            payment_id=payload.razorpay_payment_id,
+        )
+        raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
+
+    try:
+        finalization = finalize_razorpay_payment(
+            db,
+            order,
+            payload.razorpay_payment_id,
+            source="verify",
+        )
+    except HTTPException:
+        db.commit()
+        raise
+
+    append_order_raw_payload(
+        order,
+        "razorpay_checkout_verification",
+        {
+            "razorpay_order_id": payload.razorpay_order_id,
+            "razorpay_payment_id": payload.razorpay_payment_id,
+            "verified_at": order.updated_at.isoformat(),
+            "finalization_status": finalization["status"],
+        },
+    )
+    record_integration_event(
+        db,
+        service="razorpay",
+        action="verify_payment",
+        status_value=str(finalization["status"]),
+        user_id=current_user.id,
+        reference=payload.razorpay_order_id,
+        request_payload={
+            "razorpay_order_id": payload.razorpay_order_id,
+            "razorpay_payment_id": payload.razorpay_payment_id,
+        },
+        response_payload={
+            "order_snapshot_id": order.id,
+            "payment_status": order.payment_status,
+        },
+    )
+    increment_metric("razorpay_payment_verifications")
+    db.commit()
+    db.refresh(order)
+    log_event(
+        "payments.razorpay_checkout_verified",
+        request,
+        order_reference=payload.razorpay_order_id,
+        payment_id=payload.razorpay_payment_id,
+    )
+    return RazorpayPaymentVerifyOut(
+        message="Payment verified",
+        verified=True,
+        payment_id=payload.razorpay_payment_id,
+        paymentId=payload.razorpay_payment_id,
+        order_reference=order.order_reference,
+        orderId=order.order_reference,
+        status=order.status,
+        payment_status=order.payment_status or "verified",
+        paymentStatus=order.payment_status or "verified",
+        total=order.total,
+        currency=order.currency,
+        items=[serialize_order_item(item) for item in local_order_items(db, order.id)],
+        metadata=order_snapshot_metadata(order),
+        order=serialize_order_snapshot(db, order),
+    )
+
+
+@app.post("/payments/razorpay/webhook", response_model=MessageResponse)
+async def receive_razorpay_webhook(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not razorpay_webhook_is_configured():
+        raise HTTPException(status_code=503, detail="Razorpay webhook is not configured")
+
+    raw_body = await request.body()
+    signature = request.headers.get("x-razorpay-signature")
+    if not razorpay_signature_is_valid(raw_body, signature):
+        log_event("payments.razorpay_invalid_signature", request, level=logging.WARNING)
+        raise HTTPException(status_code=401, detail="Invalid Razorpay signature")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook payload")
+
+    return await run_in_threadpool(process_razorpay_webhook, db, payload, request)
+
+
+def process_razorpay_webhook(db: Session, payload: dict, request: Request):
+    """Keep blocking SQL and provider calls off the ASGI event loop."""
+    result = apply_razorpay_webhook(db, payload)
+    increment_metric("razorpay_webhooks")
+    db.commit()
+    log_event(
+        "payments.razorpay_webhook_received",
+        request,
+        event_name=result["event"],
+        status_value=result["status"],
+        order_reference=result["order_reference"],
+        payment_id=result["payment_id"],
+    )
+    return MessageResponse(message="ok")
+
+
+@app.post("/orders/sync", response_model=OrderSnapshotOut)
+def sync_order_snapshot(
+    payload: OrderSyncRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Compatibility lookup only. Customers cannot author payment/fulfilment
+    # state, prices, items, source markers or totals through legacy sync.
+    order = local_order_for_user(db, current_user.id, payload.order_reference)
+    if order is None:
+        raise HTTPException(409, "Order not found; verify payment or contact support")
+    return serialize_order_snapshot(db, order)
+
+
+@app.get("/orders/my", response_model=list[OrderSnapshotOut])
+def list_my_orders(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    orders = (
+        db.query(OrderSnapshot)
+        .filter(OrderSnapshot.user_id == current_user.id)
+        .order_by(OrderSnapshot.created_at.desc())
+        .all()
+    )
+    return [serialize_order_snapshot(db, order) for order in orders]
+
+
+@app.post("/orders/support", response_model=OrderSupportOut)
+def create_order_support_request(
+    payload: OrderSupportCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    integration_state = "capture_only"
+    oms_response: dict[str, Any] = {}
+    integration_error = None
+    status_code = None
+    oms_payload = {
+        "request_type": payload.request_type,
+        "message": payload.message,
+        "source": "chatbot_api",
+    }
+    if payload.request_type in {"cancel", "return", "refund"}:
+        integration_state, oms_response, integration_error, status_code = (
+            submit_order_action_backend(
+                db,
+                current_user,
+                payload.order_reference,
+                payload.request_type,
+                oms_payload,
+            )
+        )
+    elif payload.request_type in {"status", "delivery"} and payload.order_reference:
+        integration_state, oms_response, integration_error, status_code = lookup_order_backend(
+            db,
+            current_user,
+            payload.order_reference,
+        )
+
+    order_request = OrderSupportRequest(
+        user_id=current_user.id,
+        order_reference=payload.order_reference,
+        request_type=payload.request_type,
+        message=payload.message,
+        status=order_request_status(integration_state),
+    )
+    db.add(order_request)
+    record_integration_event(
+        db,
+        service="oms",
+        action=payload.request_type,
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=payload.order_reference,
+        request_payload=oms_payload,
+        response_payload=oms_response,
+        status_code=status_code,
+        error=integration_error,
+    )
+    create_customer_action_lead(
+        db,
+        current_user,
+        source="order_support",
+        intent=(
+            "return_refund"
+            if payload.request_type in {"cancel", "return", "refund"}
+            else "order_status"
+        ),
+        message=payload.message or payload.request_type,
+    )
+    db.commit()
+    db.refresh(order_request)
+    if integration_state == "failed":
+        send_monitoring_alert(
+            "oms.request_failed",
+            payload={
+                "order_reference": payload.order_reference,
+                "request_type": payload.request_type,
+                "error": integration_error,
+            },
+        )
+    return OrderSupportOut.model_validate(order_request).model_copy(
+        update={"integration_status": integration_state, "oms_response": oms_response}
+    )
+
+
+@app.get("/orders/support/my", response_model=list[OrderSupportOut])
+def list_my_order_support_requests(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(OrderSupportRequest)
+        .filter(OrderSupportRequest.user_id == current_user.id)
+        .order_by(OrderSupportRequest.created_at.desc())
+        .all()
+    )
+
+
+@app.get("/orders/{order_reference}", response_model=OrderLookupOut)
+def get_order_status(
+    order_reference: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    integration_state, data, error, status_code = lookup_order_backend(
+        db, current_user, order_reference
+    )
+    record_integration_event(
+        db,
+        service="oms",
+        action="lookup",
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=order_reference,
+        response_payload=data,
+        status_code=status_code,
+        error=error,
+    )
+    db.commit()
+    if integration_state == "failed":
+        send_monitoring_alert(
+            "oms.lookup_failed",
+            payload={"order_reference": order_reference, "error": error},
+        )
+    return OrderLookupOut(
+        order_reference=order_reference,
+        integration_status=integration_state,
+        data=data,
+        message=error,
+    )
+
+
+@app.post("/orders/{order_reference}/cancel", response_model=OrderActionOut)
+def cancel_order(
+    order_reference: str,
+    payload: OrderActionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    request_payload = payload.model_dump()
+    integration_state, data, error, status_code = submit_order_action_backend(
+        db, current_user, order_reference, "cancel", request_payload
+    )
+    record_integration_event(
+        db,
+        service="oms",
+        action="cancel",
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=order_reference,
+        request_payload=request_payload,
+        response_payload=data,
+        status_code=status_code,
+        error=error,
+    )
+    db.commit()
+    return {
+        "order_reference": order_reference,
+        "action": "cancel",
+        "integration_status": integration_state,
+        "data": data,
+        "message": error,
+    }
+
+
+@app.post("/orders/{order_reference}/return", response_model=OrderActionOut)
+def request_order_return(
+    order_reference: str,
+    payload: OrderActionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    request_payload = payload.model_dump()
+    integration_state, data, error, status_code = submit_order_action_backend(
+        db, current_user, order_reference, "return", request_payload
+    )
+    record_integration_event(
+        db,
+        service="oms",
+        action="return",
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=order_reference,
+        request_payload=request_payload,
+        response_payload=data,
+        status_code=status_code,
+        error=error,
+    )
+    db.commit()
+    return {
+        "order_reference": order_reference,
+        "action": "return",
+        "integration_status": integration_state,
+        "data": data,
+        "message": error,
+    }
+
+
+@app.post("/orders/{order_reference}/refund", response_model=OrderActionOut)
+def request_order_refund(
+    order_reference: str,
+    payload: OrderActionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    request_payload = payload.model_dump()
+    integration_state, data, error, status_code = submit_order_action_backend(
+        db, current_user, order_reference, "refund", request_payload
+    )
+    record_integration_event(
+        db,
+        service="oms",
+        action="refund",
+        status_value=integration_state,
+        user_id=current_user.id,
+        reference=order_reference,
+        request_payload=request_payload,
+        response_payload=data,
+        status_code=status_code,
+        error=error,
+    )
+    db.commit()
+    return {
+        "order_reference": order_reference,
+        "action": "refund",
+        "integration_status": integration_state,
+        "data": data,
+        "message": error,
+    }
+
+
+@app.post("/feedback", response_model=MessageResponse)
+def submit_feedback(
+    request: Request,
+    payload: FeedbackCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    analytics = None
+    if payload.response_id:
+        analytics = (
+            db.query(ChatResponseAnalytics)
+            .filter(
+                ChatResponseAnalytics.response_id == payload.response_id,
+                ChatResponseAnalytics.user_id == current_user.id,
+            )
+            .first()
+        )
+        if not analytics:
+            raise HTTPException(status_code=404, detail="Chat response not found")
+
+    feedback_type = feedback_type_from_payload(payload)
+    sentiment = feedback_sentiment(feedback_type, payload.rating)
+    increment_metric("feedback_total")
+    FEEDBACK_COUNTS[sentiment] += 1
+    if feedback_type == "not_helpful":
+        increment_metric("feedback_not_helpful")
+        FEEDBACK_COUNTS["not_helpful"] += 1
+
+    feedback = ResponseFeedback(
+        response_id=payload.response_id,
+        user_id=current_user.id,
+        session_id=analytics.session_id if analytics else None,
+        feedback_type=feedback_type,
+        helpful=payload.helpful,
+        rating=payload.rating,
+        context=payload.context,
+        comment=payload.comment,
+    )
+    db.add(feedback)
+
+    if analytics and feedback_needs_review(feedback_type, sentiment):
+        if not analytics.low_conversion:
+            increment_metric("low_conversion_searches")
+        analytics.low_conversion = True
+
+    db.commit()
+
+    log_event(
+        "feedback.submitted",
+        request,
+        user_id=current_user.id,
+        response_id=payload.response_id,
+        feedback_type=feedback_type,
+        sentiment=sentiment,
+        rating=payload.rating,
+        context=payload.context,
+    )
+    return MessageResponse(message="Feedback received")
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(
+    request: Request,
+    req: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session_id = req.session_id or f"session_{current_user.id}"
+
+    chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+
+    if not chat_session:
+        chat_session = ChatSession(session_id=session_id, user_id=str(current_user.id))
+        db.add(chat_session)
+        db.commit()
+
+    db.add(
+        ChatMessage(
+            session_id=session_id, user_id=str(current_user.id), role="user", content=req.message
+        )
+    )
+    db.commit()
+
+    previous_filters = load_json_object(chat_session.last_filters)
+    filters = merge_filter_state(previous_filters, req.message)
+    applied_filters = compact_filters(filters)
+    products, result_count = filter_products(db, filters)
+    fallback_reply = build_reply(req.message, result_count, filters)
+    reply = fallback_reply
+    llm_source = "rules"
+    llm_tool_calls: list[str] = []
+    suggestions = get_buying_suggestions(req.message)
+    suggested_next_questions = build_suggested_next_questions(filters, result_count)
+    chat_session.last_filters = dump_json_object(applied_filters)
+    update_session_preferences(chat_session, filters)
+    increment_metric("total_chats")
+    if result_count == 0:
+        increment_metric("no_result_searches")
+    lead_intent = detect_lead_intent(req.message.lower(), filters)
+    handoff = None
+    lead_captured = False
+    order_support_request = None
+    if should_offer_handoff(req.message.lower(), lead_intent):
+        lead = create_chat_lead(
+            db,
+            current_user,
+            session_id,
+            req.message,
+            lead_intent or "human_support",
+        )
+        handoff = build_handoff_info(lead.intent, lead.id)
+        lead_captured = True
+
+    response_id = str(uuid4())
+    chat_intent = detect_chat_intent(req.message, filters, lead_intent)
+    if chat_intent in {"order_status", "return_refund", "complaint"}:
+        products = []
+        result_count = 0
+        order_support_request = create_chat_order_support_request(
+            db,
+            current_user,
+            req.message,
+        )
+        if order_support_request:
+            reply = build_order_support_reply(
+                order_support_request.order_reference,
+                order_support_request.request_type,
+            )
+            fallback_reply = reply
+            suggested_next_questions = [
+                "Book a support callback",
+                "Check delivery status",
+                "Request cancellation help",
+                "Start a return or refund request",
+            ]
+    if chat_intent not in {"order_status", "return_refund", "complaint"} and not lead_captured:
+        reply, llm_source, llm_tool_calls = try_llm_reply(
+            db,
+            current_user,
+            req.message,
+            products,
+            filters,
+            fallback_reply,
+        )
+    unmatched = is_unmatched_query(chat_intent, result_count, filters)
+    low_conversion = is_low_conversion_search(result_count, filters, lead_captured)
+    if unmatched:
+        increment_metric("unmatched_queries")
+    if low_conversion:
+        increment_metric("low_conversion_searches")
+
+    log_event(
+        "chat.request",
+        request=request,
+        response_id=response_id,
+        user_id=current_user.id,
+        session_id=session_id,
+        intent=chat_intent,
+        result_count=result_count,
+        no_results=result_count == 0,
+        unmatched=unmatched,
+        low_conversion=low_conversion,
+        lead_captured=lead_captured,
+        applied_filters=applied_filters,
+    )
+
+    db.add(
+        ChatMessage(
+            session_id=session_id, user_id=str(current_user.id), role="assistant", content=reply
+        )
+    )
+    record_chat_analytics(
+        db,
+        response_id=response_id,
+        user=current_user,
+        session_id=session_id,
+        user_message=req.message,
+        assistant_reply=reply,
+        intent=chat_intent,
+        applied_filters=applied_filters,
+        products=products,
+        result_count=result_count,
+        unmatched=unmatched,
+        low_conversion=low_conversion,
+        lead_captured=lead_captured,
+    )
+    db.commit()
+
+    tool_calls = []
+    if has_product_search_signal(filters) or result_count > 0:
+        tool_calls.append("catalog_search")
+    if lead_captured:
+        tool_calls.append("lead_capture")
+    if order_support_request:
+        tool_calls.append("order_support_capture")
+    tool_calls.extend(llm_tool_calls)
+    answer_source = answer_source_for_chat(chat_intent, result_count, lead_captured)
+    if not lead_captured and llm_source != "rules":
+        answer_source = llm_source
+    guardrails = guardrails_for_chat(req.message, chat_intent, unmatched)
+    if llm_tool_calls:
+        guardrails.append("llm-grounded-catalog")
+
+    return ChatResponse(
+        response_id=response_id,
+        reply=reply,
+        products=[ProductOut.model_validate(p) for p in products],
+        session_id=session_id,
+        suggestions=suggestions,
+        applied_filters=applied_filters,
+        result_count=result_count,
+        suggested_next_questions=suggested_next_questions,
+        intent=chat_intent,
+        confidence=chat_confidence(chat_intent, result_count, filters, unmatched),
+        answer_source=answer_source,
+        tool_calls=tool_calls,
+        guardrails=guardrails,
+        lead_captured=lead_captured,
+        handoff=handoff,
+    )
+
+
+@app.post("/forgot-password", response_model=MessageResponse)
+@limiter.limit("3/minute")
+def forgot_password(
+    request: Request, req: ForgotPasswordRequest, db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.email == req.email).first()
+
+    generic_response = MessageResponse(
+        message="If that email is registered, password reset instructions have been generated."
+    )
+
+    if not user:
+        return generic_response
+
+    raw_token = generate_password_reset_token()
+    token_hash = hash_reset_token(raw_token)
+
+    db.add(
+        PasswordResetToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            is_used=False,
+            expires_at=utc_now() + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES),
+        )
+    )
+    db.commit()
+
+    reset_link = url_with_token(FRONTEND_RESET_URL, raw_token)
+    send_password_reset_email(user.email, reset_link)
+
+    return generic_response
+
+
+@app.get("/reset-password", response_class=HTMLResponse)
+def reset_password_page(token: str = Query(...)):
+    return reset_password_form_html(token)
+
+
+@app.post("/reset-password", response_model=MessageResponse)
+@limiter.limit("5/minute")
+def reset_password(
+    request: Request, req: ResetPasswordRequest, db: Session = Depends(get_db)
+):
+    return reset_password_with_token(db, req.token, req.new_password, request)
+
+
+@app.post("/reset-password/form", response_class=HTMLResponse, include_in_schema=False)
+@limiter.limit("5/minute")
+def reset_password_form_submit(
+    request: Request,
+    token: str = Form(...),
+    new_password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        reset_password_with_token(db, token, new_password, request)
+    except HTTPException as exc:
+        return auth_flow_html("Password Reset Failed", str(exc.detail), exc.status_code)
+
+    return auth_flow_html(
+        "Password Reset Successful",
+        "Your password has been updated. You can return to the Sona Jewellery app and sign in.",
+    )
+
+
+@app.post("/verify-email", response_model=MessageResponse)
+def verify_email(
+    request: Request,
+    req: VerifyEmailRequest,
+    db: Session = Depends(get_db),
+):
+    return verify_email_token(db, req.token, request)
+
+
+@app.get("/verify-email", response_class=HTMLResponse)
+def verify_email_click(
+    request: Request,
+    token: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        verify_email_token(db, token, request)
+    except HTTPException as exc:
+        return auth_flow_html("Email Verification Failed", str(exc.detail), exc.status_code)
+
+    return auth_flow_html(
+        "Email Verified",
+        "Your email is verified. You can return to the Sona Jewellery app and sign in.",
+    )
+
+
+@app.post("/resend-verification", response_model=MessageResponse)
+@limiter.limit("3/minute")
+def resend_verification(
+    request: Request, req: ResendVerificationRequest, db: Session = Depends(get_db)
+):
+    generic_response = MessageResponse(
+        message="If the email exists and is not yet verified, a verification email has been generated."
+    )
+
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user or user.is_verified:
+        return generic_response
+
+    latest_token = latest_verification_token(db, user.id)
+    if latest_token and latest_token.created_at:
+        cooldown_started_at = utc_now() - timedelta(seconds=RESEND_VERIFICATION_COOLDOWN_SECONDS)
+        if latest_token.created_at >= cooldown_started_at:
+            return generic_response
+
+    db.query(EmailVerificationToken).filter(
+        EmailVerificationToken.user_id == user.id, EmailVerificationToken.is_used == False
+    ).update({"is_used": True})
+
+    raw_token = generate_opaque_token()
+    token_hash = hash_opaque_token(raw_token)
+
+    db.add(
+        EmailVerificationToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            is_used=False,
+            expires_at=utc_now() + timedelta(minutes=EMAIL_VERIFICATION_EXPIRE_MINUTES),
+        )
+    )
+    db.commit()
+
+    verify_link = url_with_token(FRONTEND_VERIFY_URL, raw_token)
+    send_verification_email(user.email, verify_link)
+
+    return generic_response
+
+
+def create_token(data: dict, expires_delta: timedelta, token_type: str):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + expires_delta
+    to_encode.update({"exp": expire, "type": token_type})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    to_encode.update(
+        {
+            "exp": expire,
+            "type": "access",
+        }
+    )
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_refresh_token(
+    data: dict,
+    expires_delta: timedelta | None = None,
+    jti: str | None = None,
+    family_id: str | None = None,
+):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    to_encode.update(
+        {
+            "exp": expire,
+            "type": "refresh",
+            "jti": jti or str(uuid4()),
+            "family_id": family_id or str(uuid4()),
+        }
+    )
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def generate_password_reset_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def generate_opaque_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def hash_opaque_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+install_commerce_routes(app, get_db, get_current_user)
+install_catalogue_admin(app, get_db, require_permission)
+install_review_api(app, get_db, get_current_user, require_permission)
+install_notification_api(app, get_db, get_current_user, require_permission, log_admin_action)
+push_devices.install(app, get_db, get_current_user, limiter)

@@ -1,0 +1,536 @@
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+OPENAI_DEFAULT_MODEL = "gpt-6-astra"
+
+
+def load_env_file(path: str = ".env") -> None:
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def get_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def get_str(name: str, default: str | None = None) -> str | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value
+
+
+def get_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return int(value)
+
+
+def get_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
+def get_list(name: str, default: list[str]) -> list[str]:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def origin_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def normalize_cors_origins(
+    env: str,
+    configured_origins: list[str],
+    frontend_urls: list[str],
+) -> list[str]:
+    if env not in {"staging", "production"}:
+        return configured_origins
+
+    if "*" not in configured_origins:
+        return configured_origins
+
+    derived_origins = []
+    for frontend_url in frontend_urls:
+        origin = origin_from_url(frontend_url)
+        if origin and "localhost" not in origin and "127.0.0.1" not in origin:
+            derived_origins.append(origin)
+
+    return list(dict.fromkeys(derived_origins))
+
+
+def normalize_database_url(database_url: str) -> str:
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return database_url
+
+
+def current_environment() -> str:
+    if get_bool("TESTING", False):
+        return "test"
+    return (os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "local").lower()
+
+
+@dataclass(frozen=True)
+class Settings:
+    app_env: str
+    app_debug: bool
+    database_url: str
+    run_migrations_on_startup: bool
+    secret_key: str
+    algorithm: str
+    access_token_expire_minutes: int
+    refresh_token_expire_days: int
+    password_reset_expire_minutes: int
+    email_verification_expire_minutes: int
+    frontend_reset_url: str
+    frontend_verify_url: str
+    cors_origins: list[str]
+    cors_allow_credentials: bool
+    https_redirect: bool
+    trusted_hosts: list[str]
+    proxy_headers: bool
+    forwarded_allow_ips: str
+    host: str
+    port: int
+    web_concurrency: int
+    uvicorn_log_level: str
+    email_provider: str
+    email_host: str | None
+    email_port: int
+    email_username: str | None
+    email_password: str | None
+    email_from: str
+    email_from_name: str
+    email_use_tls: bool
+    email_use_ssl: bool
+    email_timeout_seconds: int
+    resend_api_key: str | None
+    resend_api_url: str
+    brevo_api_key: str | None
+    brevo_api_url: str
+    password_min_length: int
+    login_failure_limit: int
+    login_lockout_minutes: int
+    resend_verification_cooldown_seconds: int
+    max_request_body_bytes: int
+    oms_base_url: str | None
+    oms_api_key: str | None
+    oms_timeout_seconds: int
+    oms_enabled: bool
+    razorpay_key_id: str | None
+    razorpay_key_secret: str | None
+    razorpay_webhook_secret: str | None
+    llm_enabled: bool
+    llm_base_url: str | None
+    llm_api_key: str | None
+    llm_model: str
+    llm_timeout_seconds: int
+    llm_max_tokens: int
+    firebase_project_id: str | None
+    firebase_auth_enabled: bool
+    firebase_require_email_verified: bool
+    firebase_certs_url: str
+    firebase_service_account_json: str | None
+    firebase_service_account_path: str | None
+    firestore_commerce_enabled: bool
+    firestore_products_collection: str
+    firestore_users_collection: str
+    firestore_orders_collection: str
+    firestore_payment_attempts_collection: str
+    firestore_coupons_collection: str
+    firestore_gift_vouchers_collection: str
+    firestore_gold_rates_collection: str
+    firestore_gold_rates_document: str
+    reward_point_value_rupees: float
+    purchase_reward_rupees_per_point: int
+    referral_reward_points: int
+    sms_otp_enabled: bool
+    sms_provider: str
+    sms_timeout_seconds: int
+    sms_http_user_agent: str
+    otp_expire_minutes: int
+    otp_resend_cooldown_seconds: int
+    otp_max_attempts: int
+    phone_auth_pepper: str
+    onhandsms_api_url: str | None
+    onhandsms_api_key: str | None
+    onhandsms_username: str | None
+    onhandsms_password: str | None
+    onhandsms_sender_id: str | None
+    onhandsms_route: str | None
+    onhandsms_template_id: str | None
+    onhandsms_method: str
+    onhandsms_payload_format: str
+    onhandsms_payload_template: str | None
+    onhandsms_message_template: str
+    monitoring_webhook_url: str | None
+    monitoring_webhook_timeout_seconds: int
+    sentry_dsn: str | None
+    sentry_release: str | None
+    sentry_traces_sample_rate: float
+    sentry_profiles_sample_rate: float
+    sentry_send_default_pii: bool
+    alert_error_threshold: int
+    admin_bootstrap_enabled: bool
+    admin_bootstrap_email: str | None
+    admin_bootstrap_username: str | None
+    admin_bootstrap_password: str | None
+
+    @property
+    def is_testing(self) -> bool:
+        return self.app_env == "test" or get_bool("TESTING", False)
+
+
+ENVIRONMENT_DEFAULTS: dict[str, dict[str, Any]] = {
+    "local": {
+        "APP_DEBUG": True,
+        "DATABASE_URL": "sqlite:///./jewellery.db",
+        "RUN_MIGRATIONS_ON_STARTUP": True,
+        "CORS_ORIGINS": ["*"],
+        "CORS_ALLOW_CREDENTIALS": True,
+        "HTTPS_REDIRECT": False,
+        "TRUSTED_HOSTS": ["*"],
+    },
+    "test": {
+        "APP_DEBUG": False,
+        "DATABASE_URL": "sqlite://",
+        "RUN_MIGRATIONS_ON_STARTUP": False,
+        "CORS_ORIGINS": ["*"],
+        "CORS_ALLOW_CREDENTIALS": True,
+        "HTTPS_REDIRECT": False,
+        "TRUSTED_HOSTS": ["*"],
+    },
+    "staging": {
+        "APP_DEBUG": False,
+        "DATABASE_URL": "sqlite:///./jewellery-staging.db",
+        "RUN_MIGRATIONS_ON_STARTUP": True,
+        "CORS_ORIGINS": [],
+        "CORS_ALLOW_CREDENTIALS": True,
+        "HTTPS_REDIRECT": True,
+        "TRUSTED_HOSTS": [],
+    },
+    "production": {
+        "APP_DEBUG": False,
+        "DATABASE_URL": "sqlite:///./jewellery.db",
+        "RUN_MIGRATIONS_ON_STARTUP": True,
+        "CORS_ORIGINS": [],
+        "CORS_ALLOW_CREDENTIALS": True,
+        "HTTPS_REDIRECT": True,
+        "TRUSTED_HOSTS": [],
+    },
+}
+
+
+def build_settings() -> Settings:
+    env = current_environment()
+    defaults = ENVIRONMENT_DEFAULTS.get(env, ENVIRONMENT_DEFAULTS["local"])
+
+    database_url = normalize_database_url(get_str("DATABASE_URL", defaults["DATABASE_URL"]))
+    email_username = get_str("EMAIL_USERNAME")
+    llm_api_key = get_str("LLM_API_KEY") or get_str("OPENAI_API_KEY")
+    llm_base_url = (
+        get_str("LLM_BASE_URL")
+        or get_str("OPENAI_BASE_URL")
+        or (OPENAI_DEFAULT_BASE_URL if llm_api_key else None)
+    )
+    llm_model = get_str("LLM_MODEL") or get_str("OPENAI_MODEL", OPENAI_DEFAULT_MODEL)
+    firebase_project_id = get_str("FIREBASE_PROJECT_ID")
+    firebase_service_account_json = get_str("FIREBASE_SERVICE_ACCOUNT_JSON")
+    firebase_service_account_path = get_str("FIREBASE_SERVICE_ACCOUNT_PATH")
+    frontend_reset_url = get_str("FRONTEND_RESET_URL", "http://localhost:3000/reset-password")
+    frontend_verify_url = get_str("FRONTEND_VERIFY_URL", "http://localhost:3000/verify-email")
+    cors_origins = normalize_cors_origins(
+        env,
+        get_list("CORS_ORIGINS", defaults["CORS_ORIGINS"]),
+        [frontend_reset_url, frontend_verify_url],
+    )
+
+    return Settings(
+        app_env=env,
+        app_debug=get_bool("APP_DEBUG", defaults["APP_DEBUG"]),
+        database_url=database_url,
+        run_migrations_on_startup=get_bool(
+            "RUN_MIGRATIONS_ON_STARTUP",
+            defaults["RUN_MIGRATIONS_ON_STARTUP"],
+        ),
+        secret_key=get_str("SECRET_KEY", "change-this-to-a-long-random-secret"),
+        algorithm=get_str("ALGORITHM", "HS256"),
+        access_token_expire_minutes=get_int("ACCESS_TOKEN_EXPIRE_MINUTES", 30),
+        refresh_token_expire_days=get_int("REFRESH_TOKEN_EXPIRE_DAYS", 7),
+        password_reset_expire_minutes=get_int("PASSWORD_RESET_EXPIRE_MINUTES", 15),
+        email_verification_expire_minutes=get_int("EMAIL_VERIFICATION_EXPIRE_MINUTES", 30),
+        frontend_reset_url=frontend_reset_url,
+        frontend_verify_url=frontend_verify_url,
+        cors_origins=cors_origins,
+        cors_allow_credentials=get_bool(
+            "CORS_ALLOW_CREDENTIALS",
+            defaults["CORS_ALLOW_CREDENTIALS"],
+        ),
+        https_redirect=get_bool("HTTPS_REDIRECT", defaults["HTTPS_REDIRECT"]),
+        trusted_hosts=get_list("TRUSTED_HOSTS", defaults["TRUSTED_HOSTS"]),
+        proxy_headers=get_bool("PROXY_HEADERS", True),
+        forwarded_allow_ips=get_str("FORWARDED_ALLOW_IPS", "*"),
+        host=get_str("HOST", "0.0.0.0"),
+        port=get_int("PORT", 7860),
+        web_concurrency=max(get_int("WEB_CONCURRENCY", 1), 1),
+        uvicorn_log_level=get_str("UVICORN_LOG_LEVEL", "info"),
+        email_provider=(get_str("EMAIL_PROVIDER", "smtp") or "smtp").lower(),
+        email_host=get_str("EMAIL_HOST"),
+        email_port=get_int("EMAIL_PORT", 587),
+        email_username=email_username,
+        email_password=get_str("EMAIL_PASSWORD"),
+        email_from=get_str("EMAIL_FROM", email_username or "no-reply@localhost"),
+        email_from_name=get_str("EMAIL_FROM_NAME", "Jewellery Chat"),
+        email_use_tls=get_bool("EMAIL_USE_TLS", True),
+        email_use_ssl=get_bool("EMAIL_USE_SSL", False),
+        email_timeout_seconds=get_int("EMAIL_TIMEOUT_SECONDS", 10),
+        resend_api_key=get_str("RESEND_API_KEY"),
+        resend_api_url=get_str("RESEND_API_URL", "https://api.resend.com/emails"),
+        brevo_api_key=get_str("BREVO_API_KEY"),
+        brevo_api_url=get_str("BREVO_API_URL", "https://api.brevo.com/v3/smtp/email"),
+        password_min_length=get_int("PASSWORD_MIN_LENGTH", 8),
+        login_failure_limit=get_int("LOGIN_FAILURE_LIMIT", 5),
+        login_lockout_minutes=get_int("LOGIN_LOCKOUT_MINUTES", 15),
+        resend_verification_cooldown_seconds=get_int("RESEND_VERIFICATION_COOLDOWN_SECONDS", 60),
+        max_request_body_bytes=get_int("MAX_REQUEST_BODY_BYTES", 1_048_576),
+        oms_base_url=get_str("OMS_BASE_URL"),
+        oms_api_key=get_str("OMS_API_KEY"),
+        oms_timeout_seconds=get_int("OMS_TIMEOUT_SECONDS", 10),
+        oms_enabled=get_bool("OMS_ENABLED", False),
+        razorpay_key_id=get_str("RAZORPAY_KEY_ID"),
+        razorpay_key_secret=get_str("RAZORPAY_KEY_SECRET"),
+        razorpay_webhook_secret=get_str("RAZORPAY_WEBHOOK_SECRET"),
+        llm_enabled=get_bool("LLM_ENABLED", bool(llm_api_key)),
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_model=llm_model,
+        llm_timeout_seconds=get_int("LLM_TIMEOUT_SECONDS", 20),
+        llm_max_tokens=get_int("LLM_MAX_TOKENS", 350),
+        firebase_project_id=firebase_project_id,
+        firebase_auth_enabled=get_bool("FIREBASE_AUTH_ENABLED", bool(firebase_project_id)),
+        firebase_require_email_verified=get_bool("FIREBASE_REQUIRE_EMAIL_VERIFIED", False),
+        firebase_certs_url=get_str(
+            "FIREBASE_CERTS_URL",
+            "https://www.googleapis.com/robot/v1/metadata/x509/"
+            "securetoken@system.gserviceaccount.com",
+        ),
+        firebase_service_account_json=firebase_service_account_json,
+        firebase_service_account_path=firebase_service_account_path,
+        firestore_commerce_enabled=get_bool(
+            "FIRESTORE_COMMERCE_ENABLED",
+            bool(
+                firebase_project_id
+                and (
+                    firebase_service_account_json
+                    or firebase_service_account_path
+                    or get_str("GOOGLE_APPLICATION_CREDENTIALS")
+                )
+            ),
+        ),
+        firestore_products_collection=get_str("FIRESTORE_PRODUCTS_COLLECTION", "products"),
+        firestore_users_collection=get_str("FIRESTORE_USERS_COLLECTION", "users"),
+        firestore_orders_collection=get_str("FIRESTORE_ORDERS_COLLECTION", "orders"),
+        firestore_payment_attempts_collection=get_str(
+            "FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION",
+            "payment_attempts",
+        ),
+        firestore_coupons_collection=get_str("FIRESTORE_COUPONS_COLLECTION", "coupons"),
+        firestore_gift_vouchers_collection=get_str(
+            "FIRESTORE_GIFT_VOUCHERS_COLLECTION",
+            "gift_vouchers",
+        ),
+        firestore_gold_rates_collection=get_str("FIRESTORE_GOLD_RATES_COLLECTION", "gold_rates"),
+        firestore_gold_rates_document=get_str("FIRESTORE_GOLD_RATES_DOCUMENT", "today"),
+        reward_point_value_rupees=get_float("REWARD_POINT_VALUE_RUPEES", 1.0),
+        purchase_reward_rupees_per_point=max(
+            get_int("PURCHASE_REWARD_RUPEES_PER_POINT", 100),
+            1,
+        ),
+        referral_reward_points=max(get_int("REFERRAL_REWARD_POINTS", 0), 0),
+        sms_otp_enabled=get_bool("SMS_OTP_ENABLED", False),
+        sms_provider=(get_str("SMS_PROVIDER", "onhand") or "onhand").lower(),
+        sms_timeout_seconds=get_int("SMS_TIMEOUT_SECONDS", 10),
+        sms_http_user_agent=get_str(
+            "SMS_HTTP_USER_AGENT",
+            "SonaJewelleryChatbot/1.0",
+        )
+        or "SonaJewelleryChatbot/1.0",
+        otp_expire_minutes=get_int("OTP_EXPIRE_MINUTES", 5),
+        otp_resend_cooldown_seconds=get_int("OTP_RESEND_COOLDOWN_SECONDS", 60),
+        otp_max_attempts=get_int("OTP_MAX_ATTEMPTS", 5),
+        phone_auth_pepper=get_str("PHONE_AUTH_PEPPER", get_str("SECRET_KEY", "")) or "",
+        onhandsms_api_url=get_str("ONHANDSMS_API_URL"),
+        onhandsms_api_key=get_str("ONHANDSMS_API_KEY"),
+        onhandsms_username=get_str("ONHANDSMS_USERNAME"),
+        onhandsms_password=get_str("ONHANDSMS_PASSWORD"),
+        onhandsms_sender_id=get_str("ONHANDSMS_SENDER_ID"),
+        onhandsms_route=get_str("ONHANDSMS_ROUTE", "transactional"),
+        onhandsms_template_id=get_str("ONHANDSMS_TEMPLATE_ID"),
+        onhandsms_method=(get_str("ONHANDSMS_METHOD", "POST") or "POST").upper(),
+        onhandsms_payload_format=(get_str("ONHANDSMS_PAYLOAD_FORMAT", "json") or "json").lower(),
+        onhandsms_payload_template=get_str("ONHANDSMS_PAYLOAD_TEMPLATE"),
+        onhandsms_message_template=get_str(
+            "ONHANDSMS_MESSAGE_TEMPLATE",
+            "Your Sona Jewellery login OTP is {otp}. It expires in {minutes} minutes.",
+        ),
+        monitoring_webhook_url=get_str("MONITORING_WEBHOOK_URL"),
+        monitoring_webhook_timeout_seconds=get_int("MONITORING_WEBHOOK_TIMEOUT_SECONDS", 5),
+        sentry_dsn=get_str("SENTRY_DSN"),
+        sentry_release=get_str("SENTRY_RELEASE"),
+        sentry_traces_sample_rate=get_float("SENTRY_TRACES_SAMPLE_RATE", 0.05),
+        sentry_profiles_sample_rate=get_float("SENTRY_PROFILES_SAMPLE_RATE", 0.0),
+        sentry_send_default_pii=get_bool("SENTRY_SEND_DEFAULT_PII", False),
+        alert_error_threshold=get_int("ALERT_ERROR_THRESHOLD", 5),
+        admin_bootstrap_enabled=get_bool("ADMIN_BOOTSTRAP_ENABLED", False),
+        admin_bootstrap_email=get_str("ADMIN_BOOTSTRAP_EMAIL"),
+        admin_bootstrap_username=get_str("ADMIN_BOOTSTRAP_USERNAME"),
+        admin_bootstrap_password=get_str("ADMIN_BOOTSTRAP_PASSWORD"),
+    )
+
+
+load_env_file()
+settings = build_settings()
+
+APP_ENV = settings.app_env
+APP_DEBUG = settings.app_debug
+DATABASE_URL = settings.database_url
+RUN_MIGRATIONS_ON_STARTUP = settings.run_migrations_on_startup
+
+SECRET_KEY = settings.secret_key
+ALGORITHM = settings.algorithm
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
+REFRESH_TOKEN_EXPIRE_DAYS = settings.refresh_token_expire_days
+PASSWORD_RESET_EXPIRE_MINUTES = settings.password_reset_expire_minutes
+EMAIL_VERIFICATION_EXPIRE_MINUTES = settings.email_verification_expire_minutes
+
+FRONTEND_RESET_URL = settings.frontend_reset_url
+FRONTEND_VERIFY_URL = settings.frontend_verify_url
+CORS_ORIGINS = settings.cors_origins
+CORS_ALLOW_CREDENTIALS = settings.cors_allow_credentials
+HTTPS_REDIRECT = settings.https_redirect
+TRUSTED_HOSTS = settings.trusted_hosts
+PROXY_HEADERS = settings.proxy_headers
+FORWARDED_ALLOW_IPS = settings.forwarded_allow_ips
+HOST = settings.host
+PORT = settings.port
+WEB_CONCURRENCY = settings.web_concurrency
+UVICORN_LOG_LEVEL = settings.uvicorn_log_level
+
+EMAIL_HOST = settings.email_host
+EMAIL_PROVIDER = settings.email_provider
+EMAIL_PORT = settings.email_port
+EMAIL_USERNAME = settings.email_username
+EMAIL_PASSWORD = settings.email_password
+EMAIL_FROM = settings.email_from
+EMAIL_FROM_NAME = settings.email_from_name
+EMAIL_USE_TLS = settings.email_use_tls
+EMAIL_USE_SSL = settings.email_use_ssl
+EMAIL_TIMEOUT_SECONDS = settings.email_timeout_seconds
+RESEND_API_KEY = settings.resend_api_key
+RESEND_API_URL = settings.resend_api_url
+BREVO_API_KEY = settings.brevo_api_key
+BREVO_API_URL = settings.brevo_api_url
+PASSWORD_MIN_LENGTH = settings.password_min_length
+LOGIN_FAILURE_LIMIT = settings.login_failure_limit
+LOGIN_LOCKOUT_MINUTES = settings.login_lockout_minutes
+RESEND_VERIFICATION_COOLDOWN_SECONDS = settings.resend_verification_cooldown_seconds
+MAX_REQUEST_BODY_BYTES = settings.max_request_body_bytes
+OMS_BASE_URL = settings.oms_base_url
+OMS_API_KEY = settings.oms_api_key
+OMS_TIMEOUT_SECONDS = settings.oms_timeout_seconds
+OMS_ENABLED = settings.oms_enabled
+RAZORPAY_KEY_ID = settings.razorpay_key_id
+RAZORPAY_KEY_SECRET = settings.razorpay_key_secret
+RAZORPAY_WEBHOOK_SECRET = settings.razorpay_webhook_secret
+LLM_ENABLED = settings.llm_enabled
+LLM_BASE_URL = settings.llm_base_url
+LLM_API_KEY = settings.llm_api_key
+LLM_MODEL = settings.llm_model
+LLM_TIMEOUT_SECONDS = settings.llm_timeout_seconds
+LLM_MAX_TOKENS = settings.llm_max_tokens
+FIREBASE_PROJECT_ID = settings.firebase_project_id
+FIREBASE_AUTH_ENABLED = settings.firebase_auth_enabled
+FIREBASE_REQUIRE_EMAIL_VERIFIED = settings.firebase_require_email_verified
+FIREBASE_CERTS_URL = settings.firebase_certs_url
+FIREBASE_SERVICE_ACCOUNT_JSON = settings.firebase_service_account_json
+FIREBASE_SERVICE_ACCOUNT_PATH = settings.firebase_service_account_path
+FIRESTORE_COMMERCE_ENABLED = settings.firestore_commerce_enabled
+FIRESTORE_PRODUCTS_COLLECTION = settings.firestore_products_collection
+FIRESTORE_USERS_COLLECTION = settings.firestore_users_collection
+FIRESTORE_ORDERS_COLLECTION = settings.firestore_orders_collection
+FIRESTORE_PAYMENT_ATTEMPTS_COLLECTION = settings.firestore_payment_attempts_collection
+FIRESTORE_COUPONS_COLLECTION = settings.firestore_coupons_collection
+FIRESTORE_GIFT_VOUCHERS_COLLECTION = settings.firestore_gift_vouchers_collection
+FIRESTORE_GOLD_RATES_COLLECTION = settings.firestore_gold_rates_collection
+FIRESTORE_GOLD_RATES_DOCUMENT = settings.firestore_gold_rates_document
+REWARD_POINT_VALUE_RUPEES = settings.reward_point_value_rupees
+PURCHASE_REWARD_RUPEES_PER_POINT = settings.purchase_reward_rupees_per_point
+REFERRAL_REWARD_POINTS = settings.referral_reward_points
+SMS_OTP_ENABLED = settings.sms_otp_enabled
+SMS_PROVIDER = settings.sms_provider
+SMS_TIMEOUT_SECONDS = settings.sms_timeout_seconds
+SMS_HTTP_USER_AGENT = settings.sms_http_user_agent
+OTP_EXPIRE_MINUTES = settings.otp_expire_minutes
+OTP_RESEND_COOLDOWN_SECONDS = settings.otp_resend_cooldown_seconds
+OTP_MAX_ATTEMPTS = settings.otp_max_attempts
+PHONE_AUTH_PEPPER = settings.phone_auth_pepper
+ONHANDSMS_API_URL = settings.onhandsms_api_url
+ONHANDSMS_API_KEY = settings.onhandsms_api_key
+ONHANDSMS_USERNAME = settings.onhandsms_username
+ONHANDSMS_PASSWORD = settings.onhandsms_password
+ONHANDSMS_SENDER_ID = settings.onhandsms_sender_id
+ONHANDSMS_ROUTE = settings.onhandsms_route
+ONHANDSMS_TEMPLATE_ID = settings.onhandsms_template_id
+ONHANDSMS_METHOD = settings.onhandsms_method
+ONHANDSMS_PAYLOAD_FORMAT = settings.onhandsms_payload_format
+ONHANDSMS_PAYLOAD_TEMPLATE = settings.onhandsms_payload_template
+ONHANDSMS_MESSAGE_TEMPLATE = settings.onhandsms_message_template
+MONITORING_WEBHOOK_URL = settings.monitoring_webhook_url
+MONITORING_WEBHOOK_TIMEOUT_SECONDS = settings.monitoring_webhook_timeout_seconds
+SENTRY_DSN = settings.sentry_dsn
+SENTRY_RELEASE = settings.sentry_release
+SENTRY_TRACES_SAMPLE_RATE = settings.sentry_traces_sample_rate
+SENTRY_PROFILES_SAMPLE_RATE = settings.sentry_profiles_sample_rate
+SENTRY_SEND_DEFAULT_PII = settings.sentry_send_default_pii
+ALERT_ERROR_THRESHOLD = settings.alert_error_threshold
+ADMIN_BOOTSTRAP_ENABLED = settings.admin_bootstrap_enabled
+ADMIN_BOOTSTRAP_EMAIL = settings.admin_bootstrap_email
+ADMIN_BOOTSTRAP_USERNAME = settings.admin_bootstrap_username
+ADMIN_BOOTSTRAP_PASSWORD = settings.admin_bootstrap_password
+
+
+def is_testing() -> bool:
+    return settings.is_testing

@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches-ignore:
+      - codex/runtime-recovery-validation-20261117
   pull_request:
 
 permissions:

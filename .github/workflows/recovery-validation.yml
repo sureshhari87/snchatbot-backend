@@ -1,0 +1,104 @@
+name: Recovery Linux Validation
+
+on:
+  push:
+    branches:
+      - codex/runtime-recovery-validation-20261117
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-linux:
+    name: Pinned Source Linux Python 3.11
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout test branch without persistent credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify isolated source manifest
+        run: |
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root = Path('recovery_validation_20261117')
+          source = (root / 'source').resolve()
+          manifest = json.loads((root / 'SOURCE-MANIFEST.json').read_text())
+          assert manifest['source_commit'] == '23f1352ebcecdf21df18ab03b5aa5363862be045'
+          assert len(manifest['files']) == 123
+          for entry in manifest['files']:
+              path = (source / entry['path']).resolve()
+              assert path.is_relative_to(source)
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == entry['sha256']
+          assert not list(source.glob('.env*'))
+          assert not list(source.rglob('*.pem'))
+          assert not list(source.rglob('*.db'))
+          print('Pinned source checksums verified; no settings, keys or databases in context')
+          PY
+
+      - name: Build exact live Dockerfile with the three-file patch
+        run: docker build --pull=false -t sona-recovery-validation:ci recovery_validation_20261117/source
+
+      - name: Verify Linux auth and encrypted recovery with synthetic settings
+        run: |
+          mkdir -p validation-reports
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 128 --memory 768m \
+            --tmpfs /tmp:rw,nosuid,noexec,size=64m,mode=1777 \
+            -v "${PWD}/recovery_validation_20261117:/validation:ro" \
+            -e APP_ENV=test -e TESTING=1 -e DATABASE_URL=sqlite:// \
+            -e SECRET_KEY=synthetic-test-pinned-review-only-not-a-real-secret \
+            -e PHONE_AUTH_PEPPER=synthetic-test-pinned-review-only-not-a-real-secret \
+            -e RUN_MIGRATIONS_ON_STARTUP=0 -e RUN_MIGRATIONS_BEFORE_START=0 \
+            -e ADMIN_BOOTSTRAP_ENABLED=0 -e RECOVERY_EXPORT_ENABLED=0 \
+            -e RECOVERY_VALIDATION_SOURCE=/app -e RECOVERY_VALIDATION_REQUIRE_LINUX_311=1 \
+            --entrypoint python sona-recovery-validation:ci \
+            -I -B /validation/check_pinned_recovery.py > validation-reports/linux-compatibility.json
+
+      - name: Verify normal ASGI startup without recovery or migrations
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 128 --memory 768m \
+            --tmpfs /tmp:rw,nosuid,noexec,size=64m,mode=1777 \
+            -v "${PWD}/recovery_validation_20261117:/validation:ro" \
+            -e APP_ENV=test -e TESTING=1 -e APP_MODULE=main:app \
+            -e DATABASE_URL=sqlite:////tmp/normal-startup.sqlite \
+            -e SECRET_KEY=synthetic-test-pinned-review-only-not-a-real-secret \
+            -e RUN_MIGRATIONS_ON_STARTUP=0 -e RUN_MIGRATIONS_BEFORE_START=0 \
+            -e ADMIN_BOOTSTRAP_ENABLED=0 -e RECOVERY_EXPORT_ENABLED=0 \
+            -e PROXY_HEADERS=0 -e HOST=127.0.0.1 -e PORT=7860 \
+            --entrypoint python sona-recovery-validation:ci \
+            -I -B /validation/check_container_startup.py > validation-reports/normal-startup.json
+
+      - name: Publish nonsecret validation summary
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path('validation-reports')
+          compatibility = json.loads((root / 'linux-compatibility.json').read_text())
+          startup = json.loads((root / 'normal-startup.json').read_text())
+          assert compatibility['linux_python_311_confirmed'] is True
+          assert compatibility['checks_passed'] == 25
+          assert startup['readiness_status'] == 200
+          assert startup['recovery_export_status'] == 404
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('## Recovery Validation\n')
+              summary.write('- Pinned live source plus three recovery files built on Linux/Python 3.11.\n')
+              summary.write('- 25 synthetic auth/encryption checks passed.\n')
+              summary.write('- Normal ASGI health/readiness passed; recovery route remains absent.\n')
+              summary.write('- No production secrets, migrations, deployments or external runtime calls.\n')
+          PY
+
+      - name: Upload synthetic JSON evidence only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-linux-validation-${{ github.sha }}
+          path: validation-reports/*.json
+          if-no-files-found: error
+          retention-days: 14
