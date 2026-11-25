@@ -5200,6 +5200,14 @@ def find_order_by_razorpay_ids(
 
 
 def razorpay_payment_status(event_name: str, payment: dict[str, Any]) -> str | None:
+    if event_name.startswith("refund."):
+        return {
+            "refund.processed": "refunded",
+            "refund.failed": "refund_failed",
+            "refund.created": "refund_pending",
+        }.get(event_name)
+    if event_name.startswith("payment.dispute."):
+        return None
     payment_state = str(payment.get("status") or "").lower()
     if event_name == "payment.captured" or payment_state == "captured":
         return "verified"
@@ -5207,12 +5215,6 @@ def razorpay_payment_status(event_name: str, payment: dict[str, Any]) -> str | N
         return "authorized"
     if event_name == "payment.failed" or payment_state == "failed":
         return "failed"
-    if event_name == "refund.processed":
-        return "refunded"
-    if event_name == "refund.failed":
-        return "refund_failed"
-    if event_name == "refund.created":
-        return "refund_pending"
     return None
 
 
